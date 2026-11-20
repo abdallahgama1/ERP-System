@@ -284,7 +284,7 @@ export const customerSchema = z.object({
   taxNumber: z.string().trim().max(80).optional().default(""),
   currency: z.string().trim().max(10).optional().default("USD"),
   paymentTermsDays: z.number().int().min(0).max(365).optional().default(30),
-  creditLimit: z.number().min(0).optional().default(0),
+  creditLimit: z.number().min(0).nullable().optional().default(null),
   notes: z.string().trim().max(500).optional().default(""),
 });
 

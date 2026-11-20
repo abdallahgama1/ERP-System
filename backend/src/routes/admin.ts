@@ -19,6 +19,7 @@ import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
 import { requireAuth, requirePermission, requireRole } from "../middleware/auth.ts";
+import { runOverdueSweep } from "../services/overdue-sweep.service.ts";
 
 const createUserSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -527,5 +528,15 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
     eventBroadcaster.broadcast("permissions_updated");
     return { ok: true };
+  });
+
+  app.post("/api/admin/jobs/overdue-sweep", { preHandler: requireRole("admin") }, async (req) => {
+    const result = await runOverdueSweep(getDb(), req.authUser!, req.ip);
+    if (result.overdueInvoicesMarked > 0) eventBroadcaster.broadcast("sales_updated", { source: "overdue_sweep" });
+    if (result.overdueBillsMarked > 0) eventBroadcaster.broadcast("purchases_updated", { source: "overdue_sweep" });
+    if (result.overdueInvoicesMarked > 0 || result.overdueBillsMarked > 0) {
+      eventBroadcaster.broadcast("notifications_updated", { source: "overdue_sweep" });
+    }
+    return result;
   });
 }

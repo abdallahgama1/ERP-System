@@ -1,9 +1,17 @@
 import { desc, eq, inArray, sql } from "drizzle-orm";
 import type { z } from "zod";
-import { calculateLineAmounts, type billSchema, type paymentMadeSchema, type purchaseReturnSchema } from "@erp/shared";
 import {
+  calculateLineAmounts,
+  roundCurrency,
+  type billSchema,
+  type paymentMadeSchema,
+  type purchaseReturnSchema,
+} from "@erp/shared";
+import {
+  branchProducts,
   paymentMadeAllocations,
   paymentsMade,
+  purchaseReceiveLines,
   purchaseReturnLines,
   purchaseReturns,
   vendorBillLines,
@@ -12,9 +20,9 @@ import {
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
-import { postMappedJournal, reverseJournalEntriesForSource } from "./gl.service.ts";
+import { postMappedJournal, reverseJournalEntriesForSource, type MappedLineSpec } from "./gl.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
-import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
+import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
 function summarizeCostLines<T extends { quantity: number; unitCost: number; taxRate: number }>(lines: T[]) {
   let subtotal = 0;
@@ -115,6 +123,76 @@ export async function createVendorBill(
       }))
     );
 
+    let grniClearAmount = 0;
+    let invAdjustAmount = 0;
+    let ppvExpenseAmount = 0;
+
+    if (data.receiveId) {
+      const receiveLines = await tx
+        .select()
+        .from(purchaseReceiveLines)
+        .where(eq(purchaseReceiveLines.receiveId, data.receiveId));
+      const rcvByProduct = new Map<string, { qty: number; value: number }>();
+      for (const rl of receiveLines) {
+        const cur = rcvByProduct.get(rl.productId) ?? { qty: 0, value: 0 };
+        const q = num(rl.quantity);
+        cur.qty += q;
+        cur.value += q * num(rl.unitCost);
+        rcvByProduct.set(rl.productId, cur);
+      }
+
+      for (const l of computed) {
+        const billedLineVal = roundCurrency(l.quantity * l.unitCost, 4);
+        const rcv = l.productId ? rcvByProduct.get(l.productId) : undefined;
+        if (!l.productId || !rcv || rcv.qty <= 0) {
+          grniClearAmount = roundCurrency(grniClearAmount + billedLineVal, 4);
+          continue;
+        }
+        const receivedUnitCost = rcv.value / rcv.qty;
+        const expectedReceivedVal = roundCurrency(l.quantity * receivedUnitCost, 4);
+        const variance = roundCurrency(billedLineVal - expectedReceivedVal, 4);
+        grniClearAmount = roundCurrency(grniClearAmount + expectedReceivedVal, 4);
+
+        if (Math.abs(variance) > 0.005) {
+          const bp = await lockBranchProduct(tx, bill.branchId, l.productId, l.unitCost);
+          const onHandRatio = Math.min(1, Math.max(0, bp.qtyOnHand / rcv.qty));
+          const invAdj = roundCurrency(variance * onHandRatio, 4);
+          const ppv = roundCurrency(variance - invAdj, 4);
+
+          if (Math.abs(invAdj) > 0.0001 && bp.qtyOnHand > 0) {
+            const newAvgCost = Math.max(
+              0,
+              roundCurrency((bp.qtyOnHand * bp.avgCost + invAdj) / bp.qtyOnHand, 4)
+            );
+            await tx
+              .update(branchProducts)
+              .set({ avgCost: toNumeric(newAvgCost, 4), updatedAt: new Date() })
+              .where(eq(branchProducts.id, bp.id));
+          }
+          invAdjustAmount = roundCurrency(invAdjustAmount + invAdj, 4);
+          ppvExpenseAmount = roundCurrency(ppvExpenseAmount + ppv, 4);
+        }
+      }
+    } else {
+      grniClearAmount = subtotal;
+    }
+
+    const journalLinesSpec: MappedLineSpec[] = [
+      { mappingKey: "grni", debit: grniClearAmount, currency: data.currency, fxRate: data.fxRate },
+      { mappingKey: "input_vat", debit: taxTotal, currency: data.currency, fxRate: data.fxRate },
+      { mappingKey: "accounts_payable", credit: subtotal + taxTotal, currency: data.currency, fxRate: data.fxRate },
+    ];
+    if (invAdjustAmount > 0.0001) {
+      journalLinesSpec.push({ mappingKey: "inventory_asset", debit: invAdjustAmount, currency: data.currency, fxRate: data.fxRate, description: "PPV allocated to on-hand inventory" });
+    } else if (invAdjustAmount < -0.0001) {
+      journalLinesSpec.push({ mappingKey: "inventory_asset", credit: Math.abs(invAdjustAmount), currency: data.currency, fxRate: data.fxRate, description: "Favorable PPV allocated to on-hand inventory" });
+    }
+    if (ppvExpenseAmount > 0.0001) {
+      journalLinesSpec.push({ mappingKey: "rounding_variance", debit: ppvExpenseAmount, currency: data.currency, fxRate: data.fxRate, description: "Purchase price variance (already consumed stock)" });
+    } else if (ppvExpenseAmount < -0.0001) {
+      journalLinesSpec.push({ mappingKey: "rounding_variance", credit: Math.abs(ppvExpenseAmount), currency: data.currency, fxRate: data.fxRate, description: "Favorable purchase price variance" });
+    }
+
     await postMappedJournal(tx, {
       branchId: bill.branchId,
       entryDate: bill.billDate,
@@ -123,11 +201,7 @@ export async function createVendorBill(
       referenceNumber: bill.billNumber,
       memo: `Vendor bill ${bill.billNumber}`,
       createdBy: actor.id,
-      lines: [
-        { mappingKey: "grni", debit: subtotal, currency: data.currency, fxRate: data.fxRate },
-        { mappingKey: "input_vat", debit: taxTotal, currency: data.currency, fxRate: data.fxRate },
-        { mappingKey: "accounts_payable", credit: subtotal + taxTotal, currency: data.currency, fxRate: data.fxRate },
-      ],
+      lines: journalLinesSpec,
     });
 
     await writeAuditLog(tx, {

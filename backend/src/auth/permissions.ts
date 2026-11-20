@@ -13,6 +13,7 @@ import {
 import * as schema from "../../drizzle/schema.ts";
 import { rolePermissions, branches, companySettings, taxCodes, documentSequences, taxonomyItems } from "../../drizzle/schema.ts";
 import { ensureAccountingDefaults } from "../services/gl.service.ts";
+import { ensureApprovalDefaults } from "../services/approvals.service.ts";
 
 export { DEFAULT_PERMISSION_MATRIX, PERMISSION_MODULES };
 export type { AppRole, ModulePermission, PermissionAction, PermissionModule, RolePermissionMatrix };
@@ -154,6 +155,7 @@ export async function ensureSeededDefaults(tx: DbOrTx): Promise<string> {
   }
 
   await ensureAccountingDefaults(tx);
+  await ensureApprovalDefaults(tx);
 
   return defaultBranchId;
 }

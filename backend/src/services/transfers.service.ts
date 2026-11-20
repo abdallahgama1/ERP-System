@@ -5,9 +5,10 @@ import { products, stockTransferLines, stockTransfers } from "../../drizzle/sche
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
+import { checkApprovalRequired, createApprovalRequest } from "./approvals.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { groupByKey } from "./query-helpers.ts";
-import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
+import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
 export async function listTransfers(db: AppDatabase, actor: RequestActor) {
   const headers =
@@ -68,7 +69,22 @@ export async function createTransfer(
   return db.transaction(async (tx) => {
     const sortedLines = [...data.lines].sort((a, b) => a.productId.localeCompare(b.productId));
     const transferNumber = await nextDocNumber(tx, "TRF", "TRF-");
-    const isDispatching = data.status === "In Transit";
+    const wantsDispatch = data.status === "In Transit";
+
+    let estimatedVal = 0;
+    const prodMap = new Map<string, { name: string; cost: number }>();
+    for (const line of sortedLines) {
+      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
+      const locked = await lockBranchProduct(tx, data.fromBranchId, line.productId, num(prod.costPrice));
+      const unitCost = locked.avgCost > 0 ? locked.avgCost : num(prod.costPrice);
+      prodMap.set(line.productId, { name: prod.name, cost: unitCost });
+      estimatedVal += line.quantity * unitCost;
+    }
+
+    const needsApproval =
+      wantsDispatch && Boolean(await checkApprovalRequired(tx, "stock_transfer", estimatedVal));
+    const isDispatching = wantsDispatch && !needsApproval;
 
     const [tr] = await tx
       .insert(stockTransfers)
@@ -76,7 +92,8 @@ export async function createTransfer(
         transferNumber,
         fromBranchId: data.fromBranchId,
         toBranchId: data.toBranchId,
-        status: data.status,
+        status: isDispatching ? "In Transit" : "Draft",
+        approvalStatus: needsApproval ? "pending" : "not_required",
         notes: data.notes,
         createdBy: actor.id,
         createdByName: actor.name,
@@ -87,10 +104,8 @@ export async function createTransfer(
     let totalDispatchedVal = 0;
 
     for (const line of sortedLines) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
-      if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
-
-      let unitCost = num(prod.costPrice);
+      const meta = prodMap.get(line.productId)!;
+      let unitCost = meta.cost;
       if (isDispatching) {
         const moved = await applyBranchStockMovement(tx, {
           branchId: data.fromBranchId,
@@ -101,7 +116,7 @@ export async function createTransfer(
           referenceType: "transfer",
           referenceId: tr.id,
           referenceNumber: tr.transferNumber,
-          insufficientStockMessage: `Insufficient source stock for ${prod.name}: requested ${line.quantity}`,
+          insufficientStockMessage: `Insufficient source stock for ${meta.name}: requested ${line.quantity}`,
           notes: `Dispatched transfer ${tr.transferNumber}`,
           actorId: actor.id,
         });
@@ -116,6 +131,18 @@ export async function createTransfer(
         qtyReceived: "0",
         unitCost: toNumeric(unitCost, 4),
         notes: line.notes,
+      });
+    }
+
+    if (needsApproval) {
+      await createApprovalRequest(tx, {
+        entityType: "stock_transfer",
+        entityId: tr.id,
+        entityNumber: tr.transferNumber,
+        branchId: data.fromBranchId,
+        amount: estimatedVal,
+        actor,
+        ipAddress,
       });
     }
 
@@ -176,6 +203,25 @@ export async function dispatchTransfer(
       .from(stockTransferLines)
       .where(eq(stockTransferLines.transferId, id))
       .orderBy(asc(stockTransferLines.productId));
+
+    const estimatedVal = lines.reduce((sum, l) => sum + num(l.qtySent) * num(l.unitCost), 0);
+    if (await checkApprovalRequired(tx, "stock_transfer", estimatedVal)) {
+      const [pending] = await tx
+        .update(stockTransfers)
+        .set({ approvalStatus: "pending", updatedAt: new Date() })
+        .where(eq(stockTransfers.id, id))
+        .returning();
+      await createApprovalRequest(tx, {
+        entityType: "stock_transfer",
+        entityId: id,
+        entityNumber: tr.transfer_number,
+        branchId: tr.from_branch_id,
+        amount: estimatedVal,
+        actor,
+        ipAddress,
+      });
+      return pending;
+    }
 
     let totalDispatchedVal = 0;
 

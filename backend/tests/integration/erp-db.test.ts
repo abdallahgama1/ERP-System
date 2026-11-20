@@ -37,7 +37,7 @@ describe.skipIf(!testDbUrl)("PostgreSQL ERP transaction & concurrency invariants
 
     // Reset transactional & GL tables cleanly in isolated TEST_DATABASE_URL
     await db.execute(
-      sql`TRUNCATE TABLE journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE`
+      sql`TRUNCATE TABLE approval_requests, approval_rules, journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE`
     );
 
     const [signupA, signupB] = await Promise.all([
@@ -382,5 +382,194 @@ describe.skipIf(!testDbUrl)("PostgreSQL ERP transaction & concurrency invariants
       cookies: { erp_session: cookie },
     });
     expect(unlockRes.statusCode).toBe(200);
+  });
+
+  it("enforces credit limits, maker-checker approvals, overdue sweep, and vendor bill PPV split", async () => {
+    const adminLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "admin@test.local", password: "Password123!" },
+    });
+    const adminCookie = adminLogin.cookies.find((c) => c.name === "erp_session")!.value;
+
+    const brList = await app.inject({ method: "GET", url: "/api/branches", cookies: { erp_session: adminCookie } });
+    const hqId = brList.json().branches[0].id as string;
+    const prodList = await app.inject({ method: "GET", url: "/api/products", cookies: { erp_session: adminCookie } });
+    const productId = prodList.json().products[0].id as string;
+
+    // 1. Customer credit-limit enforcement
+    const cappedCustRes = await app.inject({
+      method: "POST",
+      url: "/api/customers",
+      cookies: { erp_session: adminCookie },
+      payload: { name: "Credit Capped Co", creditLimit: 250 },
+    });
+    expect(cappedCustRes.statusCode).toBe(201);
+    const cappedCustId = cappedCustRes.json().customer.id as string;
+
+    const overLimitSo = await app.inject({
+      method: "POST",
+      url: "/api/sales-orders",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        customerId: cappedCustId,
+        branchId: hqId,
+        status: "Confirmed",
+        lines: [{ productId, quantity: 3, unitPrice: 100 }],
+      },
+    });
+    expect(overLimitSo.statusCode).toBe(400);
+    expect(overLimitSo.json().code).toBe("CREDIT_LIMIT_EXCEEDED");
+
+    // 2. Past-due invoice & overdue sweep worker
+    const pastDueInv = await app.inject({
+      method: "POST",
+      url: "/api/sales-invoices",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        customerId: cappedCustId,
+        branchId: hqId,
+        status: "Sent",
+        dueDate: "2020-01-01",
+        lines: [{ productId, quantity: 1, unitPrice: 100 }],
+      },
+    });
+    expect(pastDueInv.statusCode).toBe(201);
+    const pastDueInvId = pastDueInv.json().invoice.id as string;
+
+    const sweepRes = await app.inject({
+      method: "POST",
+      url: "/api/admin/jobs/overdue-sweep",
+      cookies: { erp_session: adminCookie },
+    });
+    expect(sweepRes.statusCode).toBe(200);
+    expect(sweepRes.json().overdueInvoicesMarked).toBeGreaterThanOrEqual(1);
+
+    const invAfterSweep = await app.inject({
+      method: "GET",
+      url: "/api/sales-invoices",
+      cookies: { erp_session: adminCookie },
+    });
+    const overdueInv = invAfterSweep.json().invoices.find((i: { id: string }) => i.id === pastDueInvId);
+    expect(overdueInv.status).toBe("Overdue");
+
+    // 3. Maker-checker approval workflow (2nd user promoted to manager)
+    const usersRes = await app.inject({ method: "GET", url: "/api/users", cookies: { erp_session: adminCookie } });
+    const secondUser = usersRes.json().users.find((u: { email: string }) => u.email === "user@test.local");
+    expect(secondUser).toBeDefined();
+
+    const promoteRes = await app.inject({
+      method: "PUT",
+      url: `/api/users/${secondUser.id}/role`,
+      cookies: { erp_session: adminCookie },
+      payload: { role: "manager" },
+    });
+    expect(promoteRes.statusCode).toBe(200);
+
+    const ruleRes = await app.inject({
+      method: "PUT",
+      url: "/api/approvals/rules",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        entityType: "purchase_order",
+        minAmount: 500,
+        requiredRole: "manager",
+        isActive: true,
+        description: "PO >= 500 requires manager/admin approval",
+      },
+    });
+    expect(ruleRes.statusCode).toBe(200);
+
+    const vendorsRes = await app.inject({ method: "GET", url: "/api/vendors", cookies: { erp_session: adminCookie } });
+    const vendorId = vendorsRes.json().vendors[0].id as string;
+
+    const pendingPoRes = await app.inject({
+      method: "POST",
+      url: "/api/purchase-orders",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        vendorId,
+        branchId: hqId,
+        status: "Issued",
+        lines: [{ productId, quantity: 10, unitCost: 100 }],
+      },
+    });
+    expect(pendingPoRes.statusCode).toBe(201);
+    expect(pendingPoRes.json().purchaseOrder.status).toBe("Draft");
+    expect(pendingPoRes.json().purchaseOrder.approvalStatus).toBe("pending");
+    const pendingPoId = pendingPoRes.json().purchaseOrder.id as string;
+
+    const reqListRes = await app.inject({
+      method: "GET",
+      url: "/api/approvals/requests",
+      cookies: { erp_session: adminCookie },
+    });
+    const reqItem = reqListRes.json().requests.find((r: { entityId: string }) => r.entityId === pendingPoId);
+    expect(reqItem).toBeDefined();
+
+    // Admin cannot self-approve while manager exists
+    const selfApprove = await app.inject({
+      method: "POST",
+      url: `/api/approvals/requests/${reqItem.id}/decision`,
+      cookies: { erp_session: adminCookie },
+      payload: { decision: "approved", comment: "Self attempt" },
+    });
+    expect(selfApprove.statusCode).toBe(403);
+    expect(selfApprove.json().code).toBe("SELF_APPROVAL_FORBIDDEN");
+
+    // Second user (manager) approves -> PO becomes Issued
+    const mgrLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "user@test.local", password: "Password123!" },
+    });
+    const mgrCookie = mgrLogin.cookies.find((c) => c.name === "erp_session")!.value;
+
+    const mgrApprove = await app.inject({
+      method: "POST",
+      url: `/api/approvals/requests/${reqItem.id}/decision`,
+      cookies: { erp_session: mgrCookie },
+      payload: { decision: "approved", comment: "Verified budget" },
+    });
+    expect(mgrApprove.statusCode).toBe(200);
+    expect(mgrApprove.json().request.status).toBe("approved");
+
+    // 4. Vendor Bill PPV proportional allocation (receive @ 100, bill @ 120 -> balanced GL)
+    const rcvRes = await app.inject({
+      method: "POST",
+      url: "/api/purchase-receives",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        poId: pendingPoId,
+        vendorId,
+        branchId: hqId,
+        lines: [{ productId, quantity: 10, unitCost: 100 }],
+      },
+    });
+    expect(rcvRes.statusCode).toBe(201);
+    const receiveId = rcvRes.json().receive.id as string;
+
+    const ppvBillRes = await app.inject({
+      method: "POST",
+      url: "/api/vendor-bills",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        vendorId,
+        branchId: hqId,
+        poId: pendingPoId,
+        receiveId,
+        dueDate: "2026-12-31",
+        lines: [{ productId, quantity: 10, unitCost: 120 }],
+      },
+    });
+    expect(ppvBillRes.statusCode).toBe(201);
+
+    const tbRes = await app.inject({
+      method: "GET",
+      url: "/api/accounting/reports/trial-balance",
+      cookies: { erp_session: adminCookie },
+    });
+    expect(tbRes.statusCode).toBe(200);
+    expect(tbRes.json().isBalanced).toBe(true);
   });
 });

@@ -131,7 +131,32 @@ export default function CustomerDetail() {
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>{t("customers.creditLimit")}</CardDescription>
-            <CardTitle className="text-2xl">{fmt(customer.creditLimit ?? 0)}</CardTitle>
+            <CardTitle className="text-2xl">
+              {customer.creditLimit === null || customer.creditLimit === undefined
+                ? t("customers.unlimited", "Unlimited")
+                : customer.creditLimit === 0
+                  ? t("customers.strictCod", "Strict COD (0)")
+                  : fmt(customer.creditLimit)}
+            </CardTitle>
+            {typeof customer.creditLimit === "number" && customer.creditLimit > 0 && (
+              <div className="pt-1 space-y-1">
+                <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                  <div
+                    className={`h-full ${
+                      customerReceivables(customer.id) > customer.creditLimit
+                        ? "bg-destructive"
+                        : "bg-primary"
+                    }`}
+                    style={{
+                      width: `${Math.min(100, Math.round((customerReceivables(customer.id) / customer.creditLimit) * 100))}%`,
+                    }}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {Math.round((customerReceivables(customer.id) / customer.creditLimit) * 100)}% used
+                </p>
+              </div>
+            )}
           </CardHeader>
         </Card>
         <Card>

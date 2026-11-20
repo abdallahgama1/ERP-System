@@ -16,7 +16,7 @@ export interface ApiCustomer {
   taxNumber: string;
   currency: string;
   paymentTermsDays: number;
-  creditLimit: number;
+  creditLimit: number | null;
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -62,8 +62,10 @@ export interface ApiInvoice {
   paidAmount: number;
   creditAppliedAmount: number;
   retainerAppliedAmount: number;
+  icv?: number | null;
   qrTlv?: string | null;
   invoiceHash?: string | null;
+  prevInvoiceHash?: string | null;
   eInvoiceStatus?: string;
   voidReason: string | null;
   notes: string;

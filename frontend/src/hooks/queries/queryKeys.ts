@@ -57,6 +57,12 @@ export const erpQueryKeys = {
     statement: (kind: string, params?: Record<string, string>) =>
       ["accounting", "statement", kind, params ?? {}] as const,
   },
+
+  approvals: {
+    all: ["approvals"] as const,
+    rules: () => ["approvals", "rules"] as const,
+    requests: () => ["approvals", "requests"] as const,
+  },
 };
 
 export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<readonly unknown[]> {
@@ -71,6 +77,8 @@ export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<reado
       return [erpQueryKeys.sessions.all, erpQueryKeys.accounting.all];
     case "accounting_updated":
       return [erpQueryKeys.accounting.all];
+    case "approvals_updated":
+      return [erpQueryKeys.approvals.all, erpQueryKeys.notifications];
     case "branches_updated":
     case "users_updated":
       return [erpQueryKeys.branches, erpQueryKeys.permissions];

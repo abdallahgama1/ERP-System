@@ -34,7 +34,8 @@ import {
   History,
   BookOpen,
   Scale,
-  CalendarClock
+  CalendarClock,
+  ClipboardCheck
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
@@ -112,6 +113,7 @@ const taxonomyItems = [
 ];
 
 const adminItems = [
+  { titleKey: "nav.admin.approvals", url: "/approvals", icon: ClipboardCheck },
   { titleKey: "nav.admin.auditLog", url: "/audit-log", icon: History },
   { titleKey: "nav.admin.roles", url: "/roles", icon: Shield },
   { titleKey: "nav.admin.notifications", url: "/notifications", icon: Bell },

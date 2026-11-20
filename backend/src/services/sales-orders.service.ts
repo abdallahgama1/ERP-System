@@ -12,13 +12,14 @@ import {
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
+import { assertCustomerCreditLimit } from "./credit-limit.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
 import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
 
 export async function listCustomers(db: AppDatabase) {
   const list = await db.select().from(customers).orderBy(asc(customers.name));
-  return list.map((c) => ({ ...c, creditLimit: num(c.creditLimit) }));
+  return list.map((c) => ({ ...c, creditLimit: c.creditLimit === null ? null : num(c.creditLimit) }));
 }
 
 export async function createCustomer(
@@ -31,7 +32,14 @@ export async function createCustomer(
     const code = data.code || (await nextDocNumber(tx, "CUST", "CUS-"));
     const [inserted] = await tx
       .insert(customers)
-      .values({ ...data, code, creditLimit: toNumeric(data.creditLimit, 4) })
+      .values({
+        ...data,
+        code,
+        creditLimit:
+          data.creditLimit === null || data.creditLimit === undefined
+            ? null
+            : toNumeric(data.creditLimit, 4),
+      })
       .returning();
 
     await writeAuditLog(tx, {
@@ -47,7 +55,7 @@ export async function createCustomer(
     return inserted;
   });
 
-  return { ...row, creditLimit: num(row.creditLimit) };
+  return { ...row, creditLimit: row.creditLimit === null ? null : num(row.creditLimit) };
 }
 
 export async function updateCustomer(
@@ -64,7 +72,12 @@ export async function updateCustomer(
       .update(customers)
       .set({
         ...data,
-        creditLimit: data.creditLimit !== undefined ? toNumeric(data.creditLimit, 4) : current.creditLimit,
+        creditLimit:
+          data.creditLimit === undefined
+            ? current.creditLimit
+            : data.creditLimit === null
+              ? null
+              : toNumeric(data.creditLimit, 4),
         updatedAt: new Date(),
       })
       .where(eq(customers.id, id))
@@ -83,7 +96,7 @@ export async function updateCustomer(
     return updated;
   });
 
-  return { ...row, creditLimit: num(row.creditLimit) };
+  return { ...row, creditLimit: row.creditLimit === null ? null : num(row.creditLimit) };
 }
 
 export async function deleteCustomer(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
@@ -186,6 +199,9 @@ export async function createSalesOrder(
   return db.transaction(async (tx) => {
     const soNumber = await nextDocNumber(tx, "SO", "SO-");
     const { subtotal, taxTotal, computed } = summarizePriceLines(data.lines);
+    if (data.status === "Confirmed") {
+      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal);
+    }
 
     const [so] = await tx
       .insert(salesOrders)
@@ -254,6 +270,9 @@ export async function updateSalesOrder(
     }
 
     const { subtotal, taxTotal, computed } = summarizePriceLines(data.lines);
+    if (data.status === "Confirmed") {
+      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal, id);
+    }
     const [so] = await tx
       .update(salesOrders)
       .set({
@@ -311,6 +330,7 @@ export async function confirmSalesOrder(db: AppDatabase, actor: RequestActor, id
     if (!so) throw new AppError(404, "Sales order not found", "NOT_FOUND");
     assertBranchAccess(actor, so.branchId);
     if (so.status !== "Draft") throw new AppError(400, "Only Draft sales orders can be confirmed", "INVALID_STATUS");
+    await assertCustomerCreditLimit(tx, so.customerId, num(so.totalAmount), id);
 
     const [res] = await tx
       .update(salesOrders)

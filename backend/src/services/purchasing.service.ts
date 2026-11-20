@@ -14,6 +14,7 @@ import {
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
+import { checkApprovalRequired, createApprovalRequest } from "./approvals.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
 import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
@@ -173,6 +174,9 @@ export async function createPurchaseOrder(
   return db.transaction(async (tx) => {
     const poNumber = await nextDocNumber(tx, "PO", "PO-");
     const { subtotal, taxTotal, computed } = summarizeCostLines(data.lines);
+    const totalAmount = subtotal + taxTotal;
+    const needsApproval =
+      data.status === "Issued" && Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount));
 
     const [po] = await tx
       .insert(purchaseOrders)
@@ -180,14 +184,15 @@ export async function createPurchaseOrder(
         poNumber,
         vendorId: data.vendorId,
         branchId: data.branchId,
-        status: data.status,
+        status: needsApproval ? "Draft" : data.status,
+        approvalStatus: needsApproval ? "pending" : "not_required",
         orderDate: data.orderDate ? new Date(data.orderDate) : new Date(),
         expectedDate: data.expectedDate ? new Date(data.expectedDate) : null,
         currency: data.currency,
         fxRate: toNumeric(data.fxRate, 6),
         subtotal: toNumeric(subtotal, 4),
         taxTotal: toNumeric(taxTotal, 4),
-        totalAmount: toNumeric(subtotal + taxTotal, 4),
+        totalAmount: toNumeric(totalAmount, 4),
         notes: data.notes,
         createdBy: actor.id,
       })
@@ -206,6 +211,18 @@ export async function createPurchaseOrder(
         lineTotal: toNumeric(l.lineTotal, 4),
       }))
     );
+
+    if (needsApproval) {
+      await createApprovalRequest(tx, {
+        entityType: "purchase_order",
+        entityId: po.id,
+        entityNumber: po.poNumber,
+        branchId: po.branchId,
+        amount: totalAmount,
+        actor,
+        ipAddress,
+      });
+    }
 
     await writeAuditLog(tx, {
       userId: actor.id,
@@ -240,19 +257,24 @@ export async function updatePurchaseOrder(
     }
 
     const { subtotal, taxTotal, computed } = summarizeCostLines(data.lines);
+    const totalAmount = subtotal + taxTotal;
+    const needsApproval =
+      data.status === "Issued" && Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount));
+
     const [po] = await tx
       .update(purchaseOrders)
       .set({
         vendorId: data.vendorId,
         branchId: data.branchId,
-        status: data.status,
+        status: needsApproval ? "Draft" : data.status,
+        approvalStatus: needsApproval ? "pending" : current.approvalStatus,
         orderDate: data.orderDate ? new Date(data.orderDate) : current.orderDate,
         expectedDate: data.expectedDate ? new Date(data.expectedDate) : null,
         currency: data.currency,
         fxRate: toNumeric(data.fxRate, 6),
         subtotal: toNumeric(subtotal, 4),
         taxTotal: toNumeric(taxTotal, 4),
-        totalAmount: toNumeric(subtotal + taxTotal, 4),
+        totalAmount: toNumeric(totalAmount, 4),
         notes: data.notes,
         updatedAt: new Date(),
       })
@@ -273,6 +295,18 @@ export async function updatePurchaseOrder(
         lineTotal: toNumeric(l.lineTotal, 4),
       }))
     );
+
+    if (needsApproval) {
+      await createApprovalRequest(tx, {
+        entityType: "purchase_order",
+        entityId: po.id,
+        entityNumber: po.poNumber,
+        branchId: po.branchId,
+        amount: totalAmount,
+        actor,
+        ipAddress,
+      });
+    }
 
     await writeAuditLog(tx, {
       userId: actor.id,
@@ -296,6 +330,26 @@ export async function issuePurchaseOrder(db: AppDatabase, actor: RequestActor, i
     if (!po) throw new AppError(404, "Purchase order not found", "NOT_FOUND");
     assertBranchAccess(actor, po.branchId);
     if (po.status !== "Draft") throw new AppError(400, "Only Draft POs can be issued", "INVALID_STATUS");
+    const totalAmount = num(po.totalAmount);
+    const needsApproval = Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount));
+
+    if (needsApproval) {
+      const [pendingPo] = await tx
+        .update(purchaseOrders)
+        .set({ approvalStatus: "pending", updatedAt: new Date() })
+        .where(eq(purchaseOrders.id, id))
+        .returning();
+      await createApprovalRequest(tx, {
+        entityType: "purchase_order",
+        entityId: po.id,
+        entityNumber: po.poNumber,
+        branchId: po.branchId,
+        amount: totalAmount,
+        actor,
+        ipAddress,
+      });
+      return pendingPo;
+    }
 
     const [res] = await tx
       .update(purchaseOrders)

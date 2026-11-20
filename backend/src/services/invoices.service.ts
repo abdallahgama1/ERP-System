@@ -11,6 +11,7 @@ import {
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
+import { assertCustomerCreditLimit } from "./credit-limit.service.ts";
 import { applyInvoiceEInvoiceMetadata } from "./einvoicing.service.ts";
 import { postMappedJournal, reverseJournalEntriesForSource } from "./gl.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
@@ -78,6 +79,10 @@ export async function createSalesInvoice(
       taxTotal += taxAmount;
       return { ...l, taxAmount, lineTotal };
     });
+
+    if (data.status === "Sent") {
+      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal, data.soId ?? null);
+    }
 
     const [inv] = await tx
       .insert(salesInvoices)
@@ -221,6 +226,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
     const invRows = await tx.execute<{
       id: string;
       invoice_number: string;
+      customer_id: string;
       branch_id: string;
       so_id: string | null;
       status: string;
@@ -231,7 +237,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
       tax_total: string;
       total_amount: string;
     }>(sql`
-      SELECT id, invoice_number, branch_id, so_id, status, invoice_date, currency, fx_rate, subtotal, tax_total, total_amount
+      SELECT id, invoice_number, customer_id, branch_id, so_id, status, invoice_date, currency, fx_rate, subtotal, tax_total, total_amount
       FROM sales_invoices WHERE id = ${id} FOR UPDATE
     `);
     const inv = invRows[0];
@@ -240,6 +246,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
     if (inv.status !== "Draft") {
       throw new AppError(400, "Only Draft invoices can be posted/sent", "INVALID_STATUS");
     }
+    await assertCustomerCreditLimit(tx, inv.customer_id, num(inv.total_amount), inv.so_id);
 
     const lines = await tx
       .select()

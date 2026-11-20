@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Receipt, Plus, Send, Ban, Trash2, Wallet, Download } from "lucide-react";
+import { Receipt, Plus, Send, Ban, Trash2, Wallet, Download, QrCode } from "lucide-react";
+import QRCode from "qrcode";
 import { downloadInvoicePdf } from "@/lib/pdf/invoicePdf";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -66,9 +67,28 @@ export default function Invoices() {
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([]);
   const [detail, setDetail] = useState<Invoice | null>(null);
+  const [detailQrUrl, setDetailQrUrl] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Invoice | null>(null);
   const [payFor, setPayFor] = useState<Invoice | null>(null);
   const [payAmount, setPayAmount] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    if (!detail?.qrTlv) {
+      setDetailQrUrl(null);
+      return;
+    }
+    void QRCode.toDataURL(detail.qrTlv, { width: 144, margin: 1 })
+      .then((url) => {
+        if (active) setDetailQrUrl(url);
+      })
+      .catch(() => {
+        if (active) setDetailQrUrl(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [detail]);
 
   const invoicedSoIds = useMemo(
     () => new Set(invoices.map(i => i.salesOrderId).filter((v): v is string => typeof v === "string" && v.length > 0)),
@@ -236,7 +256,7 @@ export default function Invoices() {
                     <TableCell onClick={e => e.stopPropagation()}>
                       <div className="flex items-center justify-end gap-1">
                         <Button variant="ghost" size="icon" aria-label={`Download ${inv.invoiceNumber} PDF`}
-                          onClick={() => downloadInvoicePdf(inv, settings.currency)}>
+                          onClick={() => void downloadInvoicePdf(inv, settings.currency)}>
                           <Download className="h-4 w-4" />
                         </Button>
                         {inv.status === "Draft" && (
@@ -464,6 +484,33 @@ export default function Invoices() {
                 <div className="flex justify-between font-semibold"><span>{t("invoices.balance", "Balance")}</span><span>{formatMoney(invoiceBalance(detail), settings.currency)}</span></div>
               </div>
               {detail.notes && <p className="text-sm whitespace-pre-line text-muted-foreground">{detail.notes}</p>}
+              {detail.qrTlv && (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-4 rounded-md border p-3 bg-muted/30">
+                  <div className="space-y-1 text-xs">
+                    <div className="flex items-center gap-1.5 font-semibold text-sm">
+                      <QrCode className="h-4 w-4 text-primary" />
+                      {t("invoices.einvoiceTitle", "E-Invoice Compliance (ZATCA TLV)")}
+                    </div>
+                    {detail.icv && (
+                      <div className="text-muted-foreground">
+                        ICV: <span className="font-mono text-foreground">#{detail.icv}</span>
+                      </div>
+                    )}
+                    {detail.invoiceHash && (
+                      <div className="text-muted-foreground">
+                        SHA-256: <span className="font-mono text-foreground">{detail.invoiceHash.slice(0, 24)}...</span>
+                      </div>
+                    )}
+                  </div>
+                  {detailQrUrl && (
+                    <img
+                      src={detailQrUrl}
+                      alt={`ZATCA QR ${detail.invoiceNumber}`}
+                      className="h-28 w-28 rounded border bg-white p-1"
+                    />
+                  )}
+                </div>
+              )}
             </>
           )}
         </DialogContent>

@@ -469,7 +469,7 @@ export const customers = pgTable(
     taxNumber: text("tax_number").notNull().default(""),
     currency: text("currency").notNull().default("USD"),
     paymentTermsDays: integer("payment_terms_days").notNull().default(30),
-    creditLimit: numeric("credit_limit", { precision: 18, scale: 4 }).notNull().default("0"),
+    creditLimit: numeric("credit_limit", { precision: 18, scale: 4 }),
     isActive: boolean("is_active").notNull().default(true),
     notes: text("notes").notNull().default(""),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -541,6 +541,11 @@ export const stockAdjustments = pgTable(
       .references(() => branches.id, { onDelete: "restrict" }),
     reason: text("reason").notNull(),
     status: text("status").notNull().default("Posted"),
+    approvalStatus: text("approval_status")
+      .$type<"not_required" | "pending" | "approved" | "rejected">()
+      .notNull()
+      .default("not_required"),
+    approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     notes: text("notes").notNull().default(""),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdByName: text("created_by_name").notNull().default(""),
@@ -578,6 +583,11 @@ export const stockWriteOffs = pgTable(
       .references(() => branches.id, { onDelete: "restrict" }),
     reason: text("reason").notNull(),
     status: text("status").notNull().default("Posted"),
+    approvalStatus: text("approval_status")
+      .$type<"not_required" | "pending" | "approved" | "rejected">()
+      .notNull()
+      .default("not_required"),
+    approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     notes: text("notes").notNull().default(""),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdByName: text("created_by_name").notNull().default(""),
@@ -621,6 +631,11 @@ export const stockTransfers = pgTable(
       .default("In Transit"),
     shortageResolution: text("shortage_resolution").$type<"backorder" | "close_short" | "claim_carrier">(),
     notes: text("notes").notNull().default(""),
+    approvalStatus: text("approval_status")
+      .$type<"not_required" | "pending" | "approved" | "rejected">()
+      .notNull()
+      .default("not_required"),
+    approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdByName: text("created_by_name").notNull().default(""),
     shippedAt: timestamp("shipped_at", { withTimezone: true }),
@@ -719,6 +734,10 @@ export const purchaseOrders = pgTable(
     taxTotal: numeric("tax_total", { precision: 18, scale: 4 }).notNull().default("0"),
     totalAmount: numeric("total_amount", { precision: 18, scale: 4 }).notNull().default("0"),
     notes: text("notes").notNull().default(""),
+    approvalStatus: text("approval_status")
+      .$type<"not_required" | "pending" | "approved" | "rejected">()
+      .notNull()
+      .default("not_required"),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -948,6 +967,10 @@ export const salesOrders = pgTable(
     taxTotal: numeric("tax_total", { precision: 18, scale: 4 }).notNull().default("0"),
     totalAmount: numeric("total_amount", { precision: 18, scale: 4 }).notNull().default("0"),
     notes: text("notes").notNull().default(""),
+    approvalStatus: text("approval_status")
+      .$type<"not_required" | "pending" | "approved" | "rejected">()
+      .notNull()
+      .default("not_required"),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -1234,5 +1257,50 @@ export const journalLines = pgTable(
   (t) => [
     index("journal_lines_entry_idx").on(t.entryId),
     index("journal_lines_account_idx").on(t.accountId),
+  ]
+);
+
+// ============================================================================
+// Enterprise Approvals & Controls (Milestone D1)
+// ============================================================================
+
+export const approvalRules = pgTable("approval_rules", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  entityType: text("entity_type")
+    .$type<"purchase_order" | "stock_transfer" | "stock_adjustment" | "stock_write_off">()
+    .notNull()
+    .unique(),
+  minAmount: numeric("min_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+  requiredRole: appRoleEnum("required_role").notNull().default("manager"),
+  isActive: boolean("is_active").notNull().default(false),
+  description: text("description").notNull().default(""),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const approvalRequests = pgTable(
+  "approval_requests",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    entityType: text("entity_type")
+      .$type<"purchase_order" | "stock_transfer" | "stock_adjustment" | "stock_write_off">()
+      .notNull(),
+    entityId: uuid("entity_id").notNull(),
+    entityNumber: text("entity_number").notNull(),
+    branchId: uuid("branch_id").references(() => branches.id, { onDelete: "set null" }),
+    amount: numeric("amount", { precision: 18, scale: 4 }).notNull().default("0"),
+    status: text("status").$type<"pending" | "approved" | "rejected">().notNull().default("pending"),
+    requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
+    requestedByName: text("requested_by_name").notNull().default(""),
+    reviewedBy: uuid("reviewed_by").references(() => users.id, { onDelete: "set null" }),
+    reviewedByName: text("reviewed_by_name").notNull().default(""),
+    decisionComment: text("decision_comment").notNull().default(""),
+    selfApprovedSingleAdmin: boolean("self_approved_single_admin").notNull().default(false),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("approval_requests_status_idx").on(t.status, t.requestedAt),
+    index("approval_requests_entity_idx").on(t.entityType, t.entityId),
   ]
 );

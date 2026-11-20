@@ -1,12 +1,15 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
-import { AlertTriangle, ArrowRight, Bell, CheckCheck, FileWarning, PackageMinus, RotateCcw, Truck, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Bell, CheckCheck, Clock, FileWarning, PackageMinus, RotateCcw, Truck, X } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useNotifications, type NotificationKind } from "@/contexts/NotificationsContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
+import { apiRequest } from "@/lib/api-client";
+import { toast } from "sonner";
 
 const kindIcon: Record<NotificationKind, typeof Bell> = {
   low_stock: PackageMinus,
@@ -22,7 +25,30 @@ export default function Notifications() {
   const { t } = useTranslation();
   const { notifications, unreadCount, isRead, markRead, markAllRead, dismiss, restoreDismissed, dismissedCount } =
     useNotifications();
+  const { role } = usePermissions();
   const [filter, setFilter] = useState<(typeof filters)[number]>("all");
+  const [sweeping, setSweeping] = useState(false);
+
+  const handleOverdueSweep = async () => {
+    setSweeping(true);
+    try {
+      const res = await apiRequest<{ overdueInvoicesMarked: number; overdueBillsMarked: number }>(
+        "/api/admin/jobs/overdue-sweep",
+        { method: "POST" }
+      );
+      toast.success(
+        t("notifications.overdueSweepDone", {
+          defaultValue: `Overdue sweep complete: ${res.overdueInvoicesMarked} invoice(s), ${res.overdueBillsMarked} bill(s) marked overdue.`,
+          invoices: res.overdueInvoicesMarked,
+          bills: res.overdueBillsMarked,
+        })
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("common.error"));
+    } finally {
+      setSweeping(false);
+    }
+  };
 
   const visible = useMemo(() => {
     if (filter === "all") return notifications;
@@ -43,6 +69,12 @@ export default function Notifications() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {role === "admin" && (
+            <Button variant="outline" size="sm" onClick={() => void handleOverdueSweep()} disabled={sweeping}>
+              <Clock className="h-4 w-4 me-2" />
+              {t("notifications.runOverdueSweep", "Run Overdue Check")}
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={markAllRead} disabled={unreadCount === 0}>
             <CheckCheck className="h-4 w-4 me-2" />
             {t("notifications.markAllRead", "Mark all read")}

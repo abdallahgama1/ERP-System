@@ -16,11 +16,13 @@
     "typecheck": "npm --prefix packages/shared run typecheck && npm --prefix backend run typecheck && npm --prefix frontend run typecheck",
     "lint": "npm --prefix packages/shared run lint && npm --prefix backend run lint && npm --prefix frontend run lint",
     "test": "npm --prefix backend run test",
+    "test:e2e": "playwright test",
     "db:generate": "npm --prefix backend run db:generate",
     "db:push": "npm --prefix backend run db:push",
     "db:migrate": "npm --prefix backend run db:migrate"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "concurrently": "^10.0.7"
   }
 }

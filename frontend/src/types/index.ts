@@ -57,7 +57,7 @@ export interface Customer {
   taxNumber?: string;
   currency: 'SAR' | 'AED' | 'USD' | 'EGP';
   paymentTerms: 'NET15' | 'NET30' | 'COD';
-  creditLimit?: number;
+  creditLimit?: number | null;
   billingAddress?: string;
   shippingAddress?: string;
   notes?: string;
@@ -155,6 +155,11 @@ export interface Invoice {
   amountPaid: number;
   creditAppliedAmount?: number;
   retainerAppliedAmount?: number;
+  icv?: number | null;
+  invoiceHash?: string | null;
+  prevInvoiceHash?: string | null;
+  qrTlv?: string | null;
+  eInvoiceStatus?: string;
   voidReason?: string;
   notes?: string;
   createdAt: string;

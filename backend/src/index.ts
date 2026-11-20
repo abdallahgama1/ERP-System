@@ -1,9 +1,12 @@
 import { buildApp } from "./app.ts";
 import { env } from "./config.ts";
-import { checkDatabaseConnection, closeDatabase, isDatabaseConfigured } from "./db/index.ts";
+import { checkDatabaseConnection, closeDatabase, getDb, isDatabaseConfigured } from "./db/index.ts";
+import { runOverdueSweep } from "./services/overdue-sweep.service.ts";
 
 async function start(): Promise<void> {
   const app = await buildApp();
+
+  let overdueTimer: ReturnType<typeof setInterval> | null = null;
 
   if (!isDatabaseConfigured()) {
     console.warn(
@@ -16,10 +19,18 @@ async function start(): Promise<void> {
       console.warn(`[ERP API WARNING] Could not reach PostgreSQL at startup: ${status.error}`);
     } else {
       console.log("[ERP API] Connected to PostgreSQL cleanly.");
+      const safeSweep = () => {
+        void runOverdueSweep(getDb()).catch((err) => {
+          console.warn("[ERP API] Scheduled overdue sweep failed:", err instanceof Error ? err.message : err);
+        });
+      };
+      // Run daily/6-hour overdue sweep in server runtime (never during Vitest buildApp())
+      overdueTimer = setInterval(safeSweep, 6 * 60 * 60 * 1000);
     }
   }
 
   const shutdown = async () => {
+    if (overdueTimer) clearInterval(overdueTimer);
     await app.close();
     await closeDatabase();
     process.exit(0);

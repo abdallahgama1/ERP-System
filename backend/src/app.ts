@@ -6,6 +6,7 @@ import { AppError } from "./db/helpers.ts";
 import { attachAuthHook } from "./middleware/auth.ts";
 import { accountingRoutes } from "./routes/accounting.ts";
 import { adminRoutes } from "./routes/admin.ts";
+import { approvalRoutes } from "./routes/approvals.ts";
 import { auditRoutes } from "./routes/audit.ts";
 import { authRoutes } from "./routes/auth.ts";
 import { branchRoutes } from "./routes/branches.ts";
@@ -95,6 +96,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(purchaseRoutes);
   await app.register(salesRoutes);
   await app.register(accountingRoutes);
+  await app.register(approvalRoutes);
 
   return app;
 }

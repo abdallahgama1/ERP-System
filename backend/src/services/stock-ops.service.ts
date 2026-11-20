@@ -13,6 +13,7 @@ import {
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
+import { checkApprovalRequired, createApprovalRequest } from "./approvals.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
 import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
@@ -111,13 +112,47 @@ export async function createAdjustment(
     const sortedLines = [...data.lines].sort((a, b) => a.productId.localeCompare(b.productId));
     const adjNumber = await nextDocNumber(tx, "ADJ", "ADJ-");
 
+    const prepared: Array<{
+      productId: string;
+      prodName: string;
+      prodSku: string;
+      delta: number;
+      unitCost: number;
+      previousQty: number;
+      notes: string;
+    }> = [];
+    let totalAbsImpact = 0;
+
+    for (const line of sortedLines) {
+      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
+      const prodFallback = num(prod.costPrice);
+      const locked = await lockBranchProduct(tx, data.branchId, line.productId, prodFallback);
+      const delta = line.newQty !== undefined ? line.newQty - locked.qtyOnHand : (line.qtyDelta ?? 0);
+      if (delta === 0) continue;
+      const unitCost = locked.avgCost > 0 ? locked.avgCost : prodFallback;
+      totalAbsImpact += Math.abs(delta) * unitCost;
+      prepared.push({
+        productId: line.productId,
+        prodName: prod.name,
+        prodSku: prod.sku,
+        delta,
+        unitCost,
+        previousQty: locked.qtyOnHand,
+        notes: line.notes,
+      });
+    }
+
+    const needsApproval = Boolean(await checkApprovalRequired(tx, "stock_adjustment", totalAbsImpact));
+
     const [adj] = await tx
       .insert(stockAdjustments)
       .values({
         adjustmentNumber: adjNumber,
         branchId: data.branchId,
         reason: data.reason,
-        status: "Posted",
+        status: needsApproval ? "Pending Approval" : "Posted",
+        approvalStatus: needsApproval ? "pending" : "not_required",
         notes: data.notes,
         createdBy: actor.id,
         createdByName: actor.name,
@@ -127,29 +162,33 @@ export async function createAdjustment(
     let totalPosVal = 0;
     let totalNegVal = 0;
 
-    for (const line of sortedLines) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
-      if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
+    for (const item of prepared) {
+      if (needsApproval) {
+        await tx.insert(stockAdjustmentLines).values({
+          adjustmentId: adj.id,
+          productId: item.productId,
+          qtyDelta: toNumeric(item.delta, 4),
+          unitCost: toNumeric(item.unitCost, 4),
+          previousQty: toNumeric(item.previousQty, 4),
+          newQty: toNumeric(Math.max(0, item.previousQty + item.delta), 4),
+          notes: item.notes,
+        });
+        continue;
+      }
 
-      const prodFallback = num(prod.costPrice);
-      const locked = await lockBranchProduct(tx, data.branchId, line.productId, prodFallback);
-      const delta = line.newQty !== undefined ? line.newQty - locked.qtyOnHand : (line.qtyDelta ?? 0);
-      if (delta === 0) continue;
-
-      const unitCost = locked.avgCost > 0 ? locked.avgCost : prodFallback;
       const moved = await applyBranchStockMovement(tx, {
         branchId: data.branchId,
-        productId: line.productId,
-        qtyDelta: delta,
-        fallbackCost: unitCost,
+        productId: item.productId,
+        qtyDelta: item.delta,
+        fallbackCost: item.unitCost,
         recomputeAvgCost: false,
-        movementType: delta > 0 ? "adjustment_in" : "adjustment_out",
-        movementUnitCost: unitCost,
+        movementType: item.delta > 0 ? "adjustment_in" : "adjustment_out",
+        movementUnitCost: item.unitCost,
         referenceType: "adjustment",
         referenceId: adj.id,
         referenceNumber: adj.adjustmentNumber,
-        insufficientStockMessage: `Insufficient stock for ${prod.name} (${prod.sku}): available ${locked.qtyOnHand}, attempted delta ${delta}`,
-        notes: `${data.reason}${line.notes ? `: ${line.notes}` : ""}`,
+        insufficientStockMessage: `Insufficient stock for ${item.prodName} (${item.prodSku}): available ${item.previousQty}, attempted delta ${item.delta}`,
+        notes: `${data.reason}${item.notes ? `: ${item.notes}` : ""}`,
         actorId: actor.id,
       });
 
@@ -158,36 +197,48 @@ export async function createAdjustment(
 
       await tx.insert(stockAdjustmentLines).values({
         adjustmentId: adj.id,
-        productId: line.productId,
-        qtyDelta: toNumeric(delta, 4),
-        unitCost: toNumeric(unitCost, 4),
+        productId: item.productId,
+        qtyDelta: toNumeric(item.delta, 4),
+        unitCost: toNumeric(item.unitCost, 4),
         previousQty: toNumeric(moved.previousQty, 4),
         newQty: toNumeric(moved.newQty, 4),
-        notes: line.notes,
+        notes: item.notes,
       });
     }
 
-    const netInvDelta = totalPosVal - totalNegVal;
-    if (Math.abs(netInvDelta) > 0.0001) {
-      const absVal = Math.abs(netInvDelta);
-      await postMappedJournal(tx, {
+    if (needsApproval) {
+      await createApprovalRequest(tx, {
+        entityType: "stock_adjustment",
+        entityId: adj.id,
+        entityNumber: adj.adjustmentNumber,
         branchId: data.branchId,
-        sourceType: "stock_adjustment",
-        sourceId: adj.id,
-        referenceNumber: adj.adjustmentNumber,
-        memo: `Stock adjustment ${adj.adjustmentNumber} (${data.reason})`,
-        createdBy: actor.id,
-        lines:
-          netInvDelta > 0
-            ? [
-                { mappingKey: "inventory_asset", debit: absVal },
-                { mappingKey: "inventory_adjustment", credit: absVal },
-              ]
-            : [
-                { mappingKey: "inventory_adjustment", debit: absVal },
-                { mappingKey: "inventory_asset", credit: absVal },
-              ],
+        amount: totalAbsImpact,
+        actor,
+        ipAddress,
       });
+    } else {
+      const netInvDelta = totalPosVal - totalNegVal;
+      if (Math.abs(netInvDelta) > 0.0001) {
+        const absVal = Math.abs(netInvDelta);
+        await postMappedJournal(tx, {
+          branchId: data.branchId,
+          sourceType: "stock_adjustment",
+          sourceId: adj.id,
+          referenceNumber: adj.adjustmentNumber,
+          memo: `Stock adjustment ${adj.adjustmentNumber} (${data.reason})`,
+          createdBy: actor.id,
+          lines:
+            netInvDelta > 0
+              ? [
+                  { mappingKey: "inventory_asset", debit: absVal },
+                  { mappingKey: "inventory_adjustment", credit: absVal },
+                ]
+              : [
+                  { mappingKey: "inventory_adjustment", debit: absVal },
+                  { mappingKey: "inventory_asset", credit: absVal },
+                ],
+        });
+      }
     }
 
     await writeAuditLog(tx, {
@@ -255,13 +306,33 @@ export async function createWriteOff(
     const sortedLines = [...data.lines].sort((a, b) => a.productId.localeCompare(b.productId));
     const woNumber = await nextDocNumber(tx, "WO", "WO-");
 
+    const prepared: Array<{ productId: string; prodName: string; quantity: number; unitCost: number; notes: string }> = [];
+    let estimatedTotal = 0;
+    for (const line of sortedLines) {
+      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
+      const locked = await lockBranchProduct(tx, data.branchId, line.productId, num(prod.costPrice));
+      const unitCost = locked.avgCost > 0 ? locked.avgCost : num(prod.costPrice);
+      estimatedTotal += line.quantity * unitCost;
+      prepared.push({
+        productId: line.productId,
+        prodName: prod.name,
+        quantity: line.quantity,
+        unitCost,
+        notes: line.notes,
+      });
+    }
+
+    const needsApproval = Boolean(await checkApprovalRequired(tx, "stock_write_off", estimatedTotal));
+
     const [wo] = await tx
       .insert(stockWriteOffs)
       .values({
         writeOffNumber: woNumber,
         branchId: data.branchId,
         reason: data.reason,
-        status: "Posted",
+        status: needsApproval ? "Pending Approval" : "Posted",
+        approvalStatus: needsApproval ? "pending" : "not_required",
         notes: data.notes,
         createdBy: actor.id,
         createdByName: actor.name,
@@ -270,22 +341,30 @@ export async function createWriteOff(
 
     let totalWriteOffVal = 0;
 
-    for (const line of sortedLines) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
-      if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
+    for (const item of prepared) {
+      if (needsApproval) {
+        await tx.insert(stockWriteOffLines).values({
+          writeOffId: wo.id,
+          productId: item.productId,
+          quantity: toNumeric(item.quantity, 4),
+          unitCost: toNumeric(item.unitCost, 4),
+          totalValue: toNumeric(item.quantity * item.unitCost, 4),
+          notes: item.notes,
+        });
+        continue;
+      }
 
-      const prodCost = num(prod.costPrice);
       const moved = await applyBranchStockMovement(tx, {
         branchId: data.branchId,
-        productId: line.productId,
-        qtyDelta: -line.quantity,
-        fallbackCost: prodCost,
+        productId: item.productId,
+        qtyDelta: -item.quantity,
+        fallbackCost: item.unitCost,
         movementType: "write_off",
         referenceType: "write_off",
         referenceId: wo.id,
         referenceNumber: wo.writeOffNumber,
-        insufficientStockMessage: `Insufficient stock for ${prod.name}: requested ${line.quantity}`,
-        notes: `${data.reason}${line.notes ? `: ${line.notes}` : ""}`,
+        insufficientStockMessage: `Insufficient stock for ${item.prodName}: requested ${item.quantity}`,
+        notes: `${data.reason}${item.notes ? `: ${item.notes}` : ""}`,
         actorId: actor.id,
       });
 
@@ -294,15 +373,25 @@ export async function createWriteOff(
       totalWriteOffVal += totalValue;
       await tx.insert(stockWriteOffLines).values({
         writeOffId: wo.id,
-        productId: line.productId,
-        quantity: toNumeric(line.quantity, 4),
+        productId: item.productId,
+        quantity: toNumeric(item.quantity, 4),
         unitCost: toNumeric(unitCost, 4),
         totalValue: toNumeric(totalValue, 4),
-        notes: line.notes,
+        notes: item.notes,
       });
     }
 
-    if (totalWriteOffVal > 0.0001) {
+    if (needsApproval) {
+      await createApprovalRequest(tx, {
+        entityType: "stock_write_off",
+        entityId: wo.id,
+        entityNumber: wo.writeOffNumber,
+        branchId: data.branchId,
+        amount: estimatedTotal,
+        actor,
+        ipAddress,
+      });
+    } else if (totalWriteOffVal > 0.0001) {
       await postMappedJournal(tx, {
         branchId: data.branchId,
         sourceType: "write_off",

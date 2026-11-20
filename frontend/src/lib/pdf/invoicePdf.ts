@@ -1,9 +1,14 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import QRCode from "qrcode";
 import { formatMoney } from "@/lib/money";
 import type { Invoice } from "@/types";
 
-export const generateInvoicePdf = (inv: Invoice, currency = "USD"): jsPDF => {
+export const generateInvoicePdf = (
+  inv: Invoice,
+  currency = "USD",
+  qrDataUrl?: string | null
+): jsPDF => {
   const doc = new jsPDF();
   const w = doc.internal.pageSize.getWidth();
   doc.setFontSize(24);
@@ -71,7 +76,15 @@ export const generateInvoicePdf = (inv: Invoice, currency = "USD"): jsPDF => {
     doc.setFont("helvetica", "bold");
     doc.text("Notes:", 14, y);
     doc.setFont("helvetica", "normal");
-    doc.text(doc.splitTextToSize(inv.notes, w - 28), 14, y + 6);
+    doc.text(doc.splitTextToSize(inv.notes, w - 65), 14, y + 6);
+  }
+  if (qrDataUrl) {
+    const qrY = Math.min(y + 4, doc.internal.pageSize.getHeight() - 52);
+    doc.addImage(qrDataUrl, "PNG", w - 48, qrY, 34, 34);
+    doc.setFontSize(7);
+    doc.setTextColor(100);
+    if (inv.icv) doc.text(`ICV #${inv.icv}`, w - 48, qrY + 38);
+    if (inv.invoiceHash) doc.text(`Hash: ${inv.invoiceHash.slice(0, 16)}...`, 14, doc.internal.pageSize.getHeight() - 16);
   }
   doc.setFontSize(8);
   doc.setTextColor(156, 163, 175);
@@ -79,5 +92,14 @@ export const generateInvoicePdf = (inv: Invoice, currency = "USD"): jsPDF => {
   return doc;
 };
 
-export const downloadInvoicePdf = (inv: Invoice, currency = "USD") =>
-  generateInvoicePdf(inv, currency).save(`${inv.invoiceNumber}.pdf`);
+export const downloadInvoicePdf = async (inv: Invoice, currency = "USD") => {
+  let qrDataUrl: string | null = null;
+  if (inv.qrTlv) {
+    try {
+      qrDataUrl = await QRCode.toDataURL(inv.qrTlv, { width: 160, margin: 1 });
+    } catch {
+      qrDataUrl = null;
+    }
+  }
+  generateInvoicePdf(inv, currency, qrDataUrl).save(`${inv.invoiceNumber}.pdf`);
+};

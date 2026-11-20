@@ -28,7 +28,7 @@ const customerSchema = z.object({
   taxNumber: z.string().max(50).optional(),
   currency: z.enum(["SAR", "AED", "USD", "EGP"]),
   paymentTerms: z.enum(["NET15", "NET30", "COD"]),
-  creditLimit: z.coerce.number().min(0).optional(),
+  creditLimit: z.union([z.number().min(0), z.null()]).optional(),
   billingAddress: z.string().max(500).optional(),
   shippingAddress: z.string().max(500).optional(),
   notes: z.string().max(1000).optional(),
@@ -47,7 +47,7 @@ const initialForm: FormData = {
   taxNumber: "",
   currency: "SAR",
   paymentTerms: "NET30",
-  creditLimit: 0,
+  creditLimit: null,
   billingAddress: "",
   shippingAddress: "",
   notes: "",
@@ -90,7 +90,7 @@ export default function Customers() {
         taxNumber: customer.taxNumber ?? "",
         currency: customer.currency,
         paymentTerms: customer.paymentTerms,
-        creditLimit: customer.creditLimit ?? 0,
+        creditLimit: customer.creditLimit ?? null,
         billingAddress: customer.billingAddress ?? "",
         shippingAddress: customer.shippingAddress ?? "",
         notes: customer.notes ?? "",
@@ -127,7 +127,7 @@ export default function Customers() {
       taxNumber: form.taxNumber,
       currency: form.currency,
       paymentTerms: form.paymentTerms,
-      creditLimit: Number(form.creditLimit) || 0,
+      creditLimit: form.creditLimit === undefined ? null : form.creditLimit,
       billingAddress: form.billingAddress,
       shippingAddress: form.shippingAddress,
       notes: form.notes,
@@ -333,14 +333,22 @@ export default function Customers() {
                 <Input id="taxNumber" value={form.taxNumber} onChange={(e) => setForm({ ...form, taxNumber: e.target.value })} />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="creditLimit">{t("customers.creditLimit")}</Label>
+                <Label htmlFor="creditLimit">
+                  {t("customers.creditLimit")} ({t("customers.blankUnlimited", "blank = unlimited, 0 = strict COD")})
+                </Label>
                 <Input
                   id="creditLimit"
                   type="number"
                   min={0}
                   step="0.01"
-                  value={form.creditLimit ?? 0}
-                  onChange={(e) => setForm({ ...form, creditLimit: e.target.value === "" ? 0 : Number(e.target.value) })}
+                  placeholder={t("customers.unlimited", "Unlimited")}
+                  value={form.creditLimit === null || form.creditLimit === undefined ? "" : form.creditLimit}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      creditLimit: e.target.value === "" ? null : Number(e.target.value),
+                    })
+                  }
                 />
               </div>
             </div>

@@ -121,6 +121,7 @@
     },
     "admin": {
       "title": "Administration",
+      "approvals": "Approvals",
       "auditLog": "Audit Log",
       "roles": "Roles & Permissions",
       "notifications": "Notifications",
@@ -1269,6 +1270,45 @@
       "liabilitiesAndEquity": "Liabilities & Equity",
       "currentYearEarnings": "Current Year Earnings",
       "totalLAndE": "Total Liabilities & Equity"
+    }
+  },
+  "approvals": {
+    "title": "Approvals & Controls",
+    "description": "Review pending operational requests under maker-checker rules and configure monetary thresholds.",
+    "queueTab": "Approval Queue",
+    "rulesTab": "Threshold Rules",
+    "requestsTitle": "Approval Requests",
+    "requestsDesc": "Approved items execute and post to inventory and GL atomically.",
+    "noRequests": "No approval requests yet.",
+    "document": "Document",
+    "type": "Type",
+    "requestedBy": "Requested By",
+    "reviewedBy": "Reviewed By",
+    "approve": "Approve",
+    "reject": "Reject",
+    "confirmApprove": "Approve Request",
+    "confirmReject": "Reject Request",
+    "approveDesc": "This will immediately post the document and any inventory/GL effects.",
+    "rejectDesc": "The document will be marked rejected and will not post stock or GL entries.",
+    "comment": "Decision Comment",
+    "commentPlaceholder": "Optional audit note",
+    "approvedToast": "Request approved and posted",
+    "rejectedToast": "Request rejected",
+    "rulesTitle": "Approval Threshold Rules",
+    "rulesDesc": "Documents reaching or exceeding an active rule's threshold enter the pending approval queue.",
+    "minAmount": "Min Amount",
+    "requiredRole": "Approver Role",
+    "ruleSaved": "Approval rule updated",
+    "statuses": {
+      "pending": "Pending",
+      "approved": "Approved",
+      "rejected": "Rejected"
+    },
+    "entities": {
+      "purchase_order": "Purchase Order",
+      "stock_transfer": "Stock Transfer",
+      "stock_adjustment": "Stock Adjustment",
+      "stock_write_off": "Stock Write-Off"
     }
   }
 }
