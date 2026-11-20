@@ -1,0 +1,188 @@
+import { roundCurrency } from "@erp/shared";
+import { and, asc, eq, gte, inArray, lte, type SQL } from "drizzle-orm";
+import { chartOfAccounts, journalEntries, journalLines } from "../../drizzle/schema.ts";
+import { num } from "../db/helpers.ts";
+import type { AppDatabase } from "../db/index.ts";
+import { ensureAccountingDefaults } from "./gl.service.ts";
+import type { RequestActor } from "./stock-locks.ts";
+
+export interface ReportFilter {
+  fromDate?: string;
+  toDate?: string;
+  asOfDate?: string;
+  branchId?: string;
+}
+
+function buildEntryConditions(actor: RequestActor, filter: ReportFilter): SQL[] {
+  const conds: SQL[] = [eq(journalEntries.status, "posted")];
+  if (filter.branchId) {
+    conds.push(eq(journalEntries.branchId, filter.branchId));
+  } else if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
+    if (actor.branchIds.length > 0) {
+      conds.push(inArray(journalEntries.branchId, actor.branchIds));
+    }
+  }
+  if (filter.fromDate) conds.push(gte(journalEntries.entryDate, new Date(filter.fromDate)));
+  if (filter.toDate) conds.push(lte(journalEntries.entryDate, new Date(filter.toDate)));
+  if (filter.asOfDate) conds.push(lte(journalEntries.entryDate, new Date(filter.asOfDate)));
+  return conds;
+}
+
+export async function getTrialBalance(db: AppDatabase, actor: RequestActor, filter: ReportFilter) {
+  await ensureAccountingDefaults(db);
+  const accounts = await db.select().from(chartOfAccounts).orderBy(asc(chartOfAccounts.code));
+  const conds = buildEntryConditions(actor, filter);
+
+  const lines = await db
+    .select({
+      accountId: journalLines.accountId,
+      debitBase: journalLines.debitBase,
+      creditBase: journalLines.creditBase,
+    })
+    .from(journalLines)
+    .innerJoin(journalEntries, eq(journalLines.entryId, journalEntries.id))
+    .where(and(...conds));
+
+  const totalsByAcct = new Map<string, { debit: number; credit: number }>();
+  for (const l of lines) {
+    const cur = totalsByAcct.get(l.accountId) ?? { debit: 0, credit: 0 };
+    cur.debit = roundCurrency(cur.debit + num(l.debitBase), 4);
+    cur.credit = roundCurrency(cur.credit + num(l.creditBase), 4);
+    totalsByAcct.set(l.accountId, cur);
+  }
+
+  let grandDebit = 0;
+  let grandCredit = 0;
+  const rows = accounts.map((a) => {
+    const t = totalsByAcct.get(a.id) ?? { debit: 0, credit: 0 };
+    const net = roundCurrency(t.debit - t.credit, 4);
+    const closingDebit = net > 0 ? net : 0;
+    const closingCredit = net < 0 ? Math.abs(net) : 0;
+    grandDebit = roundCurrency(grandDebit + t.debit, 4);
+    grandCredit = roundCurrency(grandCredit + t.credit, 4);
+    return {
+      accountId: a.id,
+      code: a.code,
+      name: a.name,
+      accountType: a.accountType,
+      normalBalance: a.normalBalance,
+      debit: t.debit,
+      credit: t.credit,
+      closingDebit,
+      closingCredit,
+    };
+  });
+
+  return {
+    rows,
+    totalDebit: grandDebit,
+    totalCredit: grandCredit,
+    isBalanced: Math.abs(grandDebit - grandCredit) <= 0.01,
+  };
+}
+
+export async function getProfitAndLoss(db: AppDatabase, actor: RequestActor, filter: ReportFilter) {
+  const tb = await getTrialBalance(db, actor, filter);
+  const revenueAccounts = tb.rows
+    .filter((r) => r.accountType === "revenue")
+    .map((r) => ({ ...r, balance: roundCurrency(r.credit - r.debit, 4) }));
+  const expenseAccounts = tb.rows
+    .filter((r) => r.accountType === "expense")
+    .map((r) => ({ ...r, balance: roundCurrency(r.debit - r.credit, 4) }));
+
+  const totalRevenue = roundCurrency(revenueAccounts.reduce((s, a) => s + a.balance, 0), 4);
+  const cogsTotal = roundCurrency(
+    expenseAccounts.filter((a) => a.code === "5000").reduce((s, a) => s + a.balance, 0),
+    4
+  );
+  const operatingExpenses = roundCurrency(
+    expenseAccounts.filter((a) => a.code !== "5000").reduce((s, a) => s + a.balance, 0),
+    4
+  );
+  const grossProfit = roundCurrency(totalRevenue - cogsTotal, 4);
+  const netIncome = roundCurrency(grossProfit - operatingExpenses, 4);
+
+  return {
+    revenueAccounts,
+    expenseAccounts,
+    totalRevenue,
+    cogsTotal,
+    grossProfit,
+    operatingExpenses,
+    netIncome,
+  };
+}
+
+export async function getBalanceSheet(db: AppDatabase, actor: RequestActor, filter: ReportFilter) {
+  const tb = await getTrialBalance(db, actor, { branchId: filter.branchId, asOfDate: filter.asOfDate });
+  const pnl = await getProfitAndLoss(db, actor, { branchId: filter.branchId, toDate: filter.asOfDate });
+
+  const assets = tb.rows
+    .filter((r) => r.accountType === "asset")
+    .map((r) => ({ ...r, balance: roundCurrency(r.debit - r.credit, 4) }));
+  const liabilities = tb.rows
+    .filter((r) => r.accountType === "liability")
+    .map((r) => ({ ...r, balance: roundCurrency(r.credit - r.debit, 4) }));
+  const equity = tb.rows
+    .filter((r) => r.accountType === "equity")
+    .map((r) => ({ ...r, balance: roundCurrency(r.credit - r.debit, 4) }));
+
+  const totalAssets = roundCurrency(assets.reduce((s, a) => s + a.balance, 0), 4);
+  const totalLiabilities = roundCurrency(liabilities.reduce((s, l) => s + l.balance, 0), 4);
+  const totalEquityAccounts = roundCurrency(equity.reduce((s, e) => s + e.balance, 0), 4);
+  const currentYearEarnings = pnl.netIncome;
+  const totalEquity = roundCurrency(totalEquityAccounts + currentYearEarnings, 4);
+  const totalLiabilitiesAndEquity = roundCurrency(totalLiabilities + totalEquity, 4);
+
+  return {
+    assets,
+    liabilities,
+    equity,
+    totalAssets,
+    totalLiabilities,
+    currentYearEarnings,
+    totalEquity,
+    totalLiabilitiesAndEquity,
+    isBalanced: Math.abs(totalAssets - totalLiabilitiesAndEquity) <= 0.01,
+  };
+}
+
+export async function getAccountLedger(
+  db: AppDatabase,
+  actor: RequestActor,
+  accountId: string,
+  filter: ReportFilter
+) {
+  const conds = [eq(journalLines.accountId, accountId), ...buildEntryConditions(actor, filter)];
+  const rows = await db
+    .select({
+      lineId: journalLines.id,
+      entryId: journalEntries.id,
+      entryNumber: journalEntries.entryNumber,
+      entryDate: journalEntries.entryDate,
+      sourceType: journalEntries.sourceType,
+      referenceNumber: journalEntries.referenceNumber,
+      memo: journalEntries.memo,
+      description: journalLines.description,
+      debitBase: journalLines.debitBase,
+      creditBase: journalLines.creditBase,
+    })
+    .from(journalLines)
+    .innerJoin(journalEntries, eq(journalLines.entryId, journalEntries.id))
+    .where(and(...conds))
+    .orderBy(asc(journalEntries.entryDate), asc(journalEntries.createdAt));
+
+  let runningBalance = 0;
+  return rows.map((r) => {
+    const debit = num(r.debitBase);
+    const credit = num(r.creditBase);
+    runningBalance = roundCurrency(runningBalance + debit - credit, 4);
+    return {
+      ...r,
+      entryDate: r.entryDate.toISOString(),
+      debit,
+      credit,
+      runningBalance,
+    };
+  });
+}

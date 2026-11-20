@@ -1,0 +1,662 @@
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Label } from "@/components/ui/label";
+import { Package, Plus, Search, Edit, Trash2, ChevronDown, ChevronRight, MapPin, FileText, Upload, Download } from "lucide-react";
+import * as XLSX from "xlsx";
+import { Product } from "@/types";
+import { useToast } from "@/hooks/use-toast";
+import { useInventory } from "@/contexts/InventoryContext";
+import { useAuditLog } from "@/contexts/AuditLogContext";
+import { useSettings } from "@/contexts/SettingsContext";
+import { formatMoney } from "@/lib/money";
+import ProductLedgerDialog from "@/components/inventory/ProductLedgerDialog";
+import BulkImportDialog, { ImportColumn } from "@/components/import/BulkImportDialog";
+import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { TaxonomySelect } from "@/components/taxonomy/TaxonomySelect";
+import { useTaxonomy } from "@/contexts/TaxonomyContext";
+
+const Products = () => {
+  const { t } = useTranslation();
+  const { settings } = useSettings();
+  const { products, addProduct, updateProduct, deleteProduct, getAvailableQuantity, getAssignedQuantity, branchProducts, branches } = useInventory();
+  const { record } = useAuditLog();
+  const { brands, categories } = useTaxonomy();
+  const [searchTerm, setSearchTerm] = useState("");
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
+  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [expandedProducts, setExpandedProducts] = useState<Set<string>>(new Set());
+  const [ledgerProduct, setLedgerProduct] = useState<Product | null>(null);
+  const [deleteProductId, setDeleteProductId] = useState<string | null>(null);
+  const { toast } = useToast();
+
+  const getBranchAssignments = (productId: string) => {
+    return branchProducts
+      .filter(bp => bp.productId === productId)
+      .map(bp => {
+        const branch = branches.find(b => b.branchId === bp.branchId);
+        return {
+          ...bp,
+          branchName: branch?.branch_name || `Branch ${bp.branchId}`
+        };
+      });
+  };
+
+  const toggleProductExpansion = (productId: string) => {
+    setExpandedProducts(prev => {
+      const next = new Set(prev);
+      if (next.has(productId)) {
+        next.delete(productId);
+      } else {
+        next.add(productId);
+      }
+      return next;
+    });
+  };
+
+  const [formData, setFormData] = useState({
+    product_name: "",
+    product_sku: "",
+    quantity: 0,
+    sellingPrice: 0,
+    costPrice: 0,
+    brand: "",
+    category: ""
+  });
+
+  const filteredProducts = products.filter(product =>
+    product.product_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    product.product_sku.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    product.brand.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    product.category.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  const resetForm = () => {
+    setFormData({
+      product_name: "",
+      product_sku: "",
+      quantity: 0,
+      sellingPrice: 0,
+      costPrice: 0,
+      brand: "",
+      category: ""
+    });
+    setEditingProduct(null);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // Duplicate SKU guard (case-insensitive)
+    const normalizedSku = formData.product_sku.trim().toLowerCase();
+    if (!normalizedSku) {
+      toast({ title: t('products.skuRequired', 'SKU is required'), variant: 'destructive' });
+      return;
+    }
+    const skuTaken = products.some(
+      p => p.product_sku.trim().toLowerCase() === normalizedSku &&
+           (!editingProduct || p.productId !== editingProduct.productId)
+    );
+    if (skuTaken) {
+      toast({
+        title: t('products.duplicateSku', 'Duplicate SKU'),
+        description: t('products.duplicateSkuDescription', 'A product with this SKU already exists.'),
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    // Numeric guards
+    if (formData.quantity < 0 || formData.sellingPrice < 0 || formData.costPrice < 0) {
+      toast({ title: t('products.negativeValues', 'Values cannot be negative'), variant: 'destructive' });
+      return;
+    }
+
+    // Taxonomy guards — brand and category must be picked from the managed lists.
+    if (!formData.brand.trim() || !formData.category.trim()) {
+      toast({
+        title: t('products.taxonomyRequired', 'Brand and category are required'),
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (editingProduct) {
+      const assignedQty = getAssignedQuantity(editingProduct.productId);
+      if (formData.quantity < assignedQty) {
+        toast({ 
+          title: t('products.cannotReduceQuantity'), 
+          description: t('products.unitsAssigned', { count: assignedQty }),
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      const res = await updateProduct(editingProduct.productId, formData);
+      if (res.ok === false) {
+        toast({ title: t('common.error'), description: res.error, variant: "destructive" });
+        return;
+      }
+      toast({ title: t('products.productUpdated') });
+    } else {
+      const res = await addProduct(formData);
+      if (res.ok === false) {
+        toast({ title: t('common.error'), description: res.error, variant: "destructive" });
+        return;
+      }
+      toast({ title: t('products.productAdded') });
+    }
+    
+    resetForm();
+    setIsAddDialogOpen(false);
+  };
+
+  const handleEdit = (product: Product) => {
+    setEditingProduct(product);
+    setFormData({
+      product_name: product.product_name,
+      product_sku: product.product_sku,
+      quantity: product.quantity,
+      sellingPrice: product.sellingPrice,
+      costPrice: product.costPrice,
+      brand: product.brand,
+      category: product.category
+    });
+    setIsAddDialogOpen(true);
+  };
+
+  const handleDeleteClick = (productId: string) => {
+    const assignedQty = getAssignedQuantity(productId);
+    if (assignedQty > 0) {
+      toast({ 
+        title: t('products.cannotDeleteProduct'), 
+        description: t('products.unitsAssignedRemoveFirst', { count: assignedQty }),
+        variant: "destructive"
+      });
+      return;
+    }
+    setDeleteProductId(productId);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (deleteProductId) {
+      const res = await deleteProduct(deleteProductId);
+      if (res.ok === false) {
+        toast({ title: t('products.cannotDeleteProduct'), description: res.error, variant: "destructive" });
+      } else {
+        toast({ title: t('products.productDeleted') });
+      }
+      setDeleteProductId(null);
+    }
+  };
+
+  const getStockStatus = (available: number, total: number) => {
+    if (total === 0) return { label: t('products.outOfStock'), variant: "destructive" as const };
+    if (available <= 10) return { label: t('products.lowAvailable'), variant: "destructive" as const };
+    if (available <= 25) return { label: t('products.mediumStock'), variant: "secondary" as const };
+    return { label: t('products.inStock'), variant: "default" as const };
+  };
+
+  // Product import columns configuration
+  const productImportColumns: ImportColumn[] = [
+    { key: "sku", label: "SKU", required: true },
+    { key: "name", label: "Name", required: true },
+    { key: "category", label: "Category", required: true },
+    { key: "brand", label: "Brand", required: true },
+    { key: "cost_price", label: "Cost Price", required: true },
+    { key: "selling_price", label: "Selling Price", required: true },
+    { key: "quantity", label: "Quantity", required: true },
+  ];
+
+  const handleProductImport = async (data: Record<string, unknown>[]) => {
+    // Validate brand / category against the managed taxonomy lists.
+    const knownBrands = new Set(brands.map(b => b.name.trim().toLowerCase()));
+    const knownCategories = new Set(categories.map(c => c.name.trim().toLowerCase()));
+    const unknown: string[] = [];
+    for (const row of data) {
+      const b = String(row.brand || '').trim();
+      const c = String(row.category || '').trim();
+      if (b && !knownBrands.has(b.toLowerCase())) unknown.push(b);
+      if (c && !knownCategories.has(c.toLowerCase())) unknown.push(c);
+    }
+    if (unknown.length > 0) {
+      toast({
+        title: t('products.unknownTaxonomy', 'Unknown brand or category'),
+        description: t('products.unknownTaxonomyDescription', {
+          defaultValue: 'Create these in Brands / Categories first: {{values}}',
+          values: [...new Set(unknown)].slice(0, 5).join(', '),
+        }),
+        variant: 'destructive',
+      });
+      throw new Error('unknown_taxonomy');
+    }
+
+    // Duplicate-SKU guard: check within the file AND against existing products.
+    const existingSkus = new Set(products.map(p => p.product_sku.trim().toLowerCase()));
+      const seen = new Set<string>();
+      const dupes: string[] = [];
+      for (const row of data) {
+        const sku = String(row.sku || '').trim().toLowerCase();
+        if (!sku) continue;
+        if (existingSkus.has(sku) || seen.has(sku)) {
+          dupes.push(sku);
+        }
+        seen.add(sku);
+      }
+      if (dupes.length > 0) {
+        toast({
+          title: t('products.duplicateSku', 'Duplicate SKU'),
+          description: t('products.duplicateSkuImport', {
+            defaultValue: 'Duplicate SKUs detected: {{skus}}',
+            skus: [...new Set(dupes)].slice(0, 5).join(', '),
+          }),
+          variant: 'destructive',
+        });
+        throw new Error('duplicate_sku');
+      }
+
+    let importedCount = 0;
+    for (const row of data) {
+      const res = await addProduct({
+        product_name: String(row.name || ""),
+        product_sku: String(row.sku || ""),
+        category: String(row.category || ""),
+        brand: String(row.brand || ""),
+        costPrice: Math.max(0, Number(row.cost_price) || 0),
+        sellingPrice: Math.max(0, Number(row.selling_price) || 0),
+        quantity: Math.max(0, Number(row.quantity) || 0),
+      });
+      if (res.ok) importedCount += 1;
+    }
+    record('inventory', `Bulk imported ${importedCount} products`, { entity: 'product' });
+  };
+
+  const handleExportProducts = () => {
+    const exportData = filteredProducts.map(product => ({
+      SKU: product.product_sku,
+      Name: product.product_name,
+      Category: product.category,
+      Brand: product.brand,
+      "Cost Price": product.costPrice,
+      "Selling Price": product.sellingPrice,
+      "Total Quantity": product.quantity,
+      "Assigned": getAssignedQuantity(product.productId),
+      "Available": getAvailableQuantity(product.productId),
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(exportData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Products");
+    XLSX.writeFile(wb, `products_export_${new Date().toISOString().split('T')[0]}.xlsx`);
+    
+    toast({
+      title: t('bulkImport.exportSuccess'),
+      description: t('bulkImport.dataExported', { count: exportData.length }),
+    });
+  };
+
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">{t('products.title')}</h1>
+          <p className="text-muted-foreground">
+            {t('products.catalogDescription')}
+          </p>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={handleExportProducts}>
+            <Download className="me-2 h-4 w-4" />
+            {t('bulkImport.export')}
+          </Button>
+          
+          <Button variant="outline" onClick={() => setIsImportDialogOpen(true)}>
+            <Upload className="me-2 h-4 w-4" />
+            {t('bulkImport.title')}
+          </Button>
+          
+          <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+            <DialogTrigger asChild>
+              <Button onClick={resetForm}>
+                <Plus className="me-2 h-4 w-4" />
+                {t('products.addProduct')}
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>
+                {editingProduct ? t('products.editProduct') : t('products.addNewProduct')}
+              </DialogTitle>
+              <DialogDescription>
+                {editingProduct 
+                  ? t('products.editDescription')
+                  : t('products.addDescription')
+                }
+              </DialogDescription>
+            </DialogHeader>
+            
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="product_name">{t('products.productName')}</Label>
+                  <Input
+                    id="product_name"
+                    value={formData.product_name}
+                    onChange={(e) => setFormData({...formData, product_name: e.target.value})}
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="product_sku">{t('products.sku')}</Label>
+                  <Input
+                    id="product_sku"
+                    value={formData.product_sku}
+                    onChange={(e) => setFormData({...formData, product_sku: e.target.value})}
+                    required
+                  />
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-3 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="quantity">{t('products.totalQuantity')}</Label>
+                  <Input
+                    id="quantity"
+                    type="number"
+                    min={editingProduct ? getAssignedQuantity(editingProduct.productId) : 0}
+                    value={formData.quantity}
+                    onChange={(e) => setFormData({...formData, quantity: parseInt(e.target.value) || 0})}
+                    required
+                  />
+                  {editingProduct && (
+                    <span className="text-xs text-muted-foreground">
+                      {t('products.minAssigned', { count: getAssignedQuantity(editingProduct.productId) })}
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="sellingPrice">{t('products.sellingPrice')}</Label>
+                  <Input
+                    id="sellingPrice"
+                    type="number"
+                    step="0.01"
+                    value={formData.sellingPrice}
+                    onChange={(e) => setFormData({...formData, sellingPrice: parseFloat(e.target.value) || 0})}
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="costPrice">{t('products.costPrice')}</Label>
+                  <Input
+                    id="costPrice"
+                    type="number"
+                    step="0.01"
+                    value={formData.costPrice}
+                    onChange={(e) => setFormData({...formData, costPrice: parseFloat(e.target.value) || 0})}
+                    required
+                  />
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="brand">{t('products.brand')}</Label>
+                  <TaxonomySelect
+                    kind="brands"
+                    id="brand"
+                    value={formData.brand}
+                    onChange={(v) => setFormData({...formData, brand: v})}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="category">{t('products.category')}</Label>
+                  <TaxonomySelect
+                    kind="categories"
+                    id="category"
+                    value={formData.category}
+                    onChange={(v) => setFormData({...formData, category: v})}
+                  />
+                </div>
+              </div>
+              
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => setIsAddDialogOpen(false)}>
+                  {t('common.cancel')}
+                </Button>
+                <Button type="submit">
+                  {editingProduct ? t('common.update') : t('common.add')} {t('products.title').slice(0, -1)}
+                </Button>
+              </div>
+            </form>
+            </DialogContent>
+          </Dialog>
+        </div>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Package className="h-5 w-5" />
+            <span>{t('products.productCatalog')}</span>
+          </CardTitle>
+          <CardDescription>
+            {t('products.catalogInfo')}
+          </CardDescription>
+          
+          <div className="flex items-center gap-2">
+            <Search className="h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder={t('products.searchProducts')}
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="max-w-sm"
+            />
+          </div>
+        </CardHeader>
+        
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{t('products.productName')}</TableHead>
+                <TableHead>{t('products.sku')}</TableHead>
+                <TableHead>{t('products.brand')}</TableHead>
+                <TableHead>{t('products.category')}</TableHead>
+                <TableHead>{t('products.totalQty')}</TableHead>
+                <TableHead>{t('products.assigned')}</TableHead>
+                <TableHead>{t('products.available')}</TableHead>
+                <TableHead>{t('products.sellingPrice')}</TableHead>
+                <TableHead>{t('products.costPrice')}</TableHead>
+                <TableHead>{t('common.status')}</TableHead>
+                <TableHead>{t('common.actions')}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filteredProducts.map((product) => {
+                const availableQty = getAvailableQuantity(product.productId);
+                const assignedQty = getAssignedQuantity(product.productId);
+                const stockStatus = getStockStatus(availableQty, product.quantity);
+                const branchAssignments = getBranchAssignments(product.productId);
+                const isExpanded = expandedProducts.has(product.productId);
+                
+                return (
+                  <Collapsible key={product.productId} asChild open={isExpanded}>
+                    <>
+                      <TableRow>
+                        <TableCell className="font-medium">{product.product_name}</TableCell>
+                        <TableCell>{product.product_sku}</TableCell>
+                        <TableCell>{product.brand}</TableCell>
+                        <TableCell>{product.category}</TableCell>
+                        <TableCell>{product.quantity}</TableCell>
+                        <TableCell>
+                          {assignedQty > 0 ? (
+                            <CollapsibleTrigger asChild>
+                              <Button 
+                                variant="ghost" 
+                                size="sm" 
+                                className="h-auto p-1 text-muted-foreground hover:text-foreground"
+                                onClick={() => toggleProductExpansion(product.productId)}
+                              >
+                                {isExpanded ? (
+                                  <ChevronDown className="h-4 w-4 me-1" />
+                                ) : (
+                                  <ChevronRight className="h-4 w-4 me-1" />
+                                )}
+                                {assignedQty}
+                              </Button>
+                            </CollapsibleTrigger>
+                          ) : (
+                            <span className="text-muted-foreground">0</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <span className={availableQty <= 10 ? "text-destructive font-medium" : ""}>
+                            {availableQty}
+                          </span>
+                        </TableCell>
+                        <TableCell>{formatMoney(product.sellingPrice, settings.currency)}</TableCell>
+                        <TableCell>{formatMoney(product.costPrice, settings.currency)}</TableCell>
+                        <TableCell>
+                          <Badge variant={stockStatus.variant}>
+                            {stockStatus.label}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleEdit(product)}
+                            >
+                              <Edit className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleDeleteClick(product.productId)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                      <CollapsibleContent asChild>
+                        <TableRow className="bg-muted/30 hover:bg-muted/40">
+                          <TableCell colSpan={11} className="py-3">
+                            <div className="ps-4 space-y-2">
+                              <div className="flex items-center justify-between">
+                                <p className="text-sm font-medium text-muted-foreground flex items-center gap-1">
+                                  <MapPin className="h-3.5 w-3.5" />
+                                  {t('products.branchAssignments')}
+                                </p>
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="gap-1.5"
+                                        onClick={() => setLedgerProduct(product)}
+                                      >
+                                        <FileText className="h-4 w-4" />
+                                        {t('movements.viewLedger')}
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      {t('movements.stockLedger')}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                                {branchAssignments.map((assignment) => (
+                                  <div 
+                                    key={`${assignment.productId}-${assignment.branchId}`}
+                                    className="flex items-center justify-between bg-background rounded-md px-3 py-2 border"
+                                  >
+                                    <span className="text-sm">{assignment.branchName}</span>
+                                    <Badge variant="secondary" className="ms-2">
+                                      {assignment.quantity}
+                                    </Badge>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      </CollapsibleContent>
+                    </>
+                  </Collapsible>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      {/* Product Ledger Dialog */}
+      {ledgerProduct && (
+        <ProductLedgerDialog
+          open={!!ledgerProduct}
+          onOpenChange={(open) => !open && setLedgerProduct(null)}
+          productId={ledgerProduct.productId}
+          productName={ledgerProduct.product_name}
+          productSku={ledgerProduct.product_sku}
+        />
+      )}
+
+      {/* Bulk Import Dialog */}
+      <BulkImportDialog
+        open={isImportDialogOpen}
+        onOpenChange={setIsImportDialogOpen}
+        title={t('bulkImport.importProducts')}
+        description={t('bulkImport.productsDescription')}
+        columns={productImportColumns}
+        templateFileName="products_import_template.xlsx"
+        onConfirmImport={handleProductImport}
+      />
+
+      <ConfirmDeleteDialog
+        open={deleteProductId !== null}
+        onOpenChange={(open) => !open && setDeleteProductId(null)}
+        onConfirm={handleConfirmDelete}
+        itemName={products.find(p => p.productId === deleteProductId)?.product_name}
+      />
+    </div>
+  );
+};
+
+export default Products;

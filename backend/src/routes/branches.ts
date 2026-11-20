@@ -1,0 +1,273 @@
+import type { FastifyInstance } from "fastify";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
+import { branchInputSchema, updateBranchSchema } from "@erp/shared";
+import {
+  branches,
+  branchProducts,
+  companySettings,
+  purchaseOrders,
+  salesOrders,
+  stockMovements,
+  stockSessions,
+  stockTransfers,
+} from "../../drizzle/schema.ts";
+import { ensureSeededDefaults } from "../auth/permissions.ts";
+import { AppError, nextDocNumber, writeAuditLog } from "../db/helpers.ts";
+import { getDb } from "../db/index.ts";
+import { eventBroadcaster } from "../events/broadcaster.ts";
+import { assertBranchAccess, requireAuth, requirePermission } from "../middleware/auth.ts";
+
+export async function branchRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/api/branches", { preHandler: requireAuth }, async (req) => {
+    const query = req.query as { scope?: string };
+    const actor = req.authUser!;
+    const db = getDb();
+    await ensureSeededDefaults(db);
+
+    if (query.scope === "directory") {
+      const list = await db
+        .select({
+          id: branches.id,
+          code: branches.code,
+          name: branches.name,
+          branchType: branches.branchType,
+          location: branches.location,
+          isDefault: branches.isDefault,
+          isActive: branches.isActive,
+        })
+        .from(branches)
+        .where(eq(branches.isActive, true))
+        .orderBy(asc(branches.createdAt));
+      return { branches: list };
+    }
+
+    if (actor.role === "admin" || actor.branchScopeMode === "all") {
+      const list = await db.select().from(branches).orderBy(asc(branches.createdAt));
+      return { branches: list };
+    }
+
+    if (actor.branchIds.length === 0) {
+      return { branches: [] };
+    }
+
+    const list = await db
+      .select()
+      .from(branches)
+      .where(inArray(branches.id, actor.branchIds))
+      .orderBy(asc(branches.createdAt));
+
+    return { branches: list };
+  });
+
+  app.post("/api/branches", { preHandler: requirePermission("branches", "create") }, async (req, reply) => {
+    const parsed = branchInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid branch input", "VALIDATION_ERROR");
+    }
+
+    const actor = req.authUser!;
+    const db = getDb();
+
+    const created = await db.transaction(async (tx) => {
+      await ensureSeededDefaults(tx);
+      const code = parsed.data.code || (await nextDocNumber(tx, "BR", "BR-"));
+
+      const existing = await tx.select({ id: branches.id }).from(branches).where(eq(branches.code, code)).limit(1);
+      if (existing.length > 0) {
+        throw new AppError(409, `Branch code '${code}' already exists`, "DUPLICATE_CODE");
+      }
+
+      if (parsed.data.isDefault) {
+        await tx.update(branches).set({ isDefault: false, updatedAt: new Date() }).where(eq(branches.isDefault, true));
+      }
+
+      const [row] = await tx
+        .insert(branches)
+        .values({
+          code,
+          name: parsed.data.name,
+          branchType: parsed.data.branchType,
+          location: parsed.data.location,
+          address: parsed.data.address,
+          phone: parsed.data.phone,
+          email: parsed.data.email,
+          managerName: parsed.data.managerName,
+          isDefault: parsed.data.isDefault,
+          isActive: parsed.data.isActive,
+        })
+        .returning();
+
+      if (row.isDefault) {
+        await tx
+          .update(companySettings)
+          .set({ defaultBranchId: row.id, updatedAt: new Date() })
+          .where(eq(companySettings.id, 1));
+      }
+
+      await writeAuditLog(tx, {
+        userId: actor.id,
+        userName: actor.name,
+        userRole: actor.role,
+        branchId: row.id,
+        action: "branch.created",
+        entityType: "branches",
+        entityId: row.id,
+        entityLabel: row.name,
+        details: { code: row.code, branchType: row.branchType },
+        ipAddress: req.ip,
+      });
+
+      return row;
+    });
+
+    eventBroadcaster.broadcast("branches_updated", { branchId: created.id });
+    return reply.status(201).send({ branch: created });
+  });
+
+  app.put("/api/branches/:id", { preHandler: requirePermission("branches", "edit") }, async (req) => {
+    const branchId = (req.params as { id: string }).id;
+    const parsed = updateBranchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid branch payload", "VALIDATION_ERROR");
+    }
+
+    const actor = req.authUser!;
+    assertBranchAccess(actor, branchId);
+    const db = getDb();
+
+    const updated = await db.transaction(async (tx) => {
+      const [current] = await tx.select().from(branches).where(eq(branches.id, branchId)).limit(1);
+      if (!current) {
+        throw new AppError(404, "Branch not found", "NOT_FOUND");
+      }
+
+      if (parsed.data.code && parsed.data.code !== current.code) {
+        const dup = await tx
+          .select({ id: branches.id })
+          .from(branches)
+          .where(eq(branches.code, parsed.data.code))
+          .limit(1);
+        if (dup.length > 0) {
+          throw new AppError(409, `Branch code '${parsed.data.code}' is already in use`, "DUPLICATE_CODE");
+        }
+      }
+
+      if (parsed.data.isDefault === true) {
+        await tx.update(branches).set({ isDefault: false, updatedAt: new Date() }).where(eq(branches.isDefault, true));
+      }
+
+      const [row] = await tx
+        .update(branches)
+        .set({
+          code: parsed.data.code ?? current.code,
+          name: parsed.data.name ?? current.name,
+          branchType: parsed.data.branchType ?? current.branchType,
+          location: parsed.data.location ?? current.location,
+          address: parsed.data.address ?? current.address,
+          phone: parsed.data.phone ?? current.phone,
+          email: parsed.data.email ?? current.email,
+          managerName: parsed.data.managerName ?? current.managerName,
+          isDefault: parsed.data.isDefault ?? current.isDefault,
+          isActive: parsed.data.isActive ?? current.isActive,
+          updatedAt: new Date(),
+        })
+        .where(eq(branches.id, branchId))
+        .returning();
+
+      if (row.isDefault) {
+        await tx
+          .update(companySettings)
+          .set({ defaultBranchId: row.id, updatedAt: new Date() })
+          .where(eq(companySettings.id, 1));
+      }
+
+      await writeAuditLog(tx, {
+        userId: actor.id,
+        userName: actor.name,
+        userRole: actor.role,
+        branchId: row.id,
+        action: "branch.updated",
+        entityType: "branches",
+        entityId: row.id,
+        entityLabel: row.name,
+        ipAddress: req.ip,
+      });
+
+      return row;
+    });
+
+    eventBroadcaster.broadcast("branches_updated", { branchId: updated.id });
+    return { branch: updated };
+  });
+
+  app.delete("/api/branches/:id", { preHandler: requirePermission("branches", "delete") }, async (req) => {
+    const branchId = (req.params as { id: string }).id;
+    const actor = req.authUser!;
+    assertBranchAccess(actor, branchId);
+    const db = getDb();
+
+    await db.transaction(async (tx) => {
+      const [current] = await tx.select().from(branches).where(eq(branches.id, branchId)).limit(1);
+      if (!current) {
+        throw new AppError(404, "Branch not found", "NOT_FOUND");
+      }
+      if (current.isDefault) {
+        throw new AppError(400, "Cannot delete the company default branch", "DEFAULT_BRANCH_PROTECTED");
+      }
+
+      const [{ stockCount }] = await tx
+        .select({ stockCount: sql<number>`count(*)::int` })
+        .from(branchProducts)
+        .where(and(eq(branchProducts.branchId, branchId), sql`${branchProducts.qtyOnHand} <> 0`));
+
+      const [{ moveCount }] = await tx
+        .select({ moveCount: sql<number>`count(*)::int` })
+        .from(stockMovements)
+        .where(eq(stockMovements.branchId, branchId));
+
+      const [{ sessCount }] = await tx
+        .select({ sessCount: sql<number>`count(*)::int` })
+        .from(stockSessions)
+        .where(eq(stockSessions.branchId, branchId));
+
+      const [{ poCount }] = await tx
+        .select({ poCount: sql<number>`count(*)::int` })
+        .from(purchaseOrders)
+        .where(eq(purchaseOrders.branchId, branchId));
+
+      const [{ soCount }] = await tx
+        .select({ soCount: sql<number>`count(*)::int` })
+        .from(salesOrders)
+        .where(eq(salesOrders.branchId, branchId));
+
+      const [{ trCount }] = await tx
+        .select({ trCount: sql<number>`count(*)::int` })
+        .from(stockTransfers)
+        .where(or(eq(stockTransfers.fromBranchId, branchId), eq(stockTransfers.toBranchId, branchId)));
+
+      if (stockCount > 0 || moveCount > 0 || sessCount > 0 || poCount > 0 || soCount > 0 || trCount > 0) {
+        throw new AppError(
+          409,
+          "Cannot delete branch with existing stock, movements, transfers, sessions, or orders. Deactivate it instead.",
+          "BRANCH_HAS_HISTORY"
+        );
+      }
+
+      await tx.delete(branches).where(eq(branches.id, branchId));
+
+      await writeAuditLog(tx, {
+        userId: actor.id,
+        userName: actor.name,
+        userRole: actor.role,
+        action: "branch.deleted",
+        entityType: "branches",
+        entityId: branchId,
+        entityLabel: current.name,
+        ipAddress: req.ip,
+      });
+    });
+
+    eventBroadcaster.broadcast("branches_updated", { branchId });
+    return { ok: true };
+  });
+}
