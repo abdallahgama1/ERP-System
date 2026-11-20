@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1795035962747,
+      "tag": "0000_erp_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1795174532943,
+      "tag": "0001_accounting_gl",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795198774637,
+      "tag": "0002_milestone_d1_controls",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795201231395,
+      "tag": "0003_milestone_d2_tracking_bom",
+      "breakpoints": true
+    }
+  ]
+}

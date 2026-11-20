@@ -1,0 +1,28 @@
+{
+  "name": "count-it-keep-it-erp",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend -c blue,green \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix packages/shared run typecheck && npm --prefix backend run typecheck && npm --prefix frontend run build",
+    "typecheck": "npm --prefix packages/shared run typecheck && npm --prefix backend run typecheck && npm --prefix frontend run typecheck",
+    "lint": "npm --prefix packages/shared run lint && npm --prefix backend run lint && npm --prefix frontend run lint",
+    "test": "npm --prefix backend run test",
+    "test:e2e": "playwright test",
+    "db:generate": "npm --prefix backend run db:generate",
+    "db:push": "npm --prefix backend run db:push",
+    "db:migrate": "npm --prefix backend run db:migrate"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "concurrently": "^10.0.7"
+  }
+}
