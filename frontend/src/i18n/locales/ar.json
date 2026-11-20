@@ -1339,6 +1339,19 @@
       "serialNumbers": "الأرقام التسلسلية",
       "trace": "تتبع",
       "noHistory": "لا توجد حركات مسجلة."
+    },
+    "picker": {
+      "lotTitle": "تخصيص الدفعات",
+      "eligibleQty": "المتاح الصالح",
+      "useAutoFefo": "اختيار تلقائي",
+      "pickManually": "اختيار الدفعات يدويًا",
+      "autoPickHint": "سيقوم الخادم بالاختيار التلقائي للدفعات الصالحة وفق {{strategy}}.",
+      "noEligibleLots": "لا توجد دفعات صالحة متوفرة في هذا الفرع.",
+      "allocated": "المخصص",
+      "serialTitle": "اختيار الأرقام التسلسلية",
+      "selected": "محدد",
+      "scanSerialPlaceholder": "امسح أو اكتب الرقم التسلسلي واضغط Enter...",
+      "noSerialsInBranch": "لا توجد أرقام تسلسلية متوفرة بالمخزون في هذا الفرع."
     }
   },
   "manufacturing": {

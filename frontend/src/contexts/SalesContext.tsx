@@ -639,6 +639,8 @@ export function SalesProvider({ children }: { children: ReactNode }) {
                 quantity: i.quantity,
                 unitPrice: i.unitPrice,
                 taxRate: i.taxPercent,
+                ...(i.lotAllocations && i.lotAllocations.length > 0 ? { lotAllocations: i.lotAllocations } : {}),
+                ...(i.serialNumbers && i.serialNumbers.length > 0 ? { serialNumbers: i.serialNumbers } : {}),
               })),
             },
           }

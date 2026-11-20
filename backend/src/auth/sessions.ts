@@ -41,6 +41,8 @@ export function generateOpaqueToken(): string {
 }
 
 function shouldUseSecureCookie(): boolean {
+  if (env.COOKIE_SECURE === "true") return true;
+  if (env.COOKIE_SECURE === "false") return false;
   return env.NODE_ENV === "production" && env.CORS_ORIGIN.startsWith("https://");
 }
 

@@ -33,6 +33,9 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
   test("bootstraps admin via Signup UI, renders ZATCA QR invoice, balanced Trial Balance, and Approvals UI", async ({
     page,
   }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+
     // 1. Sign up first admin user through real UI
     await page.goto("/signup");
     await page.locator("#name").fill("E2E Admin");
@@ -232,5 +235,44 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     await page.goto("/manufacturing/work-orders");
     await expect(page.getByRole("heading", { name: /Work Orders/i })).toBeVisible();
     await expect(page.getByText(woNumber, { exact: true })).toBeVisible();
+
+    // 9. Track 3: Verify Serial TrackingLinePicker inside New Invoice UI & Arabic RTL switching
+    const serialProdRes = await page.request.post("/api/products", {
+      data: {
+        sku: "E2E-SER-01",
+        name: "Serialized Router",
+        costPrice: 100,
+        sellingPrice: 250,
+        trackingMode: "serial",
+      },
+    });
+    expect(serialProdRes.status()).toBe(201);
+    const serialProdId = (await serialProdRes.json()).product.id as string;
+
+    const rcvSer = await page.request.post("/api/purchase-receives", {
+      data: {
+        vendorId,
+        branchId: hqId,
+        lines: [{ productId: serialProdId, quantity: 1, unitCost: 100, serialNumbers: ["SN-E2E-100"] }],
+      },
+    });
+    expect(rcvSer.status()).toBe(201);
+
+    await page.goto("/inventory/serials");
+    await expect(page.getByText("SN-E2E-100", { exact: true })).toBeVisible();
+
+    // Switch language to Arabic via UI LanguageSwitcher and verify RTL direction + zero runtime errors
+    await page.getByRole("button", { name: /English/i }).click();
+    await page.getByRole("menuitem", { name: /العربية/i }).click();
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+
+    await page.goto("/approvals");
+    await expect(page.getByRole("heading", { name: /الاعتمادات والرقابة/i })).toBeVisible();
+
+    await page.goto("/manufacturing/work-orders");
+    await expect(page.getByRole("heading", { name: /أوامر التشغيل/i })).toBeVisible();
+
+    expect(pageErrors).toEqual([]);
   });
 });

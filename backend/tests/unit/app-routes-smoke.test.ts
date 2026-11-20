@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../../src/app.ts";
+import { sendEmail } from "../../src/services/email.service.ts";
 
 describe("Fastify HTTP surface & security boundaries", () => {
   let app: FastifyInstance;
@@ -64,5 +65,19 @@ describe("Fastify HTTP surface & security boundaries", () => {
   it("does not expose removed /api/admin/seed-demo endpoint", async () => {
     const res = await app.inject({ method: "POST", url: "/api/admin/seed-demo" });
     expect(res.statusCode).toBe(404);
+  });
+
+  it("attaches Helmet security headers and skips SMTP gracefully when unconfigured", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/health" });
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.headers["x-frame-options"]).toBeTruthy();
+
+    const mailRes = await sendEmail({
+      to: "ops@test.local",
+      subject: "Smoke test",
+      text: "Testing safe fallback",
+    });
+    expect(mailRes.sent).toBe(false);
+    expect(mailRes.skippedReason).toBeTruthy();
   });
 });

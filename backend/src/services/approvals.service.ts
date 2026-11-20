@@ -19,6 +19,7 @@ import {
 import type { DbOrTx } from "../auth/permissions.ts";
 import { AppError, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
+import { sendApprovalRequestEmail } from "./email.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
@@ -194,6 +195,22 @@ export async function createApprovalRequest(
     details: { entityType: input.entityType, entityId: input.entityId, amount: input.amount },
     ipAddress: input.ipAddress,
   });
+
+  const approverEmails = await tx
+    .select({ email: users.email })
+    .from(userRoles)
+    .innerJoin(users, eq(users.id, userRoles.userId))
+    .where(and(inArray(userRoles.role, ["admin", "manager"]), eq(users.isActive, true)));
+
+  const recipients = approverEmails.map((u) => u.email).filter(Boolean);
+  if (recipients.length > 0) {
+    void sendApprovalRequestEmail(recipients, {
+      entityType: input.entityType,
+      entityNumber: input.entityNumber,
+      amount: input.amount,
+      requestedByName: input.actor.name,
+    });
+  }
 
   return reqRow;
 }

@@ -1,9 +1,20 @@
 import { buildApp } from "./app.ts";
-import { env } from "./config.ts";
+import { DEV_COOKIE_SECRET_PLACEHOLDER, env } from "./config.ts";
 import { checkDatabaseConnection, closeDatabase, getDb, isDatabaseConfigured } from "./db/index.ts";
 import { runOverdueSweep } from "./services/overdue-sweep.service.ts";
 
 async function start(): Promise<void> {
+  if (
+    env.NODE_ENV === "production" &&
+    (env.AUTH_COOKIE_SECRET === DEV_COOKIE_SECRET_PLACEHOLDER ||
+      env.AUTH_COOKIE_SECRET === "change-me-in-production-use-at-least-32-random-chars" ||
+      env.AUTH_COOKIE_SECRET.length < 32)
+  ) {
+    throw new Error(
+      "AUTH_COOKIE_SECRET must be set to a random string of at least 32 characters when NODE_ENV=production."
+    );
+  }
+
   const app = await buildApp();
 
   let overdueTimer: ReturnType<typeof setInterval> | null = null;

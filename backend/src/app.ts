@@ -1,6 +1,8 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
+import rateLimit from "@fastify/rate-limit";
 import { env } from "./config.ts";
 import { AppError } from "./db/helpers.ts";
 import { attachAuthHook } from "./middleware/auth.ts";
@@ -31,6 +33,7 @@ export interface BuildAppOptions {
  */
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
+    trustProxy: env.TRUST_PROXY,
     logger:
       options.logger === false
         ? false
@@ -38,6 +41,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
             level: env.NODE_ENV === "production" ? "info" : "warn",
           },
   });
+
+  await app.register(helmet, {
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: "same-site" },
+  });
+
+  if (env.NODE_ENV !== "test" && !env.DISABLE_RATE_LIMIT) {
+    await app.register(rateLimit, {
+      global: true,
+      max: 300,
+      timeWindow: "1 minute",
+      allowList: (req) => req.url === "/api/health" || req.url.startsWith("/api/events"),
+    });
+  }
 
   const allowedOrigins = env.CORS_ORIGIN.split(",")
     .map((s) => s.trim())

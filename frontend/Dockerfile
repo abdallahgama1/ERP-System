@@ -1,0 +1,23 @@
+FROM node:22-alpine AS builder
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json ./packages/shared/
+COPY frontend/package.json ./frontend/
+COPY backend/package.json ./backend/
+
+RUN npm ci --workspace=@erp/shared --workspace=erp-frontend --include-workspace-root=false
+
+COPY packages/shared ./packages/shared
+COPY frontend ./frontend
+
+RUN npm --prefix frontend run build
+
+FROM nginx:1.27-alpine AS runtime
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/frontend/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1/ || exit 1

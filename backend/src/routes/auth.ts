@@ -24,6 +24,7 @@ import { env } from "../config.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { requireAuth } from "../middleware/auth.ts";
+import { sendPasswordResetEmail } from "../services/email.service.ts";
 
 // Dummy hash used to equalize login response timing when user email does not exist
 const DUMMY_PASSWORD_HASH =
@@ -55,11 +56,16 @@ const resetPasswordSchema = z.object({
 });
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
+  const authRateLimit =
+    env.NODE_ENV !== "test" && !env.DISABLE_RATE_LIMIT
+      ? { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } }
+      : {};
+
   app.get("/api/auth/me", async (req) => {
     return { user: req.authUser ?? null };
   });
 
-  app.post("/api/auth/signup", async (req, reply) => {
+  app.post("/api/auth/signup", authRateLimit, async (req, reply) => {
     const parsed = signupSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid signup input", "VALIDATION_ERROR");
@@ -157,7 +163,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  app.post("/api/auth/login", async (req, reply) => {
+  app.post("/api/auth/login", authRateLimit, async (req, reply) => {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid credentials", "VALIDATION_ERROR");
@@ -268,7 +274,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true };
   });
 
-  app.post("/api/auth/forgot-password", async (req) => {
+  app.post("/api/auth/forgot-password", authRateLimit, async (req) => {
     const parsed = forgotPasswordSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues[0]?.message ?? "Valid email is required", "VALIDATION_ERROR");
@@ -292,7 +298,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         expiresAt,
       });
 
-      if (env.NODE_ENV !== "production") {
+      const emailRes = await sendPasswordResetEmail(userRow.email, rawToken);
+      if (!emailRes.sent && env.NODE_ENV !== "production") {
         app.log.info(`[AUTH] Password reset URL for ${userRow.email}: /reset-password?token=${rawToken}`);
       }
     }
@@ -303,7 +310,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.post("/api/auth/reset-password", async (req) => {
+  app.post("/api/auth/reset-password", authRateLimit, async (req) => {
     const parsed = resetPasswordSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid reset request", "VALIDATION_ERROR");

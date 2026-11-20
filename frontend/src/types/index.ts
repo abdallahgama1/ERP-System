@@ -140,6 +140,8 @@ export interface InvoiceItem {
   unitPrice: number;
   taxPercent: number;
   amount: number;
+  lotAllocations?: Array<{ lotId?: string; lotNumber?: string; quantity: number }>;
+  serialNumbers?: string[];
 }
 
 export interface Invoice {

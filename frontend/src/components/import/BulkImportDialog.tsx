@@ -82,19 +82,22 @@ export default function BulkImportDialog({
     onOpenChange(open);
   };
 
-  const validateHeaders = (headers: string[]): string[] => {
-    const normalizedHeaders = headers.map(h => h.toLowerCase().trim().replace(/\s+/g, '_'));
-    const missingColumns: string[] = [];
+  const validateHeaders = useCallback(
+    (headers: string[]): string[] => {
+      const normalizedHeaders = headers.map(h => h.toLowerCase().trim().replace(/\s+/g, '_'));
+      const missingColumns: string[] = [];
 
-    requiredColumns.forEach(col => {
-      const normalizedKey = col.key.toLowerCase().replace(/\s+/g, '_');
-      if (!normalizedHeaders.includes(normalizedKey)) {
-        missingColumns.push(col.label);
-      }
-    });
+      requiredColumns.forEach(col => {
+        const normalizedKey = col.key.toLowerCase().replace(/\s+/g, '_');
+        if (!normalizedHeaders.includes(normalizedKey)) {
+          missingColumns.push(col.label);
+        }
+      });
 
-    return missingColumns;
-  };
+      return missingColumns;
+    },
+    [requiredColumns]
+  );
 
   const normalizeHeaders = (headers: string[]): string[] => {
     return headers.map(h => h.toLowerCase().trim().replace(/\s+/g, '_'));
@@ -184,7 +187,7 @@ export default function BulkImportDialog({
     } finally {
       setIsLoading(false);
     }
-  }, [columns, requiredColumns, t, toast]);
+  }, [columns, t, toast, validateHeaders]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent<HTMLDivElement>) => {

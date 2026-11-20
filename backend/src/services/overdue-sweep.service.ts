@@ -5,10 +5,13 @@ import {
   products,
   salesInvoices,
   stockLots,
+  userRoles,
+  users,
   vendorBills,
 } from "../../drizzle/schema.ts";
 import { num, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
+import { sendOverdueDigestEmail } from "./email.service.ts";
 import type { RequestActor } from "./stock-locks.ts";
 
 export interface OverdueSweepResult {
@@ -209,11 +212,25 @@ export async function runOverdueSweep(
     }
   });
 
-  return {
+  const result: OverdueSweepResult = {
     overdueInvoicesMarked,
     overdueBillsMarked,
     expiringLotsAlerted,
     expiredLotsAlerted,
     checkedAt: now.toISOString(),
   };
+
+  if (overdueInvoicesMarked + overdueBillsMarked + expiredLotsAlerted > 0) {
+    const adminEmails = await db
+      .select({ email: users.email })
+      .from(userRoles)
+      .innerJoin(users, eq(users.id, userRoles.userId))
+      .where(and(eq(userRoles.role, "admin"), eq(users.isActive, true)));
+    const recipients = adminEmails.map((a) => a.email).filter(Boolean);
+    if (recipients.length > 0) {
+      void sendOverdueDigestEmail(recipients, result);
+    }
+  }
+
+  return result;
 }

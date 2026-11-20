@@ -211,14 +211,14 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const isRead = useCallback((id: string) => read.includes(id), [read]);
   const markRead = useCallback((id: string) => {
     setRead(prev => (prev.includes(id) ? prev : [...prev, id]));
-  }, []);
+  }, [setRead]);
   const markAllRead = useCallback(() => {
     setRead(prev => Array.from(new Set([...prev, ...notifications.map(n => n.id)])));
-  }, [notifications]);
+  }, [notifications, setRead]);
   const dismiss = useCallback((id: string) => {
     setDismissed(prev => (prev.includes(id) ? prev : [...prev, id]));
-  }, []);
-  const restoreDismissed = useCallback(() => setDismissed([]), []);
+  }, [setDismissed]);
+  const restoreDismissed = useCallback(() => setDismissed([]), [setDismissed]);
 
   const unreadCount = useMemo(
     () => notifications.filter(n => !read.includes(n.id)).length,

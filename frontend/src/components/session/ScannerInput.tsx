@@ -86,6 +86,8 @@ export const ScannerInput = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  const processScannerInputRef = useRef<(input: string) => void>(() => {});
+
   // Global keydown listener for scanner
   useEffect(() => {
     if (disabled) return;
@@ -116,7 +118,7 @@ export const ScannerInput = ({
           const finalInput = scannerBuffer.current;
           scannerBuffer.current = "";
           setIsScanning(false);
-          processScannerInput(finalInput);
+          processScannerInputRef.current(finalInput);
         }, scanDelay);
       } else {
         setIsScanning(false);
@@ -143,6 +145,7 @@ export const ScannerInput = ({
       handleScan(cleanedInput);
     }
   };
+  processScannerInputRef.current = processScannerInput;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

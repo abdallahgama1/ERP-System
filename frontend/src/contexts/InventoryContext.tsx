@@ -113,6 +113,8 @@ interface InventoryContextType {
     reason: WriteOffReason;
     note?: string;
     createdBy?: string;
+    lotAllocations?: Array<{ lotId?: string; lotNumber?: string; quantity: number }>;
+    serialNumbers?: string[];
   }) => Promise<{ ok: true; writeOff: WriteOff } | { ok: false; error: string }>;
 
   transfers: Transfer[];
@@ -120,7 +122,12 @@ interface InventoryContextType {
   createTransfer: (input: {
     sourceBranchId: string;
     destBranchId: string;
-    items: Array<{ productId: string; quantity: number }>;
+    items: Array<{
+      productId: string;
+      quantity: number;
+      lotAllocations?: Array<{ lotId?: string; lotNumber?: string; quantity: number }>;
+      serialNumbers?: string[];
+    }>;
     notes?: string;
     createdBy?: string;
   }) => Promise<{ ok: true; transfer: Transfer } | { ok: false; error: string }>;
@@ -647,7 +654,19 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
               branchId: input.branchId,
               reason: input.reason,
               notes: input.note ?? "",
-              lines: [{ productId: input.productId, quantity: input.quantity, notes: input.note ?? "" }],
+              lines: [
+                {
+                  productId: input.productId,
+                  quantity: input.quantity,
+                  notes: input.note ?? "",
+                  ...(input.lotAllocations && input.lotAllocations.length > 0
+                    ? { lotAllocations: input.lotAllocations }
+                    : {}),
+                  ...(input.serialNumbers && input.serialNumbers.length > 0
+                    ? { serialNumbers: input.serialNumbers }
+                    : {}),
+                },
+              ],
             },
           }
         );

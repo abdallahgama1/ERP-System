@@ -1,73 +1,109 @@
-# Welcome to your Lovable project
+# Count It Keep It — Enterprise Multi-Branch ERP
 
-## Project info
+A self-hosted, multi-branch Enterprise Resource Planning (ERP) platform built with **TypeScript**, **Fastify**, **Drizzle ORM**, **PostgreSQL**, **React 18**, **TanStack Query**, **Tailwind CSS**, and **shadcn/ui** with full English (`LTR`) and Arabic (`RTL`) localization.
 
-**URL**: https://lovable.dev/projects/6fddf719-d0b0-4e1e-a550-d530f8ef67c1
+---
 
-## How can I edit this code?
+## Architecture
 
-There are several ways of editing your application.
+The repository is an npm workspace monorepo:
 
-**Use Lovable**
+- **`packages/shared` (`@erp/shared`)** — Single source of truth for Zod validation schemas, domain status constants, role/module permission defaults, GL mapping keys, and deterministic WMAC/pricing helpers.
+- **`backend/`** — Fastify 5 API + Drizzle ORM (`69` PostgreSQL tables) with thin HTTP route adapters (`src/routes/`) delegating to transactional domain services (`src/services/`), atomic row locking (`SELECT ... FOR UPDATE`), SSE real-time cache invalidation (`/api/events`), `@fastify/helmet`, `@fastify/rate-limit`, and optional SMTP email delivery (`nodemailer`).
+- **`frontend/`** — Vite + React 18 + TanStack Query + shadcn/ui with lazy route code splitting, `ErrorBoundary`, targeted SSE invalidation, PDF generation (`jspdf` + ZATCA QR), and full `en`/`ar` i18n (`RTL`).
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/6fddf719-d0b0-4e1e-a550-d530f8ef67c1) and start prompting.
+---
 
-Changes made via Lovable will be committed automatically to this repo.
+## Core Modules
 
-**Use your preferred IDE**
+- **Self-Hosted Auth & RBAC:** `node:crypto` `scrypt` password hashing, HTTP-only `erp_session` cookies backed by `user_sessions`, first-user serialized admin bootstrap (`pg_advisory_xact_lock`), role/module permission matrix (`admin | manager | user`), and branch-level isolation (`all | selected`).
+- **Multi-Branch Inventory & Stock Ops:** WMAC costing, branch transfers with shortage resolution (`return_to_source | write_off_in_transit | backorder`), stock adjustments, write-offs, barcode-enabled stock-take count sessions, and immutable `stock_movements` ledger.
+- **Lot/Batch FEFO & Serial Lifecycle Tracking:** `FEFO` / `FIFO` / `LIFO` automatic lot allocation, expired-lot blocking on sales, 30-day expiry alerting, unique serial numbers, transfer re-homing, and full chain-of-custody tracing.
+- **Procure-to-Pay (P2P):** Vendors, Purchase Orders, Goods Receipts (`GRNI`), Vendor Bills with proportional Purchase Price Variance (`PPV`) allocation, Payments Made, and Purchase Returns.
+- **Order-to-Cash (O2C) & E-Invoicing:** Customers with atomic `FOR UPDATE` credit-limit enforcement (`NULL` unlimited / `0` strict COD / capped), Sales Orders, Invoices with ZATCA Phase-1 Base64 TLV QR + SHA-256 hash chaining (UI + PDF), Received Payments, Retainers, and Sales Returns.
+- **Double-Entry General Ledger:** Seeded 16-account Chart of Accounts (`1000..5900` including `1220 WIP Inventory`), fiscal years & period locking (`FISCAL_PERIOD_LOCKED`), manual & automated journals, non-destructive reversals, Trial Balance, Profit & Loss, Balance Sheet, and Account Ledger.
+- **Enterprise Controls & Manufacturing:** Opt-in maker-checker approval workflows (`approval_rules`, `approval_requests`), scheduled + admin-triggered Overdue & Lot Expiry Sweep, multi-component Bills of Materials (`BOM`) with DFS cycle detection, and Work Orders (`Issue` → `1220 WIP` → `Complete` / `Cancel`).
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+---
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+## Local Quickstart
 
-Follow these steps:
+### Prerequisites
+- **Node.js 20+** (22 LTS recommended)
+- **PostgreSQL 16+** (local or hosted such as [Neon](https://neon.tech))
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+### 1. Configure Environment
+Copy `backend/.env.example` to `backend/.env` and set `DATABASE_URL` (and optionally `TEST_DATABASE_URL` pointing to an isolated test database):
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+```bash
+cp backend/.env.example backend/.env
 ```
 
-**Edit a file directly in GitHub**
+### 2. Install & Migrate
+```bash
+npm install
+npm run db:migrate
+```
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+### 3. Run Development Servers
+```bash
+# Cross-platform
+npm run dev
 
-**Use GitHub Codespaces**
+# Or on Windows
+start.bat
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+- Frontend: `http://localhost:8080`
+- Backend API: `http://127.0.0.1:3001` (health check: `GET /api/health`)
 
-## What technologies are used for this project?
+> The first account registered via `/signup` automatically becomes `admin` with `'all'` branch scope and seeds default company settings, HQ branch, tax code, Chart of Accounts, fiscal calendar, and document sequences.
 
-This project is built with:
+---
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## Production Deployment (Docker & Compose)
 
-## How can I deploy this project?
+The included [docker-compose.yml](./docker-compose.yml) runs `frontend` (Nginx with SPA routing & `/api` SSE reverse proxy), `backend` (Fastify with auto-migration on boot), and an optional `postgres:17-alpine` container.
 
-Simply open [Lovable](https://lovable.dev/projects/6fddf719-d0b0-4e1e-a550-d530f8ef67c1) and click on Share -> Publish.
+### Option A — Self-Contained Stack (Bundled PostgreSQL)
+```bash
+export AUTH_COOKIE_SECRET="$(openssl rand -hex 32)"
+docker compose up -d --build
+```
+Access the ERP at `http://localhost:8080`.
 
-## Can I connect a custom domain to my Lovable project?
+### Option B — External Managed PostgreSQL (Neon / RDS / Supabase)
+Set `DATABASE_URL` and `AUTH_COOKIE_SECRET` (32+ random chars) in your environment or `.env`, then start only `backend` and `frontend`:
+```bash
+export DATABASE_URL="postgresql://USER:PASS@HOST/DB?sslmode=require"
+export AUTH_COOKIE_SECRET="$(openssl rand -hex 32)"
+docker compose up -d --build backend frontend
+```
 
-Yes, you can!
+---
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+## Verification & Testing
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/tips-tricks/custom-domain#step-by-step-guide)
+```bash
+# TypeScript typechecking across @erp/shared, backend, and frontend
+npm run typecheck
+
+# ESLint across all workspaces (0 errors, 0 warnings)
+npm run lint
+
+# Vitest unit + PostgreSQL integration tests (uses TEST_DATABASE_URL)
+npm test
+
+# Full-stack Playwright E2E suite (Auth, P2P, O2C, ZATCA QR, GL, Approvals, Tracking, BOM/WO & Arabic RTL)
+npm run test:e2e
+
+# Production build
+npm run build
+```
+
+### Database Migration Workflow
+```bash
+# After editing backend/drizzle/schema.ts
+npm run db:generate
+npm run db:migrate
+```

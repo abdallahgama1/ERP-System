@@ -14,6 +14,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { ProductSelector } from "@/components/purchases/ProductSelector";
+import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
+import { useBranch } from "@/contexts/BranchContext";
 import { useSales } from "@/contexts/SalesContext";
 import { useInventory } from "@/contexts/InventoryContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -45,15 +47,26 @@ interface DraftLine {
   quantity: number;
   unitPrice: number;
   taxPercent: number;
+  lotAllocations?: LotAllocationDraft[];
+  serialNumbers?: string[];
 }
 
 export default function Invoices() {
   const { t } = useTranslation();
   const { invoices, customers, salesOrders, createInvoice, sendInvoice, cancelInvoice, deleteInvoice, recordInvoicePayment, invoiceBalance } = useSales();
-  const { products } = useInventory();
+  const { products, branches } = useInventory();
+  const { activeBranchId } = useBranch();
   const { user } = useAuth();
   const { settings, taxCodes } = useSettings();
   const { toast } = useToast();
+  const productMap = useMemo(() => new Map(products.map((p) => [p.productId, p])), [products]);
+  const effectiveBranchId = useMemo(
+    () =>
+      activeBranchId !== "all"
+        ? activeBranchId
+        : (branches.find((b) => b.isDefault)?.branchId ?? branches[0]?.branchId),
+    [activeBranchId, branches]
+  );
   const defaultTaxRate = useMemo(
     () => (taxCodes.find((tc) => tc.isDefault && tc.isActive) ?? taxCodes.find((tc) => tc.isActive))?.rate ?? 0,
     [taxCodes]
@@ -390,6 +403,14 @@ export default function Invoices() {
                       <TableCell>
                         <div className="font-medium">{l.product_name}</div>
                         <div className="text-xs text-muted-foreground">{l.product_sku}</div>
+                        <TrackingLinePicker
+                          product={productMap.get(l.productId)}
+                          branchId={effectiveBranchId}
+                          quantity={l.quantity}
+                          lotAllocations={l.lotAllocations}
+                          serialNumbers={l.serialNumbers}
+                          onChange={(patch) => updateLine(i, patch)}
+                        />
                       </TableCell>
                       <TableCell>
                         <Input type="number" min={1} value={l.quantity}

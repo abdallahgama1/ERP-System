@@ -1345,6 +1345,19 @@
       "serialNumbers": "Serial Numbers",
       "trace": "Trace",
       "noHistory": "No movement history recorded."
+    },
+    "picker": {
+      "lotTitle": "Lot Allocation",
+      "eligibleQty": "Eligible",
+      "useAutoFefo": "Use Auto-Pick",
+      "pickManually": "Pick Lots Manually",
+      "autoPickHint": "Server will auto-pick non-expired lots using {{strategy}}.",
+      "noEligibleLots": "No eligible lots available at this branch.",
+      "allocated": "Allocated",
+      "serialTitle": "Serial Selection",
+      "selected": "selected",
+      "scanSerialPlaceholder": "Scan or type serial # and press Enter...",
+      "noSerialsInBranch": "No in-stock serial numbers found at this branch."
     }
   },
   "manufacturing": {

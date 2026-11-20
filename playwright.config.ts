@@ -29,7 +29,7 @@ export default defineConfig({
   reporter: "list",
   use: {
     baseURL: "http://127.0.0.1:4173",
-    channel: "chrome",
+    channel: process.env.CI ? undefined : "chrome",
     headless: true,
     trace: "retain-on-failure",
   },
@@ -47,6 +47,7 @@ export default defineConfig({
         HOST: "127.0.0.1",
         CORS_ORIGIN: "http://127.0.0.1:4173",
         DATABASE_URL: testDbUrl,
+        DISABLE_RATE_LIMIT: "true",
       },
     },
     {

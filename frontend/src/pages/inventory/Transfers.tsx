@@ -16,6 +16,7 @@ import { toast } from "sonner";
 import { useInventory } from "@/contexts/InventoryContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAuditLog } from "@/contexts/AuditLogContext";
+import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
 import type { TransferStatus } from "@/types";
 
 const STATUSES: (TransferStatus | "All")[] = ["All", "Draft", "In Transit", "Received", "Cancelled"];
@@ -27,7 +28,12 @@ const statusVariant: Record<TransferStatus, "default" | "secondary" | "destructi
   Cancelled: "destructive",
 };
 
-type Line = { productId: string; quantity: number };
+type Line = {
+  productId: string;
+  quantity: number;
+  lotAllocations?: LotAllocationDraft[];
+  serialNumbers?: string[];
+};
 
 export default function Transfers() {
   const { t } = useTranslation();
@@ -202,29 +208,44 @@ export default function Transfers() {
               <Label>{t("transfers.items", "Items")}</Label>
               {lines.map((line, idx) => {
                 const avail = availableAt(line.productId, sourceId);
+                const selectedProd = products.find((p) => p.productId === line.productId);
                 return (
-                  <div key={idx} className="flex items-end gap-2">
-                    <div className="flex-1 space-y-1">
-                      <Select value={line.productId ? String(line.productId) : ""} onValueChange={v => {
-                        const copy = [...lines]; copy[idx] = { ...copy[idx], productId: v }; setLines(copy);
-                      }}>
-                        <SelectTrigger><SelectValue placeholder={t("movements.product")} /></SelectTrigger>
-                        <SelectContent>
-                          {products.map(p => <SelectItem key={p.productId} value={String(p.productId)}>{p.product_name} • {p.product_sku}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                      {line.productId && sourceId && (
-                        <p className="text-xs text-muted-foreground">{t("transfers.availableAtSource", "Available at source")}: {avail}</p>
-                      )}
+                  <div key={idx} className="space-y-2 rounded-md border p-2.5">
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1 space-y-1">
+                        <Select value={line.productId ? String(line.productId) : ""} onValueChange={v => {
+                          const copy = [...lines]; copy[idx] = { productId: v, quantity: copy[idx].quantity }; setLines(copy);
+                        }}>
+                          <SelectTrigger><SelectValue placeholder={t("movements.product")} /></SelectTrigger>
+                          <SelectContent>
+                            {products.map(p => <SelectItem key={p.productId} value={String(p.productId)}>{p.product_name} • {p.product_sku}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                        {line.productId && sourceId && (
+                          <p className="text-xs text-muted-foreground">{t("transfers.availableAtSource", "Available at source")}: {avail}</p>
+                        )}
+                      </div>
+                      <div className="w-28 space-y-1">
+                        <Input type="number" min={1} value={line.quantity} onChange={e => {
+                          const copy = [...lines]; copy[idx] = { ...copy[idx], quantity: Number(e.target.value) }; setLines(copy);
+                        }} />
+                      </div>
+                      <Button variant="ghost" size="icon" onClick={() => setLines(lines.filter((_, i) => i !== idx))} disabled={lines.length === 1}>
+                        <X className="h-4 w-4" />
+                      </Button>
                     </div>
-                    <div className="w-28 space-y-1">
-                      <Input type="number" min={1} value={line.quantity} onChange={e => {
-                        const copy = [...lines]; copy[idx] = { ...copy[idx], quantity: Number(e.target.value) }; setLines(copy);
-                      }} />
-                    </div>
-                    <Button variant="ghost" size="icon" onClick={() => setLines(lines.filter((_, i) => i !== idx))} disabled={lines.length === 1}>
-                      <X className="h-4 w-4" />
-                    </Button>
+                    <TrackingLinePicker
+                      product={selectedProd}
+                      branchId={sourceId || undefined}
+                      quantity={line.quantity}
+                      lotAllocations={line.lotAllocations}
+                      serialNumbers={line.serialNumbers}
+                      onChange={(patch) => {
+                        const copy = [...lines];
+                        copy[idx] = { ...copy[idx], ...patch };
+                        setLines(copy);
+                      }}
+                    />
                   </div>
                 );
               })}

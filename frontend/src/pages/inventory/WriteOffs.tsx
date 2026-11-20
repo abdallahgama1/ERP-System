@@ -17,6 +17,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAuditLog } from "@/contexts/AuditLogContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
+import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
 import type { WriteOffReason } from "@/types";
 
 const REASONS: WriteOffReason[] = ["damage", "expiry", "loss", "theft", "other"];
@@ -43,6 +44,12 @@ export default function WriteOffs() {
   const [qty, setQty] = useState<string>("");
   const [reason, setReason] = useState<WriteOffReason>("damage");
   const [note, setNote] = useState("");
+  const [lotAllocations, setLotAllocations] = useState<LotAllocationDraft[] | undefined>(undefined);
+  const [serialNumbers, setSerialNumbers] = useState<string[] | undefined>(undefined);
+  const selectedProduct = useMemo(
+    () => products.find((p) => p.productId === productId),
+    [products, productId]
+  );
 
   const available = useMemo(() => {
     if (!branchId || !productId) return null;
@@ -63,6 +70,7 @@ export default function WriteOffs() {
 
   const reset = () => {
     setBranchId(""); setProductId(""); setQty(""); setReason("damage"); setNote("");
+    setLotAllocations(undefined); setSerialNumbers(undefined);
   };
 
   const submit = async () => {
@@ -77,6 +85,8 @@ export default function WriteOffs() {
       reason,
       note: note || undefined,
       createdBy: user?.name,
+      lotAllocations,
+      serialNumbers,
     });
     if (res.ok === false) {
       toast.error(res.error);
@@ -204,6 +214,18 @@ export default function WriteOffs() {
                 <Input type="number" min={1} value={qty} onChange={e => setQty(e.target.value)} />
               </div>
             </div>
+            <TrackingLinePicker
+              product={selectedProduct}
+              branchId={branchId || undefined}
+              quantity={Number(qty) || 0}
+              allowExpired
+              lotAllocations={lotAllocations}
+              serialNumbers={serialNumbers}
+              onChange={(patch) => {
+                if ("lotAllocations" in patch) setLotAllocations(patch.lotAllocations);
+                if ("serialNumbers" in patch) setSerialNumbers(patch.serialNumbers);
+              }}
+            />
             <div className="space-y-1">
               <Label>{t("writeOffs.reason", "Reason")}</Label>
               <Select value={reason} onValueChange={v => setReason(v as WriteOffReason)}>
