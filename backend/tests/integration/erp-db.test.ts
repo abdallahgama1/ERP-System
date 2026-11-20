@@ -37,7 +37,7 @@ describe.skipIf(!testDbUrl)("PostgreSQL ERP transaction & concurrency invariants
 
     // Reset transactional & GL tables cleanly in isolated TEST_DATABASE_URL
     await db.execute(
-      sql`TRUNCATE TABLE approval_requests, approval_rules, journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE`
+      sql`TRUNCATE TABLE work_order_materials, work_orders, bom_components, bills_of_materials, stock_movement_allocations, stock_serials, branch_lot_balances, stock_lots, approval_requests, approval_rules, journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE`
     );
 
     const [signupA, signupB] = await Promise.all([
@@ -571,5 +571,395 @@ describe.skipIf(!testDbUrl)("PostgreSQL ERP transaction & concurrency invariants
     });
     expect(tbRes.statusCode).toBe(200);
     expect(tbRes.json().isBalanced).toBe(true);
+  });
+
+  it("enforces FEFO lot picking, expiry blocking, and serial lifecycle tracing", async () => {
+    const loginRes = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "admin@test.local", password: "Password123!" },
+    });
+    const adminCookie = loginRes.cookies.find((c) => c.name === "erp_session")!.value;
+
+    const branchesRes = await app.inject({
+      method: "GET",
+      url: "/api/branches",
+      cookies: { erp_session: adminCookie },
+    });
+    const allBranches = branchesRes.json().branches as Array<{ id: string }>;
+    const hqId = allBranches[0].id;
+    const retailId = allBranches[1].id;
+
+    const vendorRes = await app.inject({
+      method: "POST",
+      url: "/api/vendors",
+      cookies: { erp_session: adminCookie },
+      payload: { name: "Pharma & Hardware Vendor" },
+    });
+    const vendorId = vendorRes.json().vendor.id as string;
+
+    const custRes = await app.inject({
+      method: "POST",
+      url: "/api/customers",
+      cookies: { erp_session: adminCookie },
+      payload: { name: "D2 Buyer", creditLimit: null },
+    });
+    const customerId = custRes.json().customer.id as string;
+
+    // 1. FEFO Lot Tracking + Expiry Blocking + Overdue/Expiry Sweep + Write-Off
+    const lotProdRes = await app.inject({
+      method: "POST",
+      url: "/api/products",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        sku: "LOT-MED-01",
+        name: "Vaccine Vial",
+        costPrice: 10,
+        sellingPrice: 30,
+        trackingMode: "lot",
+        requiresExpiry: true,
+        pickingStrategy: "FEFO",
+      },
+    });
+    expect(lotProdRes.statusCode).toBe(201);
+    const lotProdId = lotProdRes.json().product.id as string;
+
+    const pastDate = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const soonDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
+    const laterDate = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString();
+
+    for (const [lotNumber, expiryDate, unitCost] of [
+      ["LOT-EXPIRED", pastDate, 10],
+      ["LOT-SOON", soonDate, 12],
+      ["LOT-LATER", laterDate, 15],
+    ] as const) {
+      const rcv = await app.inject({
+        method: "POST",
+        url: "/api/purchase-receives",
+        cookies: { erp_session: adminCookie },
+        payload: {
+          vendorId,
+          branchId: hqId,
+          lines: [{ productId: lotProdId, quantity: 5, unitCost, lotNumber, expiryDate }],
+        },
+      });
+      expect(rcv.statusCode).toBe(201);
+    }
+
+    // Sweep must flag both expired and expiring-soon lots
+    const sweepRes = await app.inject({
+      method: "POST",
+      url: "/api/admin/jobs/overdue-sweep",
+      cookies: { erp_session: adminCookie },
+    });
+    expect(sweepRes.statusCode).toBe(200);
+    expect(sweepRes.json().expiredLotsAlerted).toBeGreaterThanOrEqual(1);
+    expect(sweepRes.json().expiringLotsAlerted).toBeGreaterThanOrEqual(1);
+
+    // Selling 6 units must auto-pick all 5 from LOT-SOON and 1 from LOT-LATER (skipping LOT-EXPIRED!)
+    const fefoInv = await app.inject({
+      method: "POST",
+      url: "/api/sales-invoices",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        customerId,
+        branchId: hqId,
+        status: "Sent",
+        dueDate: "2026-12-31",
+        lines: [{ productId: lotProdId, quantity: 6, unitPrice: 30 }],
+      },
+    });
+    expect(fefoInv.statusCode).toBe(201);
+
+    const lotsAfterSale = (
+      await app.inject({
+        method: "GET",
+        url: `/api/tracking/lots?branchId=${hqId}&productId=${lotProdId}&includeZero=true`,
+        cookies: { erp_session: adminCookie },
+      })
+    ).json().lots as Array<{ lotNumber: string; qtyOnHand: number }>;
+
+    expect(lotsAfterSale.find((l) => l.lotNumber === "LOT-EXPIRED")?.qtyOnHand).toBe(5);
+    expect(lotsAfterSale.find((l) => l.lotNumber === "LOT-SOON")?.qtyOnHand).toBe(0);
+    expect(lotsAfterSale.find((l) => l.lotNumber === "LOT-LATER")?.qtyOnHand).toBe(4);
+
+    // Trying to sell 5 more (only 4 non-expired remain) must fail with LOT_EXPIRED
+    const blockedSale = await app.inject({
+      method: "POST",
+      url: "/api/sales-invoices",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        customerId,
+        branchId: hqId,
+        status: "Sent",
+        dueDate: "2026-12-31",
+        lines: [{ productId: lotProdId, quantity: 5, unitPrice: 30 }],
+      },
+    });
+    expect(blockedSale.statusCode).toBe(400);
+    expect(blockedSale.json().code).toBe("LOT_EXPIRED");
+
+    // Writing off the 5 expired units explicitly must succeed
+    const woExpired = await app.inject({
+      method: "POST",
+      url: "/api/write-offs",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        branchId: hqId,
+        reason: "Expired",
+        lines: [{ productId: lotProdId, quantity: 5, lotAllocations: [{ lotNumber: "LOT-EXPIRED", quantity: 5 }] }],
+      },
+    });
+    expect(woExpired.statusCode).toBe(201);
+
+    // 2. Serial Number Uniqueness, Transfer & Lifecycle Trace
+    const serialProdRes = await app.inject({
+      method: "POST",
+      url: "/api/products",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        sku: "SER-LAP-01",
+        name: "Enterprise Laptop",
+        costPrice: 800,
+        sellingPrice: 1200,
+        trackingMode: "serial",
+      },
+    });
+    expect(serialProdRes.statusCode).toBe(201);
+    const serialProdId = serialProdRes.json().product.id as string;
+
+    const rcvSerial = await app.inject({
+      method: "POST",
+      url: "/api/purchase-receives",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        vendorId,
+        branchId: hqId,
+        lines: [{ productId: serialProdId, quantity: 2, unitCost: 800, serialNumbers: ["SN-D2-001", "SN-D2-002"] }],
+      },
+    });
+    expect(rcvSerial.statusCode).toBe(201);
+
+    // Duplicate serial rejected with 409
+    const dupSerial = await app.inject({
+      method: "POST",
+      url: "/api/purchase-receives",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        vendorId,
+        branchId: hqId,
+        lines: [{ productId: serialProdId, quantity: 1, unitCost: 800, serialNumbers: ["SN-D2-001"] }],
+      },
+    });
+    expect(dupSerial.statusCode).toBe(409);
+    expect(dupSerial.json().code).toBe("DUPLICATE_SERIAL");
+
+    // Transfer SN-D2-001 to Retail and receive it
+    const trSerial = await app.inject({
+      method: "POST",
+      url: "/api/transfers",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        fromBranchId: hqId,
+        toBranchId: retailId,
+        status: "In Transit",
+        lines: [{ productId: serialProdId, quantity: 1, serialNumbers: ["SN-D2-001"] }],
+      },
+    });
+    expect(trSerial.statusCode).toBe(201);
+    const trId = trSerial.json().transfer.id as string;
+
+    const rcvTrSerial = await app.inject({
+      method: "POST",
+      url: `/api/transfers/${trId}/receive`,
+      cookies: { erp_session: adminCookie },
+      payload: { items: [{ productId: serialProdId, qtyReceived: 1 }] },
+    });
+    expect(rcvTrSerial.statusCode).toBe(200);
+
+    // Sell SN-D2-001 at Retail and trace its lifecycle
+    const sellSerial = await app.inject({
+      method: "POST",
+      url: "/api/sales-invoices",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        customerId,
+        branchId: retailId,
+        status: "Sent",
+        dueDate: "2026-12-31",
+        lines: [{ productId: serialProdId, quantity: 1, unitPrice: 1200, serialNumbers: ["SN-D2-001"] }],
+      },
+    });
+    expect(sellSerial.statusCode).toBe(201);
+
+    const serialsList = (
+      await app.inject({
+        method: "GET",
+        url: "/api/tracking/serials?search=SN-D2-001",
+        cookies: { erp_session: adminCookie },
+      })
+    ).json().serials as Array<{ id: string; status: string }>;
+    expect(serialsList).toHaveLength(1);
+    expect(serialsList[0].status).toBe("sold");
+
+    const traceRes = await app.inject({
+      method: "GET",
+      url: `/api/tracking/serials/${serialsList[0].id}/trace`,
+      cookies: { erp_session: adminCookie },
+    });
+    expect(traceRes.statusCode).toBe(200);
+    expect(traceRes.json().history.length).toBe(4); // purchase_receive, transfer_out, transfer_in, sales_invoice
+  });
+
+  it("enforces BOM cycle detection and balanced Work Order WIP GL across completion & cancellation", async () => {
+    const loginRes = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "admin@test.local", password: "Password123!" },
+    });
+    const adminCookie = loginRes.cookies.find((c) => c.name === "erp_session")!.value;
+
+    const branchesRes = await app.inject({
+      method: "GET",
+      url: "/api/branches",
+      cookies: { erp_session: adminCookie },
+    });
+    const hqId = (branchesRes.json().branches as Array<{ id: string }>)[0].id;
+
+    // 3. Manufacturing BOM Cycle Detection & Work Order WIP GL Lifecycle
+    const rawRes = await app.inject({
+      method: "POST",
+      url: "/api/products",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        sku: "RAW-ALU-01",
+        name: "Aluminum Sheet",
+        costPrice: 25,
+        sellingPrice: 40,
+        initialStock: [{ branchId: hqId, quantity: 100, unitCost: 25 }],
+      },
+    });
+    const rawId = rawRes.json().product.id as string;
+
+    const fgRes = await app.inject({
+      method: "POST",
+      url: "/api/products",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        sku: "FG-CHAS-01",
+        name: "Machined Chassis",
+        itemType: "manufactured",
+        costPrice: 50,
+        sellingPrice: 150,
+      },
+    });
+    const fgId = fgRes.json().product.id as string;
+
+    const bomRes = await app.inject({
+      method: "POST",
+      url: "/api/manufacturing/boms",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        productId: fgId,
+        name: "Chassis BOM v1",
+        outputQty: 1,
+        components: [{ componentProductId: rawId, quantity: 2, scrapPercent: 0 }],
+      },
+    });
+    expect(bomRes.statusCode).toBe(201);
+    const bomId = bomRes.json().bom.id as string;
+
+    // Circular BOM (RAW depends on FG) must fail with BOM_CYCLE_DETECTED
+    const cycleRes = await app.inject({
+      method: "POST",
+      url: "/api/manufacturing/boms",
+      cookies: { erp_session: adminCookie },
+      payload: {
+        productId: rawId,
+        name: "Circular Bad BOM",
+        outputQty: 1,
+        components: [{ componentProductId: fgId, quantity: 1 }],
+      },
+    });
+    expect(cycleRes.statusCode).toBe(400);
+    expect(cycleRes.json().code).toBe("BOM_CYCLE_DETECTED");
+
+    // Work Order #1: 5 units -> Issue -> Partial Complete (2) -> Final Complete (3)
+    const wo1Res = await app.inject({
+      method: "POST",
+      url: "/api/manufacturing/work-orders",
+      cookies: { erp_session: adminCookie },
+      payload: { bomId, branchId: hqId, plannedQty: 5 },
+    });
+    expect(wo1Res.statusCode).toBe(201);
+    const wo1Id = wo1Res.json().workOrder.id as string;
+
+    const issue1 = await app.inject({
+      method: "POST",
+      url: `/api/manufacturing/work-orders/${wo1Id}/issue`,
+      cookies: { erp_session: adminCookie },
+      payload: {},
+    });
+    expect(issue1.statusCode).toBe(200);
+
+    const comp1a = await app.inject({
+      method: "POST",
+      url: `/api/manufacturing/work-orders/${wo1Id}/complete`,
+      cookies: { erp_session: adminCookie },
+      payload: { qtyCompleted: 2 },
+    });
+    expect(comp1a.statusCode).toBe(200);
+    expect(comp1a.json().workOrder.status).toBe("In Progress");
+
+    const comp1b = await app.inject({
+      method: "POST",
+      url: `/api/manufacturing/work-orders/${wo1Id}/complete`,
+      cookies: { erp_session: adminCookie },
+      payload: { qtyCompleted: 3 },
+    });
+    expect(comp1b.statusCode).toBe(200);
+    expect(comp1b.json().workOrder.status).toBe("Completed");
+
+    // Work Order #2: 2 units -> Issue -> Cancel (reverses WIP cleanly back to 0)
+    const wo2Res = await app.inject({
+      method: "POST",
+      url: "/api/manufacturing/work-orders",
+      cookies: { erp_session: adminCookie },
+      payload: { bomId, branchId: hqId, plannedQty: 2 },
+    });
+    const wo2Id = wo2Res.json().workOrder.id as string;
+
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: `/api/manufacturing/work-orders/${wo2Id}/issue`,
+          cookies: { erp_session: adminCookie },
+          payload: {},
+        })
+      ).statusCode
+    ).toBe(200);
+
+    const cancel2 = await app.inject({
+      method: "POST",
+      url: `/api/manufacturing/work-orders/${wo2Id}/cancel`,
+      cookies: { erp_session: adminCookie },
+      payload: { reason: "Order cancelled" },
+    });
+    expect(cancel2.statusCode).toBe(200);
+    expect(cancel2.json().workOrder.status).toBe("Cancelled");
+
+    // Verify Trial Balance is balanced AND 1220 WIP net balance === 0
+    const tbFinal = await app.inject({
+      method: "GET",
+      url: "/api/accounting/reports/trial-balance",
+      cookies: { erp_session: adminCookie },
+    });
+    expect(tbFinal.statusCode).toBe(200);
+    const tbBody = tbFinal.json();
+    expect(tbBody.isBalanced).toBe(true);
+    const wipRow = (tbBody.rows as Array<{ code: string; debit: number; credit: number }>).find((r) => r.code === "1220");
+    expect(wipRow).toBeTruthy();
+    expect(Math.abs(wipRow!.debit - wipRow!.credit)).toBeLessThan(0.01);
   });
 });

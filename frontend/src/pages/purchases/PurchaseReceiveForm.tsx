@@ -32,6 +32,9 @@ import type { PurchaseOrder, PurchaseOrderItem, Branch } from "@/types";
 interface ReceiveLineItem extends PurchaseOrderItem {
   receivingNow: number;
   remainingQty: number;
+  lotNumber?: string;
+  expiryDate?: string;
+  serialsInput?: string;
 }
 
 const PurchaseReceiveForm = () => {
@@ -39,8 +42,9 @@ const PurchaseReceiveForm = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { toast } = useToast();
-  const { branches, receiveGoodsToBranch } = useInventory();
-  const { purchaseOrders, applyReceiptToPO, addReceive, nextReceiveNumber } = usePurchases();
+  const { branches, products } = useInventory();
+  const { purchaseOrders, addReceive, nextReceiveNumber } = usePurchases();
+  const productById = useMemo(() => new Map(products.map((p) => [p.productId, p])), [products]);
 
   const poId = searchParams.get("poId");
 
@@ -128,16 +132,25 @@ const PurchaseReceiveForm = () => {
       notes,
       items: lineItems
         .filter(i => i.receivingNow > 0)
-        .map(i => ({
-          id: i.id,
-          productId: i.productId,
-          product_name: i.product_name,
-          product_sku: i.product_sku,
-          orderedQty: i.quantity,
-          previouslyReceivedQty: i.receivedQty,
-          receivingNow: i.receivingNow,
-          unitPrice: i.unitPrice,
-        })),
+        .map(i => {
+          const serialNumbers = (i.serialsInput ?? "")
+            .split(/[\n,]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          return {
+            id: i.id,
+            productId: i.productId,
+            product_name: i.product_name,
+            product_sku: i.product_sku,
+            orderedQty: i.quantity,
+            previouslyReceivedQty: i.receivedQty,
+            receivingNow: i.receivingNow,
+            unitPrice: i.unitPrice,
+            lotNumber: i.lotNumber?.trim() || undefined,
+            expiryDate: i.expiryDate || undefined,
+            serialNumbers: serialNumbers.length > 0 ? serialNumbers : undefined,
+          };
+        }),
     });
 
     if (res.ok === false) {
@@ -300,6 +313,44 @@ const PurchaseReceiveForm = () => {
                     <div>
                       <p className="font-medium">{item.product_name}</p>
                       <p className="text-sm text-muted-foreground">{item.product_sku}</p>
+                      {productById.get(item.productId)?.trackingMode === "lot" && (
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <Input
+                            placeholder={t("tracking.lots.lotNumber", "Lot #")}
+                            value={item.lotNumber ?? ""}
+                            onChange={(e) =>
+                              setLineItems((prev) =>
+                                prev.map((li) => (li.id === item.id ? { ...li, lotNumber: e.target.value } : li))
+                              )
+                            }
+                            className="h-8 text-xs"
+                          />
+                          <Input
+                            type="date"
+                            value={item.expiryDate ?? ""}
+                            onChange={(e) =>
+                              setLineItems((prev) =>
+                                prev.map((li) => (li.id === item.id ? { ...li, expiryDate: e.target.value } : li))
+                              )
+                            }
+                            className="h-8 text-xs"
+                          />
+                        </div>
+                      )}
+                      {productById.get(item.productId)?.trackingMode === "serial" && (
+                        <div className="mt-2">
+                          <Input
+                            placeholder={t("tracking.serials.serialNumbers", "Scan/enter serials (comma separated)")}
+                            value={item.serialsInput ?? ""}
+                            onChange={(e) =>
+                              setLineItems((prev) =>
+                                prev.map((li) => (li.id === item.id ? { ...li, serialsInput: e.target.value } : li))
+                              )
+                            }
+                            className="h-8 text-xs font-mono"
+                          />
+                        </div>
+                      )}
                     </div>
                   </TableCell>
                   <TableCell className="text-center font-medium">{item.quantity}</TableCell>

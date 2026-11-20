@@ -104,7 +104,14 @@
       "title": "Inventory Ops",
       "transfers": "Stock Transfers",
       "adjustments": "Adjustments",
-      "writeOffs": "Write-offs"
+      "writeOffs": "Write-offs",
+      "lots": "Lots & Expiry",
+      "serials": "Serial Numbers"
+    },
+    "manufacturing": {
+      "title": "Manufacturing",
+      "boms": "Bills of Materials",
+      "workOrders": "Work Orders"
     },
     "accounting": {
       "title": "Accounting",
@@ -1309,6 +1316,79 @@
       "stock_transfer": "Stock Transfer",
       "stock_adjustment": "Stock Adjustment",
       "stock_write_off": "Stock Write-Off"
+    }
+  },
+  "tracking": {
+    "lots": {
+      "title": "Lots & Expiry Tracking",
+      "description": "Monitor FEFO/FIFO batch balances and upcoming expirations across branches.",
+      "activeLots": "Active Lots On Hand",
+      "expiringSoon": "Expiring Soon (≤ 30d)",
+      "expired": "Expired",
+      "valid": "Valid",
+      "noExpiry": "No Expiry",
+      "balances": "Lot Balances",
+      "balancesDesc": "Expired lots are automatically blocked from sales fulfillment and flagged for write-off.",
+      "search": "Search lot #, SKU, or product...",
+      "empty": "No active lot balances found.",
+      "lotNumber": "Lot #",
+      "expiryDate": "Expiry Date"
+    },
+    "serials": {
+      "title": "Serial Number Registry",
+      "description": "Trace individual serialized units from receipt through branch transfers, production, and sales.",
+      "registry": "Serialized Units",
+      "registryDesc": "Click Trace on any serial number to inspect its full chain of custody.",
+      "search": "Scan or type serial #, SKU, or product...",
+      "empty": "No serialized units found.",
+      "serialNumber": "Serial #",
+      "serialNumbers": "Serial Numbers",
+      "trace": "Trace",
+      "noHistory": "No movement history recorded."
+    }
+  },
+  "manufacturing": {
+    "boms": {
+      "title": "Bills of Materials (BOM)",
+      "description": "Define multi-component recipes with scrap allowances and circular-dependency protection.",
+      "new": "New BOM",
+      "newDesc": "Specify the finished good and raw material components required per production batch.",
+      "empty": "No Bills of Materials defined yet.",
+      "created": "Bill of Materials created",
+      "validation": "Select a finished product, BOM name, and at least one component.",
+      "finishedGood": "Finished Product",
+      "bomName": "BOM Name",
+      "outputQty": "Output Batch Qty",
+      "output": "Output",
+      "estCost": "Est. Material Cost",
+      "components": "Components",
+      "component": "Component",
+      "scrap": "Scrap %",
+      "effectiveQty": "Effective Qty"
+    },
+    "workOrders": {
+      "title": "Work Orders",
+      "description": "Issue raw materials into 1220 WIP Inventory and absorb production cost into Finished Goods.",
+      "new": "New Work Order",
+      "newDesc": "Schedule production from an active Bill of Materials.",
+      "empty": "No work orders created yet.",
+      "created": "Work Order created",
+      "selectBomBranch": "Select a BOM and Branch.",
+      "plannedQty": "Planned Output Quantity",
+      "issueMaterials": "Issue Materials",
+      "issued": "Materials issued to WIP",
+      "complete": "Complete",
+      "completeDesc": "Absorb WIP into finished goods inventory.",
+      "qtyCompleted": "Quantity Produced",
+      "receiveFinished": "Receive Finished Goods",
+      "completedToast": "Finished goods received from WIP",
+      "cancelledToast": "Work Order cancelled & WIP reversed",
+      "progress": "Progress",
+      "wipIssued": "WIP Issued",
+      "wipAbsorbed": "WIP Absorbed",
+      "wipBalance": "Open WIP Balance",
+      "required": "Required",
+      "issuedQty": "Issued"
     }
   }
 }

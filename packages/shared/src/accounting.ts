@@ -17,6 +17,7 @@ export const GL_MAPPING_KEYS = [
   "accounts_receivable",
   "inventory_asset",
   "in_transit_inventory",
+  "wip_inventory",
   "input_vat",
   "accounts_payable",
   "grni",

@@ -1,5 +1,12 @@
-import { and, eq, inArray, lt } from "drizzle-orm";
-import { notifications, salesInvoices, vendorBills } from "../../drizzle/schema.ts";
+import { and, eq, gt, inArray, isNotNull, lt, lte } from "drizzle-orm";
+import {
+  branchLotBalances,
+  notifications,
+  products,
+  salesInvoices,
+  stockLots,
+  vendorBills,
+} from "../../drizzle/schema.ts";
 import { num, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import type { RequestActor } from "./stock-locks.ts";
@@ -7,6 +14,8 @@ import type { RequestActor } from "./stock-locks.ts";
 export interface OverdueSweepResult {
   overdueInvoicesMarked: number;
   overdueBillsMarked: number;
+  expiringLotsAlerted: number;
+  expiredLotsAlerted: number;
   checkedAt: string;
 }
 
@@ -16,8 +25,11 @@ export async function runOverdueSweep(
   ipAddress?: string
 ): Promise<OverdueSweepResult> {
   const now = new Date();
+  const soonCutoff = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
   let overdueInvoicesMarked = 0;
   let overdueBillsMarked = 0;
+  let expiringLotsAlerted = 0;
+  let expiredLotsAlerted = 0;
 
   await db.transaction(async (tx) => {
     const pastDueInvoices = await tx
@@ -137,11 +149,71 @@ export async function runOverdueSweep(
       });
       overdueBillsMarked++;
     }
+
+    // Lot expiry alerts (Expired and Expiring Soon <= 30 days)
+    const riskyLots = await tx
+      .select({
+        balanceId: branchLotBalances.id,
+        branchId: branchLotBalances.branchId,
+        qtyOnHand: branchLotBalances.qtyOnHand,
+        lotId: stockLots.id,
+        lotNumber: stockLots.lotNumber,
+        expiryDate: stockLots.expiryDate,
+        productName: products.name,
+        productSku: products.sku,
+      })
+      .from(branchLotBalances)
+      .innerJoin(stockLots, eq(stockLots.id, branchLotBalances.lotId))
+      .innerJoin(products, eq(products.id, branchLotBalances.productId))
+      .where(
+        and(
+          gt(branchLotBalances.qtyOnHand, "0"),
+          isNotNull(stockLots.expiryDate),
+          lte(stockLots.expiryDate, soonCutoff)
+        )
+      );
+
+    for (const lot of riskyLots) {
+      if (!lot.expiryDate || num(lot.qtyOnHand) <= 0.0001) continue;
+      const isExpired = lot.expiryDate.getTime() < now.getTime();
+      const notifType = isExpired ? "lot_expired" : "lot_expiring_soon";
+      const existingLotNotif = await tx
+        .select({ id: notifications.id })
+        .from(notifications)
+        .where(
+          and(
+            eq(notifications.type, notifType),
+            eq(notifications.entityType, "stock_lot"),
+            eq(notifications.entityId, lot.balanceId)
+          )
+        )
+        .limit(1);
+
+      if (existingLotNotif.length === 0) {
+        const expStr = lot.expiryDate.toISOString().slice(0, 10);
+        await tx.insert(notifications).values({
+          type: notifType,
+          title: isExpired
+            ? `Expired Lot ${lot.lotNumber} (${lot.productSku})`
+            : `Lot Expiring Soon ${lot.lotNumber} (${lot.productSku})`,
+          message: isExpired
+            ? `Lot ${lot.lotNumber} of ${lot.productName} expired on ${expStr} with ${num(lot.qtyOnHand)} units still on hand.`
+            : `Lot ${lot.lotNumber} of ${lot.productName} expires on ${expStr} (${num(lot.qtyOnHand)} units on hand).`,
+          branchId: lot.branchId,
+          entityType: "stock_lot",
+          entityId: lot.balanceId,
+        });
+        if (isExpired) expiredLotsAlerted++;
+        else expiringLotsAlerted++;
+      }
+    }
   });
 
   return {
     overdueInvoicesMarked,
     overdueBillsMarked,
+    expiringLotsAlerted,
+    expiredLotsAlerted,
     checkedAt: now.toISOString(),
   };
 }

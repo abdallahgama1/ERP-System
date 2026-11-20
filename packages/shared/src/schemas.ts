@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ITEM_TYPES, PICKING_STRATEGIES, TRACKING_MODES, lotAllocationInputSchema } from "./inventory-extensions.ts";
 import { BRANCH_TYPES } from "./permissions.ts";
 import { TAXONOMY_KINDS, TRANSFER_SHORTAGE_RESOLUTIONS } from "./statuses.ts";
 
@@ -34,6 +35,10 @@ export const initialStockSchema = z.object({
   branchId: z.string().uuid(),
   quantity: z.number().min(0),
   unitCost: z.number().min(0).optional(),
+  lotNumber: z.string().trim().min(1).max(80).optional(),
+  manufactureDate: z.string().nullable().optional(),
+  expiryDate: z.string().nullable().optional(),
+  serialNumbers: z.array(z.string().trim().min(1).max(100)).optional(),
 });
 
 export const createProductSchema = z.object({
@@ -49,6 +54,11 @@ export const createProductSchema = z.object({
   costPrice: z.number().min(0).default(0),
   sellingPrice: z.number().min(0).default(0),
   minStockLevel: z.number().min(0).default(0),
+  itemType: z.enum(ITEM_TYPES).optional().default("stock"),
+  trackingMode: z.enum(TRACKING_MODES).optional(),
+  requiresExpiry: z.boolean().optional().default(false),
+  shelfLifeDays: z.number().int().positive().nullable().optional().default(null),
+  pickingStrategy: z.enum(PICKING_STRATEGIES).optional().default("FEFO"),
   trackLots: z.boolean().optional().default(false),
   trackSerials: z.boolean().optional().default(false),
   initialStock: z.array(initialStockSchema).optional().default([]),
@@ -80,6 +90,11 @@ export const adjustmentSchema = z.object({
         qtyDelta: z.number().optional(),
         newQty: z.number().min(0).optional(),
         notes: z.string().trim().max(250).optional().default(""),
+        lotNumber: z.string().trim().min(1).max(80).optional(),
+        manufactureDate: z.string().nullable().optional(),
+        expiryDate: z.string().nullable().optional(),
+        lotAllocations: z.array(lotAllocationInputSchema).optional(),
+        serialNumbers: z.array(z.string().trim().min(1).max(100)).optional(),
       })
     )
     .min(1),
@@ -95,6 +110,8 @@ export const writeOffSchema = z.object({
         productId: z.string().uuid(),
         quantity: z.number().positive(),
         notes: z.string().trim().max(250).optional().default(""),
+        lotAllocations: z.array(lotAllocationInputSchema).optional(),
+        serialNumbers: z.array(z.string().trim().min(1).max(100)).optional(),
       })
     )
     .min(1),
@@ -111,6 +128,8 @@ export const createTransferSchema = z.object({
         productId: z.string().uuid(),
         quantity: z.number().positive(),
         notes: z.string().trim().max(250).optional().default(""),
+        lotAllocations: z.array(lotAllocationInputSchema).optional(),
+        serialNumbers: z.array(z.string().trim().min(1).max(100)).optional(),
       })
     )
     .min(1),
@@ -204,6 +223,10 @@ export const receiveSchema = z.object({
         productId: z.string().uuid(),
         quantity: z.number().positive(),
         unitCost: z.number().min(0),
+        lotNumber: z.string().trim().min(1).max(80).optional(),
+        manufactureDate: z.string().nullable().optional(),
+        expiryDate: z.string().nullable().optional(),
+        serialNumbers: z.array(z.string().trim().min(1).max(100)).optional(),
       })
     )
     .min(1),
@@ -330,6 +353,8 @@ export const invoiceSchema = z.object({
         unitPrice: z.number().min(0),
         discount: z.number().min(0).optional().default(0),
         taxRate: z.number().min(0).max(100).optional().default(0),
+        lotAllocations: z.array(lotAllocationInputSchema).optional(),
+        serialNumbers: z.array(z.string().trim().min(1).max(100)).optional(),
       })
     )
     .min(1),

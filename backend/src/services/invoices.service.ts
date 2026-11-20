@@ -14,6 +14,7 @@ import { assertBranchAccess } from "../middleware/auth.ts";
 import { assertCustomerCreditLimit } from "./credit-limit.service.ts";
 import { applyInvoiceEInvoiceMetadata } from "./einvoicing.service.ts";
 import { postMappedJournal, reverseJournalEntriesForSource } from "./gl.service.ts";
+import { consumeTrackedStock, linkConsumedAllocations } from "./lots-serials.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
 import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
 
@@ -114,12 +115,23 @@ export async function createSalesInvoice(
         const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
         if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
 
+        const tracked = await consumeTrackedStock(tx, {
+          product: prod,
+          branchId: data.branchId,
+          quantity: line.quantity,
+          lotAllocations: line.lotAllocations,
+          serialNumbers: line.serialNumbers,
+          serialNextStatus: "sold",
+          soldInvoiceId: inv.id,
+        });
+
         const moved = await applyBranchStockMovement(tx, {
           branchId: data.branchId,
           productId: line.productId,
           qtyDelta: -line.quantity,
           fallbackCost: num(prod.costPrice),
           movementType: "sales_invoice",
+          movementUnitCost: tracked.tracked ? tracked.unitCost : undefined,
           referenceType: "sales_invoice",
           referenceId: inv.id,
           referenceNumber: inv.invoiceNumber,
@@ -127,8 +139,11 @@ export async function createSalesInvoice(
           notes: `Sales invoice ${inv.invoiceNumber}`,
           actorId: actor.id,
         });
-        unitCostSnapshot = moved.movementCost;
-        totalCogsVal += Math.abs(moved.totalValueDelta);
+        if (tracked.tracked) {
+          await linkConsumedAllocations(tx, moved.movementId, tracked.allocations);
+        }
+        unitCostSnapshot = tracked.tracked ? tracked.unitCost : moved.movementCost;
+        totalCogsVal += tracked.tracked ? tracked.totalCost : Math.abs(moved.totalValueDelta);
       }
 
       await tx.insert(salesInvoiceLines).values({
@@ -261,12 +276,21 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
       const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
 
+      const tracked = await consumeTrackedStock(tx, {
+        product: prod,
+        branchId: inv.branch_id,
+        quantity: qty,
+        serialNextStatus: "sold",
+        soldInvoiceId: inv.id,
+      });
+
       const moved = await applyBranchStockMovement(tx, {
         branchId: inv.branch_id,
         productId: line.productId,
         qtyDelta: -qty,
         fallbackCost: num(prod.costPrice),
         movementType: "sales_invoice",
+        movementUnitCost: tracked.tracked ? tracked.unitCost : undefined,
         referenceType: "sales_invoice",
         referenceId: inv.id,
         referenceNumber: inv.invoice_number,
@@ -274,11 +298,14 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
         notes: `Posted sales invoice ${inv.invoice_number}`,
         actorId: actor.id,
       });
-      totalCogsVal += Math.abs(moved.totalValueDelta);
+      if (tracked.tracked) {
+        await linkConsumedAllocations(tx, moved.movementId, tracked.allocations);
+      }
+      totalCogsVal += tracked.tracked ? tracked.totalCost : Math.abs(moved.totalValueDelta);
 
       await tx
         .update(salesInvoiceLines)
-        .set({ unitCostSnapshot: toNumeric(moved.movementCost, 4) })
+        .set({ unitCostSnapshot: toNumeric(tracked.tracked ? tracked.unitCost : moved.movementCost, 4) })
         .where(eq(salesInvoiceLines.id, line.id));
     }
 

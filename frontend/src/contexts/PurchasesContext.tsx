@@ -584,6 +584,9 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
                   productId: i.productId,
                   quantity: i.receivingNow,
                   unitCost: i.unitPrice,
+                  ...(i.lotNumber ? { lotNumber: i.lotNumber } : {}),
+                  ...(i.expiryDate ? { expiryDate: i.expiryDate } : {}),
+                  ...(i.serialNumbers && i.serialNumbers.length > 0 ? { serialNumbers: i.serialNumbers } : {}),
                 })),
             },
           }

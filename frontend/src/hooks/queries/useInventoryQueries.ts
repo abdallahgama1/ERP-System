@@ -32,6 +32,12 @@ export interface ApiProductRow {
   costPrice: number;
   sellingPrice: number;
   minStockLevel: number;
+  itemType?: "stock" | "non_stock" | "service" | "manufactured";
+  trackingMode?: "none" | "lot" | "serial";
+  requiresExpiry?: boolean;
+  shelfLifeDays?: number | null;
+  pickingStrategy?: "FEFO" | "FIFO" | "LIFO";
+  hasBom?: boolean;
   totalQuantity: number;
 }
 

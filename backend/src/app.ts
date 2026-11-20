@@ -12,12 +12,14 @@ import { authRoutes } from "./routes/auth.ts";
 import { branchRoutes } from "./routes/branches.ts";
 import { eventRoutes } from "./routes/events.ts";
 import { inventoryRoutes } from "./routes/inventory.ts";
+import { manufacturingRoutes } from "./routes/manufacturing.ts";
 import { notificationRoutes } from "./routes/notifications.ts";
 import { purchaseRoutes } from "./routes/purchases.ts";
 import { salesRoutes } from "./routes/sales.ts";
 import { sessionRoutes } from "./routes/sessions.ts";
 import { settingsRoutes } from "./routes/settings.ts";
 import { taxonomyRoutes } from "./routes/taxonomy.ts";
+import { trackingRoutes } from "./routes/tracking.ts";
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -97,6 +99,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(salesRoutes);
   await app.register(accountingRoutes);
   await app.register(approvalRoutes);
+  await app.register(trackingRoutes);
+  await app.register(manufacturingRoutes);
 
   return app;
 }

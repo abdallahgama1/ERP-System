@@ -35,7 +35,11 @@ import {
   BookOpen,
   Scale,
   CalendarClock,
-  ClipboardCheck
+  ClipboardCheck,
+  Layers,
+  Barcode,
+  Boxes,
+  Factory
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
@@ -87,6 +91,13 @@ const inventoryOpsItems = [
   { titleKey: "nav.inventoryOps.transfers", url: "/inventory/transfers", icon: ArrowRightLeft },
   { titleKey: "nav.inventoryOps.adjustments", url: "/inventory/adjustments", icon: Sliders },
   { titleKey: "nav.inventoryOps.writeOffs", url: "/inventory/write-offs", icon: Trash2 },
+  { titleKey: "nav.inventoryOps.lots", url: "/inventory/lots", icon: Layers },
+  { titleKey: "nav.inventoryOps.serials", url: "/inventory/serials", icon: Barcode },
+];
+
+const manufacturingItems = [
+  { titleKey: "nav.manufacturing.boms", url: "/manufacturing/boms", icon: Boxes },
+  { titleKey: "nav.manufacturing.workOrders", url: "/manufacturing/work-orders", icon: Factory },
 ];
 
 const accountingItems = [
@@ -142,6 +153,9 @@ export function AppSidebar() {
   );
   const [inventoryOpsOpen, setInventoryOpsOpen] = useState(
     inventoryOpsItems.some(item => currentPath.startsWith(item.url))
+  );
+  const [manufacturingOpen, setManufacturingOpen] = useState(
+    manufacturingItems.some(item => currentPath.startsWith(item.url))
   );
   const [accountingOpen, setAccountingOpen] = useState(
     accountingItems.some(item => currentPath.startsWith(item.url))
@@ -344,6 +358,7 @@ export function AppSidebar() {
 
               {/* Bottom items (Users) */}
               {can("inventory", "view") && renderGroup(inventoryOpsItems, "nav.inventoryOps.title", ArrowRightLeft, inventoryOpsOpen, setInventoryOpsOpen, isInventoryOpsActive)}
+              {can("inventory", "view") && renderGroup(manufacturingItems, "nav.manufacturing.title", Factory, manufacturingOpen, setManufacturingOpen, manufacturingItems.some(item => currentPath.startsWith(item.url)))}
               {can("accounting", "view") && renderGroup(accountingItems, "nav.accounting.title", Scale, accountingOpen, setAccountingOpen, isAccountingActive)}
               {can("reports", "view") && renderGroup(reportsItems, "nav.reports.title", BarChart3, reportsOpen, setReportsOpen, isReportsActive)}
               {can("taxonomy", "view") && renderGroup(taxonomyItems, "nav.taxonomy.title", FolderTree, taxonomyOpen, setTaxonomyOpen, isTaxonomyActive)}

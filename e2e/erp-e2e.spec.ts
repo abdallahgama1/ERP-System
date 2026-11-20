@@ -25,7 +25,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
       throw new Error(`Refusing to truncate '${db}' instead of '${expectedDb}'`);
     }
     await sql.unsafe(
-      "TRUNCATE TABLE approval_requests, approval_rules, journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE"
+      "TRUNCATE TABLE work_order_materials, work_orders, bom_components, bills_of_materials, stock_movement_allocations, stock_serials, branch_lot_balances, stock_lots, approval_requests, approval_rules, journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE"
     );
     await sql.end();
   });
@@ -157,5 +157,80 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     await page.goto("/accounting/periods");
     await expect(page.getByRole("heading", { name: /Fiscal Years & Periods/i })).toBeVisible();
     await expect(page.getByText(`FY ${new Date().getUTCFullYear()}`, { exact: true })).toBeVisible();
+
+    // 8. Phase D2: Create Lot-tracked item, Serial-tracked item, BOM & Work Order, then verify Tracking & Manufacturing pages
+    const lotProdRes = await page.request.post("/api/products", {
+      data: {
+        sku: "E2E-LOT-01",
+        name: "Sterile Reagent",
+        costPrice: 20,
+        sellingPrice: 55,
+        trackingMode: "lot",
+        requiresExpiry: true,
+      },
+    });
+    expect(lotProdRes.status()).toBe(201);
+    const lotProdId = (await lotProdRes.json()).product.id as string;
+
+    const rcvLot = await page.request.post("/api/purchase-receives", {
+      data: {
+        vendorId,
+        branchId: hqId,
+        lines: [
+          {
+            productId: lotProdId,
+            quantity: 10,
+            unitCost: 20,
+            lotNumber: "LOT-E2E-99",
+            expiryDate: "2027-06-30",
+          },
+        ],
+      },
+    });
+    expect(rcvLot.status()).toBe(201);
+
+    const fgRes = await page.request.post("/api/products", {
+      data: {
+        sku: "E2E-FG-01",
+        name: "Assembled Scanner Kit",
+        itemType: "manufactured",
+        costPrice: 120,
+        sellingPrice: 299,
+      },
+    });
+    expect(fgRes.status()).toBe(201);
+    const fgId = (await fgRes.json()).product.id as string;
+
+    const bomRes = await page.request.post("/api/manufacturing/boms", {
+      data: {
+        productId: fgId,
+        name: "Scanner Kit BOM",
+        outputQty: 1,
+        components: [{ componentProductId: productId, quantity: 1, scrapPercent: 0 }],
+      },
+    });
+    expect(bomRes.status()).toBe(201);
+    const bomId = (await bomRes.json()).bom.id as string;
+
+    const woRes = await page.request.post("/api/manufacturing/work-orders", {
+      data: { bomId, branchId: hqId, plannedQty: 2 },
+    });
+    expect(woRes.status()).toBe(201);
+    const woNumber = (await woRes.json()).workOrder.woNumber as string;
+
+    await page.goto("/inventory/lots");
+    await expect(page.getByRole("heading", { name: /Lots & Expiry/i })).toBeVisible();
+    await expect(page.getByText("LOT-E2E-99", { exact: true })).toBeVisible();
+
+    await page.goto("/inventory/serials");
+    await expect(page.getByRole("heading", { name: /Serial Number Registry/i })).toBeVisible();
+
+    await page.goto("/manufacturing/boms");
+    await expect(page.getByRole("heading", { name: /Bills of Materials/i })).toBeVisible();
+    await expect(page.getByText("Scanner Kit BOM")).toBeVisible();
+
+    await page.goto("/manufacturing/work-orders");
+    await expect(page.getByRole("heading", { name: /Work Orders/i })).toBeVisible();
+    await expect(page.getByText(woNumber, { exact: true })).toBeVisible();
   });
 });

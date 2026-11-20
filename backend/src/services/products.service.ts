@@ -12,6 +12,7 @@ import { AppError, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal } from "./gl.service.ts";
+import { receiveTrackedStock, resolveProductTrackingMode } from "./lots-serials.service.ts";
 import { computeWmac, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
 export async function listProducts(db: AppDatabase, actor: RequestActor) {
@@ -46,8 +47,14 @@ export async function listProducts(db: AppDatabase, actor: RequestActor) {
       costPrice: num(p.costPrice),
       sellingPrice: num(p.sellingPrice),
       minStockLevel: num(p.minStockLevel),
+      itemType: p.itemType,
+      trackingMode: resolveProductTrackingMode(p),
+      requiresExpiry: p.requiresExpiry,
+      shelfLifeDays: p.shelfLifeDays,
+      pickingStrategy: p.pickingStrategy,
       trackLots: p.trackLots,
       trackSerials: p.trackSerials,
+      hasBom: p.hasBom,
       isActive: p.isActive,
       totalQuantity: totalQtyByProduct.get(p.id) ?? 0,
       createdAt: p.createdAt.toISOString(),
@@ -86,6 +93,12 @@ export async function createProduct(
       throw new AppError(409, `SKU '${data.sku}' already exists`, "DUPLICATE_SKU");
     }
 
+    const resolvedTracking = resolveProductTrackingMode({
+      trackingMode: data.trackingMode ?? null,
+      trackLots: data.trackLots,
+      trackSerials: data.trackSerials,
+    });
+
     const [prod] = await tx
       .insert(products)
       .values({
@@ -101,8 +114,13 @@ export async function createProduct(
         costPrice: toNumeric(data.costPrice, 4),
         sellingPrice: toNumeric(data.sellingPrice, 4),
         minStockLevel: toNumeric(data.minStockLevel, 4),
-        trackLots: data.trackLots,
-        trackSerials: data.trackSerials,
+        itemType: data.itemType ?? "stock",
+        trackingMode: resolvedTracking,
+        requiresExpiry: data.requiresExpiry ?? false,
+        shelfLifeDays: data.shelfLifeDays ?? null,
+        pickingStrategy: data.pickingStrategy ?? "FEFO",
+        trackLots: resolvedTracking === "lot",
+        trackSerials: resolvedTracking === "serial",
         isActive: true,
       })
       .returning();
@@ -128,19 +146,37 @@ export async function createProduct(
           },
         });
 
-      await tx.insert(stockMovements).values({
+      const [mov] = await tx
+        .insert(stockMovements)
+        .values({
+          branchId: init.branchId,
+          productId: prod.id,
+          movementType: "opening_balance",
+          qtyDelta: toNumeric(init.quantity, 4),
+          unitCost: toNumeric(unitCost, 4),
+          balanceAfter: toNumeric(init.quantity, 4),
+          avgCostAfter: toNumeric(unitCost, 4),
+          referenceType: "product",
+          referenceId: prod.id,
+          referenceNumber: prod.sku,
+          notes: "Initial opening stock",
+          createdBy: actor.id,
+        })
+        .returning({ id: stockMovements.id });
+
+      await receiveTrackedStock(tx, {
+        product: prod,
         branchId: init.branchId,
-        productId: prod.id,
-        movementType: "opening_balance",
-        qtyDelta: toNumeric(init.quantity, 4),
-        unitCost: toNumeric(unitCost, 4),
-        balanceAfter: toNumeric(init.quantity, 4),
-        avgCostAfter: toNumeric(unitCost, 4),
-        referenceType: "product",
-        referenceId: prod.id,
-        referenceNumber: prod.sku,
+        quantity: init.quantity,
+        unitCost,
+        movementId: mov.id,
+        lotNumber: init.lotNumber,
+        manufactureDate: init.manufactureDate,
+        expiryDate: init.expiryDate,
+        serialNumbers: init.serialNumbers,
+        receivedFromType: "opening_balance",
+        receivedFromId: prod.id,
         notes: "Initial opening stock",
-        createdBy: actor.id,
       });
       const openingVal = Math.round((init.quantity * unitCost + Number.EPSILON) * 10000) / 10000;
       if (openingVal > 0) {
@@ -189,6 +225,14 @@ export async function createProduct(
     costPrice: num(created.costPrice),
     sellingPrice: num(created.sellingPrice),
     minStockLevel: num(created.minStockLevel),
+    itemType: created.itemType,
+    trackingMode: created.trackingMode,
+    requiresExpiry: created.requiresExpiry,
+    shelfLifeDays: created.shelfLifeDays,
+    pickingStrategy: created.pickingStrategy,
+    trackLots: created.trackLots,
+    trackSerials: created.trackSerials,
+    hasBom: created.hasBom,
     isActive: created.isActive,
     totalQuantity: created.totalQuantity,
     createdAt: created.createdAt.toISOString(),
@@ -213,6 +257,17 @@ export async function updateProduct(
       }
     }
 
+    const nextTrackingMode =
+      data.trackingMode !== undefined
+        ? data.trackingMode
+        : data.trackSerials !== undefined || data.trackLots !== undefined
+          ? resolveProductTrackingMode({
+              trackingMode: null,
+              trackLots: data.trackLots ?? current.trackLots,
+              trackSerials: data.trackSerials ?? current.trackSerials,
+            })
+          : current.trackingMode;
+
     const [row] = await tx
       .update(products)
       .set({
@@ -228,6 +283,13 @@ export async function updateProduct(
         costPrice: data.costPrice !== undefined ? toNumeric(data.costPrice, 4) : current.costPrice,
         sellingPrice: data.sellingPrice !== undefined ? toNumeric(data.sellingPrice, 4) : current.sellingPrice,
         minStockLevel: data.minStockLevel !== undefined ? toNumeric(data.minStockLevel, 4) : current.minStockLevel,
+        itemType: data.itemType ?? current.itemType,
+        trackingMode: nextTrackingMode,
+        requiresExpiry: data.requiresExpiry ?? current.requiresExpiry,
+        shelfLifeDays: data.shelfLifeDays !== undefined ? data.shelfLifeDays : current.shelfLifeDays,
+        pickingStrategy: data.pickingStrategy ?? current.pickingStrategy,
+        trackLots: nextTrackingMode === "lot",
+        trackSerials: nextTrackingMode === "serial",
         isActive: data.isActive ?? current.isActive,
         updatedAt: new Date(),
       })

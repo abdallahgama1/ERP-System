@@ -49,6 +49,10 @@ describe("Fastify HTTP surface & security boundaries", () => {
       { method: "GET" as const, url: "/api/approvals/rules" },
       { method: "GET" as const, url: "/api/approvals/requests" },
       { method: "POST" as const, url: "/api/admin/jobs/overdue-sweep" },
+      { method: "GET" as const, url: "/api/tracking/lots" },
+      { method: "GET" as const, url: "/api/tracking/serials" },
+      { method: "GET" as const, url: "/api/manufacturing/boms" },
+      { method: "GET" as const, url: "/api/manufacturing/work-orders" },
     ];
 
     for (const endpoint of protectedEndpoints) {

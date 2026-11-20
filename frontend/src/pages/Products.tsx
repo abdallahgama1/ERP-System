@@ -32,6 +32,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Package, Plus, Search, Edit, Trash2, ChevronDown, ChevronRight, MapPin, FileText, Upload, Download } from "lucide-react";
 import * as XLSX from "xlsx";
 import { Product } from "@/types";
@@ -85,14 +87,32 @@ const Products = () => {
     });
   };
 
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<{
+    product_name: string;
+    product_sku: string;
+    quantity: number;
+    sellingPrice: number;
+    costPrice: number;
+    brand: string;
+    category: string;
+    itemType: "stock" | "non_stock" | "service" | "manufactured";
+    trackingMode: "none" | "lot" | "serial";
+    requiresExpiry: boolean;
+    shelfLifeDays: number | null;
+    pickingStrategy: "FEFO" | "FIFO" | "LIFO";
+  }>({
     product_name: "",
     product_sku: "",
     quantity: 0,
     sellingPrice: 0,
     costPrice: 0,
     brand: "",
-    category: ""
+    category: "",
+    itemType: "stock",
+    trackingMode: "none",
+    requiresExpiry: false,
+    shelfLifeDays: null,
+    pickingStrategy: "FEFO",
   });
 
   const filteredProducts = products.filter(product =>
@@ -110,7 +130,12 @@ const Products = () => {
       sellingPrice: 0,
       costPrice: 0,
       brand: "",
-      category: ""
+      category: "",
+      itemType: "stock",
+      trackingMode: "none",
+      requiresExpiry: false,
+      shelfLifeDays: null,
+      pickingStrategy: "FEFO",
     });
     setEditingProduct(null);
   };
@@ -191,7 +216,12 @@ const Products = () => {
       sellingPrice: product.sellingPrice,
       costPrice: product.costPrice,
       brand: product.brand,
-      category: product.category
+      category: product.category,
+      itemType: product.itemType ?? "stock",
+      trackingMode: product.trackingMode ?? "none",
+      requiresExpiry: product.requiresExpiry ?? false,
+      shelfLifeDays: product.shelfLifeDays ?? null,
+      pickingStrategy: product.pickingStrategy ?? "FEFO",
     });
     setIsAddDialogOpen(true);
   };
@@ -452,6 +482,106 @@ const Products = () => {
                 </div>
               </div>
               
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>{t("products.itemType", "Item Type")}</Label>
+                  <Select
+                    value={formData.itemType}
+                    onValueChange={(v) =>
+                      setFormData({
+                        ...formData,
+                        itemType: v as "stock" | "non_stock" | "service" | "manufactured",
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="stock">{t("products.types.stock", "Stock Item")}</SelectItem>
+                      <SelectItem value="manufactured">{t("products.types.manufactured", "Manufactured")}</SelectItem>
+                      <SelectItem value="non_stock">{t("products.types.non_stock", "Non-Stock")}</SelectItem>
+                      <SelectItem value="service">{t("products.types.service", "Service")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("products.trackingMode", "Tracking Mode")}</Label>
+                  <Select
+                    value={formData.trackingMode}
+                    onValueChange={(v) =>
+                      setFormData({
+                        ...formData,
+                        trackingMode: v as "none" | "lot" | "serial",
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">{t("products.tracking.none", "None (Standard)")}</SelectItem>
+                      <SelectItem value="lot">{t("products.tracking.lot", "Lot / Batch")}</SelectItem>
+                      <SelectItem value="serial">{t("products.tracking.serial", "Serial Number")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {formData.trackingMode === "lot" && (
+                <div className="grid grid-cols-3 gap-3 rounded-md border p-3 bg-muted/30">
+                  <div className="space-y-1">
+                    <Label className="text-xs">{t("products.pickingStrategy", "Picking")}</Label>
+                    <Select
+                      value={formData.pickingStrategy}
+                      onValueChange={(v) =>
+                        setFormData({ ...formData, pickingStrategy: v as "FEFO" | "FIFO" | "LIFO" })
+                      }
+                    >
+                      <SelectTrigger className="h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="FEFO">FEFO</SelectItem>
+                        <SelectItem value="FIFO">FIFO</SelectItem>
+                        <SelectItem value="LIFO">LIFO</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs" htmlFor="shelfLifeDays">
+                      {t("products.shelfLifeDays", "Shelf Life (days)")}
+                    </Label>
+                    <Input
+                      id="shelfLifeDays"
+                      type="number"
+                      min={1}
+                      className="h-8"
+                      value={formData.shelfLifeDays ?? ""}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          shelfLifeDays: e.target.value ? Math.max(1, parseInt(e.target.value, 10)) : null,
+                        })
+                      }
+                      placeholder="Optional"
+                    />
+                  </div>
+                  <div className="flex flex-col justify-between">
+                    <Label className="text-xs" htmlFor="requiresExpiry">
+                      {t("products.requiresExpiry", "Requires Expiry")}
+                    </Label>
+                    <div className="h-8 flex items-center">
+                      <Switch
+                        id="requiresExpiry"
+                        checked={formData.requiresExpiry}
+                        onCheckedChange={(v) => setFormData({ ...formData, requiresExpiry: v })}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => setIsAddDialogOpen(false)}>
                   {t('common.cancel')}
@@ -516,7 +646,21 @@ const Products = () => {
                   <Collapsible key={product.productId} asChild open={isExpanded}>
                     <>
                       <TableRow>
-                        <TableCell className="font-medium">{product.product_name}</TableCell>
+                        <TableCell className="font-medium">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span>{product.product_name}</span>
+                            {product.trackingMode && product.trackingMode !== "none" && (
+                              <Badge variant="outline" className="text-[10px] uppercase">
+                                {product.trackingMode}
+                              </Badge>
+                            )}
+                            {product.itemType === "manufactured" && (
+                              <Badge variant="secondary" className="text-[10px]">
+                                MFG
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
                         <TableCell>{product.product_sku}</TableCell>
                         <TableCell>{product.brand}</TableCell>
                         <TableCell>{product.category}</TableCell>

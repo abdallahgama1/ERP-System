@@ -30,6 +30,12 @@ export interface Product {
   unit?: string;
   minStockLevel?: number;
   barcode?: string | null;
+  itemType?: 'stock' | 'non_stock' | 'service' | 'manufactured';
+  trackingMode?: 'none' | 'lot' | 'serial';
+  requiresExpiry?: boolean;
+  shelfLifeDays?: number | null;
+  pickingStrategy?: 'FEFO' | 'FIFO' | 'LIFO';
+  hasBom?: boolean;
 }
 
 export interface Branch {
@@ -299,6 +305,9 @@ export interface PurchaseReceiveItem {
   previouslyReceivedQty: number;
   receivingNow: number;
   unitPrice: number;
+  lotNumber?: string;
+  expiryDate?: string;
+  serialNumbers?: string[];
 }
 
 export interface PurchaseReceive {

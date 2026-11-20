@@ -7,6 +7,7 @@ import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { checkApprovalRequired, createApprovalRequest } from "./approvals.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
+import { consumeTrackedStock, linkConsumedAllocations, receiveTransferredTrackedStock } from "./lots-serials.service.ts";
 import { groupByKey } from "./query-helpers.ts";
 import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
@@ -72,13 +73,13 @@ export async function createTransfer(
     const wantsDispatch = data.status === "In Transit";
 
     let estimatedVal = 0;
-    const prodMap = new Map<string, { name: string; cost: number }>();
+    const prodMap = new Map<string, { prod: typeof products.$inferSelect; cost: number }>();
     for (const line of sortedLines) {
       const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
       const locked = await lockBranchProduct(tx, data.fromBranchId, line.productId, num(prod.costPrice));
       const unitCost = locked.avgCost > 0 ? locked.avgCost : num(prod.costPrice);
-      prodMap.set(line.productId, { name: prod.name, cost: unitCost });
+      prodMap.set(line.productId, { prod, cost: unitCost });
       estimatedVal += line.quantity * unitCost;
     }
 
@@ -107,21 +108,34 @@ export async function createTransfer(
       const meta = prodMap.get(line.productId)!;
       let unitCost = meta.cost;
       if (isDispatching) {
+        const tracked = await consumeTrackedStock(tx, {
+          product: meta.prod,
+          branchId: data.fromBranchId,
+          quantity: line.quantity,
+          lotAllocations: line.lotAllocations,
+          serialNumbers: line.serialNumbers,
+          serialNextStatus: "in_transit",
+        });
+
         const moved = await applyBranchStockMovement(tx, {
           branchId: data.fromBranchId,
           productId: line.productId,
           qtyDelta: -line.quantity,
           fallbackCost: unitCost,
           movementType: "transfer_out",
+          movementUnitCost: tracked.tracked ? tracked.unitCost : undefined,
           referenceType: "transfer",
           referenceId: tr.id,
           referenceNumber: tr.transferNumber,
-          insufficientStockMessage: `Insufficient source stock for ${meta.name}: requested ${line.quantity}`,
+          insufficientStockMessage: `Insufficient source stock for ${meta.prod.name}: requested ${line.quantity}`,
           notes: `Dispatched transfer ${tr.transferNumber}`,
           actorId: actor.id,
         });
-        unitCost = moved.movementCost;
-        totalDispatchedVal += Math.abs(moved.totalValueDelta);
+        if (tracked.tracked) {
+          await linkConsumedAllocations(tx, moved.movementId, tracked.allocations);
+        }
+        unitCost = tracked.tracked ? tracked.unitCost : moved.movementCost;
+        totalDispatchedVal += tracked.tracked ? tracked.totalCost : Math.abs(moved.totalValueDelta);
       }
 
       await tx.insert(stockTransferLines).values({
@@ -337,6 +351,7 @@ export async function receiveTransfer(
 
       const unitCost = num(line.unitCost);
       if (receiveNow > 0) {
+        const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
         const moved = await applyBranchStockMovement(tx, {
           branchId: tr.to_branch_id,
           productId: line.productId,
@@ -352,6 +367,16 @@ export async function receiveTransfer(
           notes: `Received transfer ${tr.transfer_number}`,
           actorId: actor.id,
         });
+        if (prod) {
+          await receiveTransferredTrackedStock(tx, {
+            transferId: id,
+            product: prod,
+            toBranchId: tr.to_branch_id,
+            qtyReceived: receiveNow,
+            movementId: moved.movementId,
+            unitCost,
+          });
+        }
         totalReceivedVal += Math.abs(moved.totalValueDelta);
       }
 

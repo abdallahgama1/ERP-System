@@ -104,6 +104,7 @@ export async function applyBranchStockMovement(
   tx: DbOrTx,
   input: StockChangeInput
 ): Promise<{
+  movementId: string;
   previousQty: number;
   newQty: number;
   previousAvgCost: number;
@@ -154,22 +155,26 @@ export async function applyBranchStockMovement(
     ? -roundCurrency(previousQty * bp.avgCost, 4)
     : roundCurrency(input.qtyDelta * movementCost, 4);
 
-  await tx.insert(stockMovements).values({
-    branchId: input.branchId,
-    productId: input.productId,
-    movementType: input.movementType,
-    qtyDelta: toNumeric(input.qtyDelta, 4),
-    unitCost: toNumeric(movementCost, 4),
-    balanceAfter: toNumeric(newQty, 4),
-    avgCostAfter: toNumeric(newAvgCost, 4),
-    referenceType: input.referenceType,
-    referenceId: input.referenceId,
-    referenceNumber: input.referenceNumber,
-    notes: input.notes,
-    createdBy: input.actorId,
-  });
+  const [movementRow] = await tx
+    .insert(stockMovements)
+    .values({
+      branchId: input.branchId,
+      productId: input.productId,
+      movementType: input.movementType,
+      qtyDelta: toNumeric(input.qtyDelta, 4),
+      unitCost: toNumeric(movementCost, 4),
+      balanceAfter: toNumeric(newQty, 4),
+      avgCostAfter: toNumeric(newAvgCost, 4),
+      referenceType: input.referenceType,
+      referenceId: input.referenceId,
+      referenceNumber: input.referenceNumber,
+      notes: input.notes,
+      createdBy: input.actorId,
+    })
+    .returning({ id: stockMovements.id });
 
   return {
+    movementId: movementRow.id,
     previousQty,
     newQty,
     previousAvgCost: bp.avgCost,

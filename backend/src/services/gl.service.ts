@@ -29,6 +29,7 @@ export const DEFAULT_COA: DefaultAccountDef[] = [
   { code: "1100", name: "Accounts Receivable", accountType: "asset", normalBalance: "debit", mappingKey: "accounts_receivable" },
   { code: "1200", name: "Inventory Asset", accountType: "asset", normalBalance: "debit", mappingKey: "inventory_asset" },
   { code: "1210", name: "In-Transit Inventory", accountType: "asset", normalBalance: "debit", mappingKey: "in_transit_inventory" },
+  { code: "1220", name: "Work in Progress (WIP) Inventory", accountType: "asset", normalBalance: "debit", mappingKey: "wip_inventory" },
   { code: "1300", name: "Input VAT Recoverable", accountType: "asset", normalBalance: "debit", mappingKey: "input_vat" },
   { code: "2000", name: "Accounts Payable", accountType: "liability", normalBalance: "credit", mappingKey: "accounts_payable" },
   { code: "2100", name: "Goods Received Not Invoiced (GRNI)", accountType: "liability", normalBalance: "credit", mappingKey: "grni" },

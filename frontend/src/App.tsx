@@ -65,6 +65,10 @@ const Transfers = lazy(() => import("./pages/inventory/Transfers"));
 const TransferDetail = lazy(() => import("./pages/inventory/TransferDetail"));
 const Adjustments = lazy(() => import("./pages/inventory/Adjustments"));
 const WriteOffs = lazy(() => import("./pages/inventory/WriteOffs"));
+const LotsAndExpiry = lazy(() => import("./pages/inventory/LotsAndExpiry"));
+const SerialNumbers = lazy(() => import("./pages/inventory/SerialNumbers"));
+const BillsOfMaterials = lazy(() => import("./pages/manufacturing/BillsOfMaterials"));
+const WorkOrders = lazy(() => import("./pages/manufacturing/WorkOrders"));
 const Categories = lazy(() => import("./pages/taxonomy/Categories"));
 const Brands = lazy(() => import("./pages/taxonomy/Brands"));
 const UnitsOfMeasure = lazy(() => import("./pages/taxonomy/UnitsOfMeasure"));
@@ -161,6 +165,10 @@ const App = () => (
                           <Route path="/inventory/transfers/:transferId" element={<TransferDetail />} />
                           <Route path="/inventory/adjustments" element={<Adjustments />} />
                           <Route path="/inventory/write-offs" element={<WriteOffs />} />
+                          <Route path="/inventory/lots" element={<LotsAndExpiry />} />
+                          <Route path="/inventory/serials" element={<SerialNumbers />} />
+                          <Route path="/manufacturing/boms" element={<BillsOfMaterials />} />
+                          <Route path="/manufacturing/work-orders" element={<WorkOrders />} />
                           <Route path="/categories" element={<Categories />} />
                           <Route path="/brands" element={<Brands />} />
                           <Route path="/units-of-measure" element={<UnitsOfMeasure />} />

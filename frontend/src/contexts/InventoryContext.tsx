@@ -187,6 +187,12 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
         unit: p.unit,
         minStockLevel: p.minStockLevel,
         barcode: p.barcode,
+        itemType: p.itemType ?? "stock",
+        trackingMode: p.trackingMode ?? "none",
+        requiresExpiry: p.requiresExpiry ?? false,
+        shelfLifeDays: p.shelfLifeDays ?? null,
+        pickingStrategy: p.pickingStrategy ?? "FEFO",
+        hasBom: p.hasBom ?? false,
       })),
     [productsQuery.data]
   );
@@ -349,6 +355,11 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             sellingPrice: data.sellingPrice,
             minStockLevel: data.minStockLevel ?? 0,
             barcode: data.barcode ?? null,
+            itemType: data.itemType ?? "stock",
+            trackingMode: data.trackingMode ?? "none",
+            requiresExpiry: data.requiresExpiry ?? false,
+            shelfLifeDays: data.shelfLifeDays ?? null,
+            pickingStrategy: data.pickingStrategy ?? "FEFO",
             initialStock,
           },
         });
@@ -389,6 +400,11 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             sellingPrice: data.sellingPrice,
             minStockLevel: data.minStockLevel ?? 0,
             barcode: data.barcode ?? null,
+            itemType: data.itemType ?? "stock",
+            trackingMode: data.trackingMode ?? "none",
+            requiresExpiry: data.requiresExpiry ?? false,
+            shelfLifeDays: data.shelfLifeDays ?? null,
+            pickingStrategy: data.pickingStrategy ?? "FEFO",
           },
         });
         await loadAll();

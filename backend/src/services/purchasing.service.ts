@@ -16,6 +16,7 @@ import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { checkApprovalRequired, createApprovalRequest } from "./approvals.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
+import { receiveTrackedStock } from "./lots-serials.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
 import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
 
@@ -487,6 +488,21 @@ export async function createPurchaseReceive(
         referenceNumber: rcv.receiveNumber,
         notes: `Purchase receive ${rcv.receiveNumber}`,
         actorId: actor.id,
+      });
+      await receiveTrackedStock(tx, {
+        product: prod,
+        branchId: data.branchId,
+        quantity: line.quantity,
+        unitCost: line.unitCost,
+        movementId: moved.movementId,
+        lotNumber: line.lotNumber,
+        manufactureDate: line.manufactureDate,
+        expiryDate: line.expiryDate,
+        serialNumbers: line.serialNumbers,
+        vendorId: data.vendorId,
+        receivedFromType: "purchase_receive",
+        receivedFromId: rcv.id,
+        notes: `Purchase receive ${rcv.receiveNumber}`,
       });
       totalReceiveVal += Math.abs(moved.totalValueDelta);
 

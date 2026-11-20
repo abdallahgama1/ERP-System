@@ -15,6 +15,7 @@ import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { checkApprovalRequired, createApprovalRequest } from "./approvals.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
+import { consumeTrackedStock, linkConsumedAllocations, receiveTrackedStock } from "./lots-serials.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
 import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
@@ -114,12 +115,16 @@ export async function createAdjustment(
 
     const prepared: Array<{
       productId: string;
-      prodName: string;
-      prodSku: string;
+      prod: typeof products.$inferSelect;
       delta: number;
       unitCost: number;
       previousQty: number;
       notes: string;
+      lotNumber?: string;
+      manufactureDate?: string | null;
+      expiryDate?: string | null;
+      lotAllocations?: z.infer<typeof adjustmentSchema>["lines"][number]["lotAllocations"];
+      serialNumbers?: string[];
     }> = [];
     let totalAbsImpact = 0;
 
@@ -134,12 +139,16 @@ export async function createAdjustment(
       totalAbsImpact += Math.abs(delta) * unitCost;
       prepared.push({
         productId: line.productId,
-        prodName: prod.name,
-        prodSku: prod.sku,
+        prod,
         delta,
         unitCost,
         previousQty: locked.qtyOnHand,
         notes: line.notes,
+        lotNumber: line.lotNumber,
+        manufactureDate: line.manufactureDate,
+        expiryDate: line.expiryDate,
+        lotAllocations: line.lotAllocations,
+        serialNumbers: line.serialNumbers,
       });
     }
 
@@ -176,6 +185,19 @@ export async function createAdjustment(
         continue;
       }
 
+      const consumed =
+        item.delta < 0
+          ? await consumeTrackedStock(tx, {
+              product: item.prod,
+              branchId: data.branchId,
+              quantity: Math.abs(item.delta),
+              lotAllocations: item.lotAllocations,
+              serialNumbers: item.serialNumbers,
+              allowExpired: true,
+              serialNextStatus: "written_off",
+            })
+          : null;
+
       const moved = await applyBranchStockMovement(tx, {
         branchId: data.branchId,
         productId: item.productId,
@@ -183,14 +205,33 @@ export async function createAdjustment(
         fallbackCost: item.unitCost,
         recomputeAvgCost: false,
         movementType: item.delta > 0 ? "adjustment_in" : "adjustment_out",
-        movementUnitCost: item.unitCost,
+        movementUnitCost: consumed?.tracked ? consumed.unitCost : item.unitCost,
         referenceType: "adjustment",
         referenceId: adj.id,
         referenceNumber: adj.adjustmentNumber,
-        insufficientStockMessage: `Insufficient stock for ${item.prodName} (${item.prodSku}): available ${item.previousQty}, attempted delta ${item.delta}`,
+        insufficientStockMessage: `Insufficient stock for ${item.prod.name} (${item.prod.sku}): available ${item.previousQty}, attempted delta ${item.delta}`,
         notes: `${data.reason}${item.notes ? `: ${item.notes}` : ""}`,
         actorId: actor.id,
       });
+
+      if (item.delta > 0) {
+        await receiveTrackedStock(tx, {
+          product: item.prod,
+          branchId: data.branchId,
+          quantity: item.delta,
+          unitCost: item.unitCost,
+          movementId: moved.movementId,
+          lotNumber: item.lotNumber,
+          manufactureDate: item.manufactureDate,
+          expiryDate: item.expiryDate,
+          serialNumbers: item.serialNumbers,
+          receivedFromType: "adjustment",
+          receivedFromId: adj.id,
+          notes: `${data.reason}${item.notes ? `: ${item.notes}` : ""}`,
+        });
+      } else if (consumed?.tracked) {
+        await linkConsumedAllocations(tx, moved.movementId, consumed.allocations);
+      }
 
       if (moved.totalValueDelta > 0) totalPosVal += moved.totalValueDelta;
       else totalNegVal += Math.abs(moved.totalValueDelta);
@@ -306,7 +347,15 @@ export async function createWriteOff(
     const sortedLines = [...data.lines].sort((a, b) => a.productId.localeCompare(b.productId));
     const woNumber = await nextDocNumber(tx, "WO", "WO-");
 
-    const prepared: Array<{ productId: string; prodName: string; quantity: number; unitCost: number; notes: string }> = [];
+    const prepared: Array<{
+      productId: string;
+      prod: typeof products.$inferSelect;
+      quantity: number;
+      unitCost: number;
+      notes: string;
+      lotAllocations?: z.infer<typeof writeOffSchema>["lines"][number]["lotAllocations"];
+      serialNumbers?: string[];
+    }> = [];
     let estimatedTotal = 0;
     for (const line of sortedLines) {
       const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
@@ -316,10 +365,12 @@ export async function createWriteOff(
       estimatedTotal += line.quantity * unitCost;
       prepared.push({
         productId: line.productId,
-        prodName: prod.name,
+        prod,
         quantity: line.quantity,
         unitCost,
         notes: line.notes,
+        lotAllocations: line.lotAllocations,
+        serialNumbers: line.serialNumbers,
       });
     }
 
@@ -354,22 +405,37 @@ export async function createWriteOff(
         continue;
       }
 
+      const tracked = await consumeTrackedStock(tx, {
+        product: item.prod,
+        branchId: data.branchId,
+        quantity: item.quantity,
+        lotAllocations: item.lotAllocations,
+        serialNumbers: item.serialNumbers,
+        allowExpired: true,
+        serialNextStatus: "written_off",
+      });
+
       const moved = await applyBranchStockMovement(tx, {
         branchId: data.branchId,
         productId: item.productId,
         qtyDelta: -item.quantity,
         fallbackCost: item.unitCost,
         movementType: "write_off",
+        movementUnitCost: tracked.tracked ? tracked.unitCost : undefined,
         referenceType: "write_off",
         referenceId: wo.id,
         referenceNumber: wo.writeOffNumber,
-        insufficientStockMessage: `Insufficient stock for ${item.prodName}: requested ${item.quantity}`,
+        insufficientStockMessage: `Insufficient stock for ${item.prod.name}: requested ${item.quantity}`,
         notes: `${data.reason}${item.notes ? `: ${item.notes}` : ""}`,
         actorId: actor.id,
       });
 
-      const unitCost = moved.movementCost;
-      const totalValue = Math.abs(moved.totalValueDelta);
+      if (tracked.tracked) {
+        await linkConsumedAllocations(tx, moved.movementId, tracked.allocations);
+      }
+
+      const unitCost = tracked.tracked ? tracked.unitCost : moved.movementCost;
+      const totalValue = tracked.tracked ? tracked.totalCost : Math.abs(moved.totalValueDelta);
       totalWriteOffVal += totalValue;
       await tx.insert(stockWriteOffLines).values({
         writeOffId: wo.id,

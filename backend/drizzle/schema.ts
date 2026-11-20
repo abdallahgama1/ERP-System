@@ -422,6 +422,20 @@ export const products = pgTable(
     sellingPrice: numeric("selling_price", { precision: 18, scale: 4 }).notNull().default("0"),
     minStockLevel: numeric("min_stock_level", { precision: 18, scale: 4 }).notNull().default("0"),
     taxCodeId: uuid("tax_code_id").references(() => taxCodes.id, { onDelete: "set null" }),
+    itemType: text("item_type")
+      .$type<"stock" | "non_stock" | "service" | "manufactured">()
+      .notNull()
+      .default("stock"),
+    trackingMode: text("tracking_mode")
+      .$type<"none" | "lot" | "serial">()
+      .notNull()
+      .default("none"),
+    requiresExpiry: boolean("requires_expiry").notNull().default(false),
+    shelfLifeDays: integer("shelf_life_days"),
+    pickingStrategy: text("picking_strategy")
+      .$type<"FEFO" | "FIFO" | "LIFO">()
+      .notNull()
+      .default("FEFO"),
     trackLots: boolean("track_lots").notNull().default(false),
     trackSerials: boolean("track_serials").notNull().default(false),
     hasBom: boolean("has_bom").notNull().default(false),
@@ -1303,4 +1317,191 @@ export const approvalRequests = pgTable(
     index("approval_requests_status_idx").on(t.status, t.requestedAt),
     index("approval_requests_entity_idx").on(t.entityType, t.entityId),
   ]
+);
+
+// ============================================================================
+// Lot/Batch Expiry & Serial Tracking (Milestone D2)
+// ============================================================================
+
+export const stockLots = pgTable(
+  "stock_lots",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    lotNumber: text("lot_number").notNull(),
+    manufactureDate: timestamp("manufacture_date", { withTimezone: true }),
+    expiryDate: timestamp("expiry_date", { withTimezone: true }),
+    unitCost: numeric("unit_cost", { precision: 18, scale: 4 }).notNull().default("0"),
+    vendorId: uuid("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
+    notes: text("notes").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("stock_lots_product_lot_uq").on(t.productId, t.lotNumber),
+    index("stock_lots_expiry_idx").on(t.expiryDate),
+  ]
+);
+
+export const branchLotBalances = pgTable(
+  "branch_lot_balances",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    branchId: uuid("branch_id")
+      .notNull()
+      .references(() => branches.id, { onDelete: "cascade" }),
+    lotId: uuid("lot_id")
+      .notNull()
+      .references(() => stockLots.id, { onDelete: "cascade" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    qtyOnHand: numeric("qty_on_hand", { precision: 18, scale: 4 }).notNull().default("0"),
+    qtyReserved: numeric("qty_reserved", { precision: 18, scale: 4 }).notNull().default("0"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("branch_lot_balances_branch_lot_uq").on(t.branchId, t.lotId),
+    index("branch_lot_balances_branch_product_idx").on(t.branchId, t.productId),
+  ]
+);
+
+export const stockSerials = pgTable(
+  "stock_serials",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    serialNumber: text("serial_number").notNull(),
+    branchId: uuid("branch_id").references(() => branches.id, { onDelete: "set null" }),
+    lotId: uuid("lot_id").references(() => stockLots.id, { onDelete: "set null" }),
+    status: text("status")
+      .$type<"in_stock" | "reserved" | "in_transit" | "sold" | "returned" | "written_off" | "consumed">()
+      .notNull()
+      .default("in_stock"),
+    unitCost: numeric("unit_cost", { precision: 18, scale: 4 }).notNull().default("0"),
+    receivedFromType: text("received_from_type"),
+    receivedFromId: text("received_from_id"),
+    soldInvoiceId: uuid("sold_invoice_id").references(() => salesInvoices.id, { onDelete: "set null" }),
+    workOrderId: uuid("work_order_id"),
+    notes: text("notes").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("stock_serials_product_serial_uq").on(t.productId, t.serialNumber),
+    index("stock_serials_branch_status_idx").on(t.branchId, t.status),
+    index("stock_serials_serial_idx").on(t.serialNumber),
+  ]
+);
+
+export const stockMovementAllocations = pgTable(
+  "stock_movement_allocations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    movementId: uuid("movement_id")
+      .notNull()
+      .references(() => stockMovements.id, { onDelete: "cascade" }),
+    lotId: uuid("lot_id").references(() => stockLots.id, { onDelete: "set null" }),
+    serialId: uuid("serial_id").references(() => stockSerials.id, { onDelete: "set null" }),
+    quantity: numeric("quantity", { precision: 18, scale: 4 }).notNull(),
+    unitCost: numeric("unit_cost", { precision: 18, scale: 4 }).notNull().default("0"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("stock_mov_alloc_movement_idx").on(t.movementId),
+    index("stock_mov_alloc_lot_idx").on(t.lotId),
+    index("stock_mov_alloc_serial_idx").on(t.serialId),
+  ]
+);
+
+// ============================================================================
+// Manufacturing: Bills of Materials & Work Orders (Milestone D2)
+// ============================================================================
+
+export const billsOfMaterials = pgTable(
+  "bills_of_materials",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    bomNumber: text("bom_number").notNull().unique(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    outputQty: numeric("output_qty", { precision: 18, scale: 4 }).notNull().default("1"),
+    isActive: boolean("is_active").notNull().default(true),
+    notes: text("notes").notNull().default(""),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("boms_product_idx").on(t.productId)]
+);
+
+export const bomComponents = pgTable(
+  "bom_components",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    bomId: uuid("bom_id")
+      .notNull()
+      .references(() => billsOfMaterials.id, { onDelete: "cascade" }),
+    componentProductId: uuid("component_product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "restrict" }),
+    quantity: numeric("quantity", { precision: 18, scale: 4 }).notNull(),
+    scrapPercent: numeric("scrap_percent", { precision: 8, scale: 4 }).notNull().default("0"),
+    notes: text("notes").notNull().default(""),
+  },
+  (t) => [index("bom_components_bom_idx").on(t.bomId)]
+);
+
+export const workOrders = pgTable(
+  "work_orders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    woNumber: text("wo_number").notNull().unique(),
+    bomId: uuid("bom_id")
+      .notNull()
+      .references(() => billsOfMaterials.id, { onDelete: "restrict" }),
+    branchId: uuid("branch_id")
+      .notNull()
+      .references(() => branches.id, { onDelete: "restrict" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "restrict" }),
+    plannedQty: numeric("planned_qty", { precision: 18, scale: 4 }).notNull(),
+    completedQty: numeric("completed_qty", { precision: 18, scale: 4 }).notNull().default("0"),
+    status: text("status")
+      .$type<"Draft" | "Released" | "In Progress" | "Completed" | "Cancelled">()
+      .notNull()
+      .default("Released"),
+    wipValueIssued: numeric("wip_value_issued", { precision: 18, scale: 4 }).notNull().default("0"),
+    wipValueAbsorbed: numeric("wip_value_absorbed", { precision: 18, scale: 4 }).notNull().default("0"),
+    notes: text("notes").notNull().default(""),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("work_orders_branch_status_idx").on(t.branchId, t.status)]
+);
+
+export const workOrderMaterials = pgTable(
+  "work_order_materials",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workOrderId: uuid("work_order_id")
+      .notNull()
+      .references(() => workOrders.id, { onDelete: "cascade" }),
+    componentProductId: uuid("component_product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "restrict" }),
+    requiredQty: numeric("required_qty", { precision: 18, scale: 4 }).notNull(),
+    issuedQty: numeric("issued_qty", { precision: 18, scale: 4 }).notNull().default("0"),
+    unitCostSnapshot: numeric("unit_cost_snapshot", { precision: 18, scale: 4 }).notNull().default("0"),
+  },
+  (t) => [index("wo_materials_wo_idx").on(t.workOrderId)]
 );

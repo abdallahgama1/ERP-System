@@ -125,6 +125,8 @@ export async function ensureSeededDefaults(tx: DbOrTx): Promise<string> {
     { docType: "CUST", prefix: "CUS-", padding: 4 },
     { docType: "VEND", prefix: "VEN-", padding: 4 },
     { docType: "JE", prefix: "JE-", padding: 4 },
+    { docType: "BOM", prefix: "BOM-", padding: 4 },
+    { docType: "MFG", prefix: "MO-", padding: 4 },
   ];
 
   await tx

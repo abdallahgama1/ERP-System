@@ -63,22 +63,41 @@ export const erpQueryKeys = {
     rules: () => ["approvals", "rules"] as const,
     requests: () => ["approvals", "requests"] as const,
   },
+
+  tracking: {
+    all: ["tracking"] as const,
+    lots: (branchId?: string, productId?: string) =>
+      ["tracking", "lots", { branchId: branchId ?? "all", productId: productId ?? "all" }] as const,
+    serials: (branchId?: string, status?: string, search?: string) =>
+      ["tracking", "serials", { branchId: branchId ?? "all", status: status ?? "all", search: search ?? "" }] as const,
+    serialTrace: (serialId: string) => ["tracking", "serialTrace", serialId] as const,
+  },
+
+  manufacturing: {
+    all: ["manufacturing"] as const,
+    boms: () => ["manufacturing", "boms"] as const,
+    workOrders: () => ["manufacturing", "workOrders"] as const,
+  },
 };
 
 export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<readonly unknown[]> {
   switch (eventType) {
     case "inventory_updated":
-      return [erpQueryKeys.inventory.all, erpQueryKeys.accounting.all];
+      return [erpQueryKeys.inventory.all, erpQueryKeys.tracking.all, erpQueryKeys.accounting.all];
     case "purchases_updated":
-      return [erpQueryKeys.purchases.all, erpQueryKeys.accounting.all];
+      return [erpQueryKeys.purchases.all, erpQueryKeys.tracking.all, erpQueryKeys.accounting.all];
     case "sales_updated":
-      return [erpQueryKeys.sales.all, erpQueryKeys.accounting.all];
+      return [erpQueryKeys.sales.all, erpQueryKeys.tracking.all, erpQueryKeys.accounting.all];
     case "sessions_updated":
       return [erpQueryKeys.sessions.all, erpQueryKeys.accounting.all];
     case "accounting_updated":
       return [erpQueryKeys.accounting.all];
     case "approvals_updated":
       return [erpQueryKeys.approvals.all, erpQueryKeys.notifications];
+    case "tracking_updated":
+      return [erpQueryKeys.tracking.all, erpQueryKeys.inventory.all];
+    case "manufacturing_updated":
+      return [erpQueryKeys.manufacturing.all, erpQueryKeys.inventory.all, erpQueryKeys.accounting.all];
     case "branches_updated":
     case "users_updated":
       return [erpQueryKeys.branches, erpQueryKeys.permissions];
