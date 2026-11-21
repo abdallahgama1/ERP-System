@@ -39,8 +39,8 @@ import { parseOrThrow } from "../services/stock-locks.ts";
 
 export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
   // ---------------- Vendors ----------------
-  app.get("/api/vendors", { preHandler: requirePermission("purchases", "view") }, async () => {
-    return { vendors: await listVendors(getDb()) };
+  app.get("/api/vendors", { preHandler: requirePermission("purchases", "view") }, async (req) => {
+    return listVendors(getDb(), req.query as Record<string, unknown>);
   });
 
   app.post("/api/vendors", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {
@@ -67,7 +67,7 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------------- Purchase Orders ----------------
   app.get("/api/purchase-orders", { preHandler: requirePermission("purchases", "view") }, async (req) => {
-    return { purchaseOrders: await listPurchaseOrders(getDb(), req.authUser!) };
+    return listPurchaseOrders(getDb(), req.authUser!, req.query as Record<string, unknown>);
   });
 
   app.post("/api/purchase-orders", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {
@@ -121,7 +121,7 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------------- Vendor Bills ----------------
   app.get("/api/vendor-bills", { preHandler: requirePermission("purchases", "view") }, async (req) => {
-    return { bills: await listVendorBills(getDb(), req.authUser!) };
+    return listVendorBills(getDb(), req.authUser!, req.query as Record<string, unknown>);
   });
 
   app.post("/api/vendor-bills", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {

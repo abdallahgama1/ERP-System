@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   bindTerminalSchema,
   closeShiftSchema,
@@ -6,6 +6,7 @@ import {
   openShiftSchema,
   pinSwitchSchema,
   posCheckoutSchema,
+  posManagerOverrideSchema,
   posSyncBatchSchema,
   setCashierPinSchema,
   shiftCashMovementSchema,
@@ -21,14 +22,18 @@ import {
   lockTerminalSession,
   setUserPosPin,
   switchCashierByPin,
+  verifyManagerPinOverride,
 } from "../services/pos-auth.service.ts";
 import {
   closePosShift,
   createPosCheckout,
+  createPosReturn,
   createPosTerminal,
   getActiveShift,
   getPosCatalog,
+  getPosReceiptDetail,
   listPosCashiers,
+  listPosReceipts,
   listPosTerminals,
   openPosShift,
   recordShiftCashMovement,
@@ -177,5 +182,55 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
       eventBroadcaster.broadcast("notifications_updated", { syncedCount });
     }
     return response;
+  });
+
+  // ---------------- Manager Override Verification ----------------
+  const handleVerifyOverride = async (req: FastifyRequest) => {
+    const data = parseOrThrow(posManagerOverrideSchema, req.body, "Invalid manager override payload");
+    const actor = req.authUser!;
+    return verifyManagerPinOverride(getDb(), {
+      pin: data.pin,
+      managerUserId: data.managerUserId,
+      terminalId: data.terminalId ?? req.posTerminalId ?? undefined,
+      action: data.action,
+      reason: data.reason,
+      requestedByUserId: actor.id,
+      requestedByName: actor.name,
+      requestedByRole: actor.role,
+      branchIds: actor.branchIds,
+      hasAllBranchScope: actor.role === "admin" || actor.branchScopeMode === "all",
+      ipAddress: req.ip,
+    });
+  };
+
+  app.post(
+    "/api/pos/override/verify",
+    { ...pinRateLimit, preHandler: requirePermission("pos", "view") },
+    handleVerifyOverride
+  );
+
+  app.post(
+    "/api/pos/manager-override",
+    { ...pinRateLimit, preHandler: requirePermission("pos", "view") },
+    handleVerifyOverride
+  );
+
+  // ---------------- Receipts & Returns ----------------
+  app.get("/api/pos/receipts", { preHandler: requirePermission("pos", "view") }, async (req) => {
+    return listPosReceipts(getDb(), req.authUser!, req.query);
+  });
+
+  app.get("/api/pos/receipts/:id", { preHandler: requirePermission("pos", "view") }, async (req) => {
+    const { id } = req.params as { id: string };
+    return getPosReceiptDetail(getDb(), req.authUser!, id);
+  });
+
+  app.post("/api/pos/returns", { preHandler: requirePermission("pos", "create") }, async (req, reply) => {
+    const result = await createPosReturn(getDb(), req.authUser!, req.body, req.ip);
+    eventBroadcaster.broadcast("pos_updated", { posReturnId: result.posReturn.id });
+    eventBroadcaster.broadcast("sales_updated", { posReturnId: result.posReturn.id });
+    eventBroadcaster.broadcast("inventory_updated", { posReturnId: result.posReturn.id });
+    eventBroadcaster.broadcast("accounting_updated", { posReturnId: result.posReturn.id });
+    return reply.status(201).send(result);
   });
 }

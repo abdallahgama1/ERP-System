@@ -31,7 +31,7 @@ import {
 export async function inventoryRoutes(app: FastifyInstance): Promise<void> {
   // ---------------- Products ----------------
   app.get("/api/products", { preHandler: requirePermission("products", "view") }, async (req) => {
-    return listProducts(getDb(), req.authUser!);
+    return listProducts(getDb(), req.authUser!, req.query as Record<string, unknown>);
   });
 
   app.post("/api/products", { preHandler: requirePermission("products", "create") }, async (req, reply) => {

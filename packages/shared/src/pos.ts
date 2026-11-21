@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { lotAllocationInputSchema } from "./inventory-extensions.ts";
+import { offsetPageQuerySchema, optionalSearchQuery, optionalUuidQuery } from "./pagination.ts";
 import { calculateDocumentTotals } from "./pricing.ts";
 
 export const EINVOICING_MODES = ["none", "zatca_qr", "zatca_phase2", "eta_egypt"] as const;
@@ -126,3 +127,67 @@ export const posSyncBatchSchema = z.object({
 
 export type PosCheckoutInput = z.infer<typeof posCheckoutSchema>;
 export type PosSyncBatchInput = z.infer<typeof posSyncBatchSchema>;
+
+export const DEFAULT_POS_MAX_CASHIER_DISCOUNT_PCT = 10;
+
+export const EINVOICE_SUBMISSION_STATUSES = [
+  "pending",
+  "submitted",
+  "accepted",
+  "rejected",
+  "failed",
+] as const;
+export type EinvoiceSubmissionStatus = (typeof EINVOICE_SUBMISSION_STATUSES)[number];
+
+export const ETA_RECEIPT_STATUSES = [
+  "not_applicable",
+  "pending_submission",
+  "submitted",
+  "accepted",
+  "rejected",
+  "failed",
+] as const;
+export type EtaReceiptStatus = (typeof ETA_RECEIPT_STATUSES)[number];
+
+export const POS_OVERRIDE_ACTIONS = ["refund", "discount", "price_override", "void"] as const;
+export type PosOverrideAction = (typeof POS_OVERRIDE_ACTIONS)[number];
+
+export const posManagerOverrideSchema = z.object({
+  pin: z.string().regex(/^\d{4,6}$/, "PIN must be 4 to 6 numeric digits"),
+  managerUserId: z.string().uuid().optional(),
+  terminalId: z.string().uuid().optional(),
+  action: z.enum(POS_OVERRIDE_ACTIONS).optional().default("discount"),
+  reason: z.string().trim().max(300).optional().default(""),
+});
+export type PosManagerOverrideInput = z.infer<typeof posManagerOverrideSchema>;
+
+export const posReturnLineSchema = z.object({
+  originalInvoiceLineId: z.string().uuid(),
+  productId: z.string().uuid(),
+  quantity: z.number().positive(),
+  lotAllocations: z.array(lotAllocationInputSchema).optional(),
+  serialNumbers: z.array(z.string().trim().min(1).max(100)).optional(),
+});
+export type PosReturnLineInput = z.infer<typeof posReturnLineSchema>;
+
+export const posReturnSchema = z.object({
+  originalInvoiceId: z.string().uuid(),
+  terminalId: z.string().uuid(),
+  shiftId: z.string().uuid(),
+  refundMethod: z.enum(POS_PAYMENT_METHODS),
+  restockItems: z.boolean().optional().default(true),
+  reason: z.string().trim().min(1, "Return reason is required").max(500),
+  managerOverridePin: z.string().regex(/^\d{4,6}$/, "PIN must be 4 to 6 numeric digits").optional(),
+  approvedByUserId: z.string().uuid().optional(),
+  lines: z.array(posReturnLineSchema).min(1, "At least one return line is required"),
+});
+export type PosReturnInput = z.infer<typeof posReturnSchema>;
+
+export const posReceiptsQuerySchema = offsetPageQuerySchema.extend({
+  terminalId: optionalUuidQuery,
+  shiftId: optionalUuidQuery,
+  fromDate: optionalSearchQuery,
+  toDate: optionalSearchQuery,
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+export type PosReceiptsQuery = z.infer<typeof posReceiptsQuerySchema>;

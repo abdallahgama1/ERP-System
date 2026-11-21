@@ -12,11 +12,12 @@
     "dev": "concurrently -k -n backend,frontend -c blue,green \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
     "dev:backend": "npm --prefix backend run dev",
     "dev:frontend": "npm --prefix frontend run dev",
-    "build": "npm --prefix packages/shared run typecheck && npm --prefix backend run typecheck && npm --prefix frontend run build",
+    "build": "npm --prefix packages/shared run typecheck && npm --prefix backend run typecheck && npm --prefix backend run build && npm --prefix frontend run build",
     "typecheck": "npm --prefix packages/shared run typecheck && npm --prefix backend run typecheck && npm --prefix frontend run typecheck",
     "lint": "npm --prefix packages/shared run lint && npm --prefix backend run lint && npm --prefix frontend run lint",
     "test": "npm --prefix packages/shared run test && npm --prefix backend run test && npm --prefix frontend run test",
     "test:unit": "npm --prefix packages/shared run test && npx --prefix backend vitest run tests/unit/ && npm --prefix frontend run test",
+    "test:load": "node scripts/load-test.mjs",
     "test:e2e": "playwright test",
     "db:generate": "npm --prefix backend run db:generate",
     "db:push": "npm --prefix backend run db:push",
@@ -25,7 +26,7 @@
   "devDependencies": {
     "@playwright/test": "^1.65.1",
     "concurrently": "^10.0.7",
-    "rollup": "^4.24.0"
+    "rollup": "4.24.0"
   },
   "overrides": {
     "rollup": "4.24.0"

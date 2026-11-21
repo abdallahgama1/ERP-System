@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Receipt, Plus, AlertTriangle, Trash2, Ban } from "lucide-react";
+import { Receipt, Plus, AlertTriangle, Trash2, Ban, Search } from "lucide-react";
+import { TablePagination } from "@/components/TablePagination";
+import { useVendorBillsPageQuery } from "@/hooks/queries/usePurchasingQueries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -11,6 +13,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { useBranch } from "@/contexts/BranchContext";
+import { useInventory } from "@/contexts/InventoryContext";
 import { usePurchases } from "@/contexts/PurchasesContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { useSettings } from "@/contexts/SettingsContext";
@@ -53,7 +57,9 @@ interface DraftLine {
 
 export default function VendorBills() {
   const { t } = useTranslation();
-  const { bills, receives, vendors, createBill, deleteBill, voidBill, billBalance } = usePurchases();
+  const { activeBranchId } = useBranch();
+  const { products } = useInventory();
+  const { bills, receives, purchaseOrders, vendors, createBill, deleteBill, voidBill, billBalance } = usePurchases();
   const { user } = useAuth();
   const { settings, taxCodes } = useSettings();
   const { toast } = useToast();
@@ -70,6 +76,82 @@ export default function VendorBills() {
   const [pendingDelete, setPendingDelete] = useState<VendorBill | null>(null);
   const [pendingVoid, setPendingVoid] = useState<VendorBill | null>(null);
   const [voidReason, setVoidReason] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [page, setPage] = useState(1);
+
+  const { data: billsPage } = useVendorBillsPageQuery({
+    page,
+    pageSize: 25,
+    q: searchTerm,
+    branchId: activeBranchId,
+  });
+
+  const vendorMap = useMemo(() => new Map(vendors.map((v) => [v.id, v])), [vendors]);
+  const productMap = useMemo(() => new Map(products.map((p) => [p.productId, p])), [products]);
+  const poMap = useMemo(() => new Map(purchaseOrders.map((po) => [po.id, po])), [purchaseOrders]);
+  const receiveMap = useMemo(() => new Map(receives.map((r) => [r.id, r])), [receives]);
+
+  const paginatedBills = useMemo<VendorBill[]>(
+    () =>
+      (billsPage?.bills ?? []).map((b) => {
+        const linkedPo = b.poId ? poMap.get(b.poId) : undefined;
+        const linkedReceive = b.receiveId ? receiveMap.get(b.receiveId) : undefined;
+        const matchNotes: string[] = [];
+        let matchStatus: BillMatchStatus = linkedReceive ? "matched" : "unmatched";
+
+        const items = (b.lines ?? []).map((l) => {
+          const p = l.productId ? productMap.get(l.productId) : undefined;
+          const recLine = linkedReceive?.items.find((rl) => rl.productId === l.productId);
+          const poLine = linkedPo?.items.find((pl) => pl.productId === l.productId);
+          if (recLine && Math.abs(l.quantity - recLine.receivingNow) > 0.001) {
+            matchStatus = "qty_mismatch";
+            matchNotes.push(`${p?.product_name ?? "Item"}: billed ${l.quantity}, received ${recLine.receivingNow}`);
+          }
+          if (poLine && Math.abs(l.unitCost - poLine.unitPrice) > 0.01) {
+            if (matchStatus === "matched") matchStatus = "price_mismatch";
+            matchNotes.push(`${p?.product_name ?? "Item"}: bill price ${l.unitCost}, PO price ${poLine.unitPrice}`);
+          }
+          return {
+            id: l.id,
+            productId: l.productId ?? "",
+            product_name: p?.product_name ?? l.description ?? "",
+            product_sku: p?.product_sku ?? "",
+            quantity: l.quantity,
+            unitPrice: l.unitCost,
+            taxPercent: l.taxRate,
+            amount: l.lineTotal,
+            receivedQty: recLine?.receivingNow,
+            orderedUnitPrice: poLine?.unitPrice,
+          };
+        });
+
+        return {
+          id: b.id,
+          billNumber: b.billNumber,
+          vendorId: b.vendorId,
+          vendorName: vendorMap.get(b.vendorId)?.displayName ?? "",
+          branchId: b.branchId,
+          receiveId: b.receiveId ?? undefined,
+          receiveNumber: linkedReceive?.receiveNumber,
+          purchaseOrderId: b.poId ?? undefined,
+          poNumber: linkedPo?.poNumber,
+          billDate: b.billDate.slice(0, 10),
+          dueDate: b.dueDate.slice(0, 10),
+          status: b.status,
+          matchStatus,
+          matchNotes,
+          items,
+          subtotal: b.subtotal,
+          totalTax: b.taxTotal,
+          grandTotal: b.totalAmount,
+          amountPaid: b.paidAmount,
+          voidReason: b.voidReason ?? undefined,
+          notes: b.notes || undefined,
+          createdAt: b.createdAt,
+        };
+      }),
+    [billsPage, poMap, productMap, receiveMap, vendorMap]
+  );
 
   const billedReceiveIds = useMemo(
     () =>
@@ -225,10 +307,24 @@ export default function VendorBills() {
 
       <Card>
         <CardHeader>
-          <CardTitle>All Bills ({bills.length})</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <CardTitle>All Bills ({billsPage?.pageInfo?.total ?? bills.length})</CardTitle>
+            <div className="relative w-72">
+              <Search className="absolute start-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                className="ps-9"
+                placeholder={t("common.search", "Search bills...")}
+                value={searchTerm}
+                onChange={(e) => {
+                  setSearchTerm(e.target.value);
+                  setPage(1);
+                }}
+              />
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
-          {bills.length === 0 ? (
+          {paginatedBills.length === 0 ? (
             <div className="py-10 text-center text-muted-foreground">
               No bills yet. Create one from a goods receipt to start tracking payables.
             </div>
@@ -248,7 +344,7 @@ export default function VendorBills() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {bills.map((bill) => (
+                {paginatedBills.map((bill) => (
                   <TableRow key={bill.id} className="cursor-pointer" onClick={() => setDetailBill(bill)}>
                     <TableCell className="font-medium">{bill.billNumber}</TableCell>
                     <TableCell>{bill.vendorName}</TableCell>
@@ -297,6 +393,7 @@ export default function VendorBills() {
               </TableBody>
             </Table>
           )}
+          <TablePagination pageInfo={billsPage?.pageInfo} onPageChange={setPage} />
         </CardContent>
       </Card>
 

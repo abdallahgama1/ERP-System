@@ -1,5 +1,5 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import type { CursorPageInfo } from "@erp/shared";
+import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import type { CursorPageInfo, OffsetPageInfo } from "@erp/shared";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiRequest } from "@/lib/api-client";
 import { erpQueryKeys } from "./queryKeys";
@@ -137,6 +137,49 @@ export function useProductsQuery() {
     queryKey: erpQueryKeys.inventory.products(),
     queryFn: () =>
       apiRequest<{ products: ApiProductRow[]; branchProducts: ApiBranchProductRow[] }>("/api/products"),
+    enabled: Boolean(user),
+  });
+}
+
+export interface ProductsPageFilters {
+  page?: number;
+  pageSize?: number;
+  q?: string;
+  category?: string;
+  branchId?: string;
+}
+
+export function useProductsPageQuery(filters: ProductsPageFilters = {}) {
+  const { user } = useAuth();
+  const page = filters.page ?? 1;
+  const pageSize = filters.pageSize ?? 25;
+  const params = new URLSearchParams();
+  params.set("page", String(page));
+  params.set("pageSize", String(pageSize));
+  if (filters.category && filters.category !== "all") params.set("category", filters.category);
+  if (filters.branchId && filters.branchId !== "all") params.set("branchId", filters.branchId);
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+
+  return useQuery({
+    queryKey: [
+      ...erpQueryKeys.inventory.products(),
+      "page",
+      {
+        page,
+        pageSize,
+        category: filters.category ?? "all",
+        branchId: filters.branchId ?? "all",
+        q: filters.q?.trim() ?? "",
+      },
+    ],
+    queryFn: () =>
+      apiRequest<{
+        items: ApiProductRow[];
+        products: ApiProductRow[];
+        branchProducts: ApiBranchProductRow[];
+        pageInfo: OffsetPageInfo;
+      }>(`/api/products?${params.toString()}`),
+    placeholderData: keepPreviousData,
     enabled: Boolean(user),
   });
 }

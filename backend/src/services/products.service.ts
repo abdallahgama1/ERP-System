@@ -1,6 +1,13 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
-import type { adjustBranchLevelSchema, createProductSchema, updateProductSchema } from "@erp/shared";
+import {
+  buildOffsetPageInfo,
+  productsListQuerySchema,
+  resolveSearchTerm,
+  type adjustBranchLevelSchema,
+  type createProductSchema,
+  type updateProductSchema,
+} from "@erp/shared";
 import {
   branchProducts,
   products,
@@ -13,10 +20,68 @@ import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { receiveTrackedStock, resolveProductTrackingMode } from "./lots-serials.service.ts";
+import { parseOffsetQueryOrThrow } from "./query-helpers.ts";
 import { computeWmac, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
-export async function listProducts(db: AppDatabase, actor: RequestActor) {
-  const prodRows = await db.select().from(products).orderBy(asc(products.name));
+export async function listProducts(
+  db: AppDatabase,
+  actor: RequestActor,
+  rawQuery?: Record<string, unknown>
+) {
+  const query = parseOffsetQueryOrThrow(productsListQuerySchema, rawQuery);
+  if (query.branchId) {
+    assertBranchAccess(actor, query.branchId);
+  }
+
+  const conds: SQL[] = [];
+  if (query.category) {
+    conds.push(eq(products.category, query.category));
+  }
+  if (query.itemType) {
+    conds.push(eq(products.itemType, query.itemType));
+  }
+  if (query.isActive !== undefined) {
+    conds.push(eq(products.isActive, query.isActive === "true"));
+  }
+  const term = resolveSearchTerm(query);
+  if (term) {
+    const pattern = `%${term}%`;
+    conds.push(
+      or(
+        ilike(products.name, pattern),
+        ilike(products.sku, pattern),
+        ilike(products.barcode, pattern),
+        ilike(products.category, pattern),
+        ilike(products.brand, pattern)
+      )!
+    );
+  }
+  const whereClause = conds.length > 0 ? and(...conds) : undefined;
+
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(products)
+    .where(whereClause);
+
+  const dir = query.sortDir === "asc" ? asc : desc;
+  const sortCol =
+    query.sortBy === "name"
+      ? products.name
+      : query.sortBy === "sku"
+        ? products.sku
+        : query.sortBy === "sellingPrice"
+          ? products.sellingPrice
+          : query.sortBy === "costPrice"
+            ? products.costPrice
+            : products.createdAt;
+
+  const prodRows = await db
+    .select()
+    .from(products)
+    .where(whereClause)
+    .orderBy(dir(sortCol), dir(products.id))
+    .limit(query.pageSize)
+    .offset((query.page - 1) * query.pageSize);
 
   let bpRows: Array<typeof branchProducts.$inferSelect> = [];
   if (actor.role === "admin" || actor.branchScopeMode === "all") {
@@ -31,34 +96,46 @@ export async function listProducts(db: AppDatabase, actor: RequestActor) {
   }
 
   const prodMap = new Map(prodRows.map((p) => [p.id, p]));
+  const missingBpProdIds = [...new Set(bpRows.map((bp) => bp.productId).filter((id) => !prodMap.has(id)))];
+  if (missingBpProdIds.length > 0) {
+    const extraProds = await db.select().from(products).where(inArray(products.id, missingBpProdIds));
+    for (const ep of extraProds) {
+      prodMap.set(ep.id, ep);
+    }
+  }
+
+  const items = prodRows.map((p) => ({
+    id: p.id,
+    sku: p.sku,
+    barcode: p.barcode,
+    name: p.name,
+    nameAr: p.nameAr,
+    description: p.description,
+    category: p.category,
+    brand: p.brand,
+    unit: p.unit,
+    tags: p.tags,
+    costPrice: num(p.costPrice),
+    sellingPrice: num(p.sellingPrice),
+    minStockLevel: num(p.minStockLevel),
+    itemType: p.itemType,
+    trackingMode: resolveProductTrackingMode(p),
+    requiresExpiry: p.requiresExpiry,
+    shelfLifeDays: p.shelfLifeDays,
+    pickingStrategy: p.pickingStrategy,
+    trackLots: p.trackLots,
+    trackSerials: p.trackSerials,
+    hasBom: p.hasBom,
+    isActive: p.isActive,
+    totalQuantity: totalQtyByProduct.get(p.id) ?? 0,
+    createdAt: p.createdAt.toISOString(),
+  }));
+
+  const pageInfo = buildOffsetPageInfo(query.page, query.pageSize, total);
 
   return {
-    products: prodRows.map((p) => ({
-      id: p.id,
-      sku: p.sku,
-      barcode: p.barcode,
-      name: p.name,
-      nameAr: p.nameAr,
-      description: p.description,
-      category: p.category,
-      brand: p.brand,
-      unit: p.unit,
-      tags: p.tags,
-      costPrice: num(p.costPrice),
-      sellingPrice: num(p.sellingPrice),
-      minStockLevel: num(p.minStockLevel),
-      itemType: p.itemType,
-      trackingMode: resolveProductTrackingMode(p),
-      requiresExpiry: p.requiresExpiry,
-      shelfLifeDays: p.shelfLifeDays,
-      pickingStrategy: p.pickingStrategy,
-      trackLots: p.trackLots,
-      trackSerials: p.trackSerials,
-      hasBom: p.hasBom,
-      isActive: p.isActive,
-      totalQuantity: totalQtyByProduct.get(p.id) ?? 0,
-      createdAt: p.createdAt.toISOString(),
-    })),
+    items,
+    products: items,
     branchProducts: bpRows.map((bp) => {
       const prod = prodMap.get(bp.productId);
       return {
@@ -74,6 +151,7 @@ export async function listProducts(db: AppDatabase, actor: RequestActor) {
         productSku: prod?.sku ?? "",
       };
     }),
+    pageInfo,
   };
 }
 

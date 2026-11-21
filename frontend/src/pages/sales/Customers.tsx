@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "react-router-dom";
 import { Plus, Search, Edit, Trash2, Users } from "lucide-react";
 import { z } from "zod";
+import { TablePagination } from "@/components/TablePagination";
+import { useCustomersPageQuery } from "@/hooks/queries/useSalesQueries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,28 +55,49 @@ const initialForm: FormData = {
   notes: "",
 };
 
+const termsFromDays = (days: number): "NET15" | "NET30" | "COD" =>
+  days <= 0 ? "COD" : days <= 15 ? "NET15" : "NET30";
+
 export default function Customers() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const navigate = useNavigate();
   const { customers, addCustomer, updateCustomer, deleteCustomer, customerReceivables } = useSales();
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Customer | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [form, setForm] = useState<FormData>(initialForm);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return customers;
-    return customers.filter(c =>
-      c.displayName.toLowerCase().includes(q) ||
-      (c.companyName?.toLowerCase().includes(q) ?? false) ||
-      (c.email?.toLowerCase().includes(q) ?? false) ||
-      (c.taxNumber?.toLowerCase().includes(q) ?? false)
-    );
-  }, [customers, search]);
+  const { data: customersPage } = useCustomersPageQuery({
+    page,
+    pageSize: 25,
+    q: search,
+  });
+
+  const filtered = useMemo<Customer[]>(
+    () =>
+      (customersPage?.customers ?? []).map((c) => ({
+        id: c.id,
+        displayName: c.name,
+        companyName: c.company || undefined,
+        customerType: c.company ? "business" : "individual",
+        email: c.email || undefined,
+        phone: c.phone || undefined,
+        taxNumber: c.taxNumber || undefined,
+        currency: c.currency === "SAR" || c.currency === "AED" || c.currency === "EGP" ? c.currency : "USD",
+        paymentTerms: termsFromDays(c.paymentTermsDays),
+        creditLimit: c.creditLimit,
+        billingAddress: c.billingAddress || undefined,
+        shippingAddress: c.shippingAddress || undefined,
+        notes: c.notes || undefined,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+      })),
+    [customersPage]
+  );
 
   const openDialog = (customer?: Customer) => {
     if (customer) {
@@ -162,7 +185,7 @@ export default function Customers() {
         </Button>
       </div>
 
-      {customers.length === 0 ? (
+      {customers.length === 0 && (customersPage?.pageInfo?.total ?? 0) === 0 && !search.trim() ? (
         <Card className="flex flex-col items-center justify-center py-16">
           <div className="flex h-20 w-20 items-center justify-center rounded-full bg-muted">
             <Users className="h-10 w-10 text-muted-foreground" />
@@ -184,7 +207,10 @@ export default function Customers() {
                 <Input
                   placeholder={t("customers.searchPlaceholder")}
                   value={search}
-                  onChange={(e) => setSearch(e.target.value)}
+                  onChange={(e) => {
+                    setSearch(e.target.value);
+                    setPage(1);
+                  }}
                   className="ps-9"
                 />
               </div>
@@ -253,6 +279,7 @@ export default function Customers() {
                 )}
               </TableBody>
             </Table>
+            <TablePagination pageInfo={customersPage?.pageInfo} onPageChange={setPage} />
           </CardContent>
         </Card>
       )}

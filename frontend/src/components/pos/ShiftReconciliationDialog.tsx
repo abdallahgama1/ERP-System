@@ -32,6 +32,10 @@ export interface PosShiftDto {
   totalCardSales: number;
   totalWalletSales: number;
   totalSalesCount: number;
+  totalCashRefunds?: number;
+  totalCardRefunds?: number;
+  totalWalletRefunds?: number;
+  totalRefundsCount?: number;
   notes: string;
   openedAt: string;
   closedAt: string | null;

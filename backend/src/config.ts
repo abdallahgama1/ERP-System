@@ -11,6 +11,11 @@ const parseIntEnv = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const parseRateEnv = (value: string | undefined, fallback: number): number => {
+  const parsed = Number.parseFloat(value ?? "");
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : fallback;
+};
+
 const parseBoolEnv = (value: string | undefined, fallback = false): boolean => {
   if (value === undefined) return fallback;
   const v = value.trim().toLowerCase();
@@ -50,5 +55,15 @@ export const env = {
   ETA_CLIENT_ID: (process.env.ETA_CLIENT_ID ?? "").trim(),
   ETA_CLIENT_SECRET: (process.env.ETA_CLIENT_SECRET ?? "").trim(),
   ETA_ID_BASE_URL: (process.env.ETA_ID_BASE_URL ?? "https://id.preprod.eta.gov.eg").trim().replace(/\/+$/, ""),
-  ETA_API_BASE_URL: (process.env.ETA_API_BASE_URL ?? "https://api.preprod.eta.gov.eg").trim().replace(/\/+$/, ""),
+  ETA_TOKEN_URL: (
+    process.env.ETA_TOKEN_URL ??
+    `${(process.env.ETA_ID_BASE_URL ?? "https://id.preprod.eta.gov.eg").trim().replace(/\/+$/, "")}/connect/token`
+  ).trim(),
+  ETA_API_BASE_URL: (process.env.ETA_API_BASE_URL ?? "https://api.preprod.invoicing.eta.gov.eg")
+    .trim()
+    .replace(/\/+$/, ""),
+  METRICS_TOKEN: (process.env.METRICS_TOKEN ?? "").trim(),
+  SENTRY_DSN: (process.env.SENTRY_DSN ?? "").trim(),
+  SENTRY_ENVIRONMENT: (process.env.SENTRY_ENVIRONMENT ?? "").trim() || (process.env.NODE_ENV ?? "development"),
+  SENTRY_TRACES_SAMPLE_RATE: parseRateEnv(process.env.SENTRY_TRACES_SAMPLE_RATE, 0),
 };

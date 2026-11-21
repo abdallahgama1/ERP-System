@@ -1,6 +1,7 @@
 import React from "react";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, RotateCcw } from "lucide-react";
+import { captureFrontendException } from "@/lib/observability/sentry";
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -18,6 +19,10 @@ export class ErrorBoundary extends React.Component<
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return { hasError: true, error };
+  }
+
+  override componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
+    void captureFrontendException(error, { componentStack: errorInfo.componentStack });
   }
 
   private handleReset = () => {

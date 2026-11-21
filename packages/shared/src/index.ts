@@ -7,3 +7,4 @@ export * from "./enterprise.ts";
 export * from "./inventory-extensions.ts";
 export * from "./pagination.ts";
 export * from "./pos.ts";
+export * from "./einvoicing.ts";

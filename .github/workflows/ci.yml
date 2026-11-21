@@ -63,6 +63,31 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
+  security-audit:
+    name: Production Dependency Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: Fail on critical production advisories
+        run: npm audit --omit=dev --audit-level=critical
+
+      # High-severity advisories currently include xlsx@0.18.5 (no upstream fix) and
+      # zod@3.23.8 (requires breaking v4 upgrade). Keep visible in CI logs without blocking.
+      - name: Report high-severity production advisories
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+
   e2e:
     name: Playwright Full-Stack E2E
     needs: verify
@@ -104,6 +129,9 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
+      - name: Build backend production bundle
+        run: npm --prefix backend run build
+
       - name: Apply Drizzle migrations to test Postgres
         run: npm run db:migrate
 
@@ -117,3 +145,114 @@ jobs:
           name: playwright-test-results
           path: test-results/
           retention-days: 7
+
+  docker-build:
+    name: Docker Buildx, Smoke Check & Trivy Scan
+    needs: verify
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: erp
+          POSTGRES_PASSWORD: erp_ci_password
+          POSTGRES_DB: erp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          load: true
+          tags: count-it-keep-it-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          load: true
+          tags: count-it-keep-it-frontend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke check backend container (/api/health/live)
+        run: |
+          docker run -d --name erp-backend-smoke --network host \
+            -e NODE_ENV=production \
+            -e HOST=0.0.0.0 \
+            -e PORT=3001 \
+            -e TRUST_PROXY=true \
+            -e RUN_MIGRATIONS=true \
+            -e DATABASE_URL=postgresql://erp:erp_ci_password@127.0.0.1:5432/erp_test \
+            -e AUTH_COOKIE_SECRET=ci-test-cookie-secret-at-least-32-characters-long \
+            count-it-keep-it-backend:ci
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3001/api/health/live; then
+              echo ""
+              echo "Backend smoke check passed."
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Backend smoke check failed. Container logs:"
+          docker logs erp-backend-smoke || true
+          exit 1
+
+      - name: Clean up smoke container
+        if: always()
+        run: docker rm -f erp-backend-smoke || true
+
+      - name: Trivy scan backend image (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: count-it-keep-it-backend:ci
+          format: table
+          ignore-unfixed: true
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Trivy scan backend image (report HIGH)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: count-it-keep-it-backend:ci
+          format: table
+          ignore-unfixed: true
+          severity: HIGH
+          exit-code: "0"
+
+      - name: Trivy scan frontend image (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: count-it-keep-it-frontend:ci
+          format: table
+          ignore-unfixed: true
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Trivy scan frontend image (report HIGH)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: count-it-keep-it-frontend:ci
+          format: table
+          ignore-unfixed: true
+          severity: HIGH
+          exit-code: "0"

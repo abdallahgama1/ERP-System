@@ -8,12 +8,22 @@ import { env } from "./config.ts";
 import { AppError } from "./db/helpers.ts";
 import { buildPinoOptions, requestContext, sanitizeRequestId } from "./logging/logger.ts";
 import { attachAuthHook } from "./middleware/auth.ts";
+import { csrfProtectionHook } from "./middleware/csrf.ts";
+import {
+  metricsRoutes,
+  observeHttpRequest,
+  recordAuthEvent,
+  recordDbError,
+  type AuthMetricEvent,
+} from "./observability/metrics.ts";
+import { captureBackendException } from "./observability/sentry.ts";
 import { accountingRoutes } from "./routes/accounting.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { approvalRoutes } from "./routes/approvals.ts";
 import { auditRoutes } from "./routes/audit.ts";
 import { authRoutes } from "./routes/auth.ts";
 import { branchRoutes } from "./routes/branches.ts";
+import { einvoicingRoutes } from "./routes/einvoicing.ts";
 import { eventRoutes } from "./routes/events.ts";
 import { inventoryRoutes } from "./routes/inventory.ts";
 import { manufacturingRoutes } from "./routes/manufacturing.ts";
@@ -25,6 +35,25 @@ import { sessionRoutes } from "./routes/sessions.ts";
 import { settingsRoutes } from "./routes/settings.ts";
 import { taxonomyRoutes } from "./routes/taxonomy.ts";
 import { trackingRoutes } from "./routes/tracking.ts";
+
+function resolveAuthMetricEvent(routeUrl: string | undefined): AuthMetricEvent | null {
+  switch (routeUrl) {
+    case "/api/auth/signup":
+      return "signup";
+    case "/api/auth/login":
+      return "login";
+    case "/api/auth/logout":
+      return "logout";
+    case "/api/auth/change-password":
+      return "change_password";
+    case "/api/auth/forgot-password":
+      return "forgot_password";
+    case "/api/auth/reset-password":
+      return "reset_password";
+    default:
+      return null;
+  }
+}
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -65,14 +94,37 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.addHook("onResponse", async (req, reply) => {
     const durationMs = Math.round(reply.elapsedTime * 100) / 100;
+    const path = req.url.split("?")[0] ?? req.url;
+    const normalizedRoute = req.routeOptions?.url ?? (req.is404 ? "__unmatched__" : "__unknown__");
+
+    observeHttpRequest({
+      method: req.method,
+      route: normalizedRoute,
+      statusCode: reply.statusCode,
+      durationSeconds: reply.elapsedTime / 1000,
+    });
+
+    if (req.routeOptions?.url?.startsWith("/api/auth/")) {
+      const authEvent = resolveAuthMetricEvent(req.routeOptions.url);
+      if (authEvent) {
+        recordAuthEvent(authEvent, reply.statusCode < 400 ? "success" : "failure");
+      }
+    }
+
     const logFields = {
       method: req.method,
-      route: req.routeOptions?.url ?? req.url,
+      route: normalizedRoute,
       statusCode: reply.statusCode,
       durationMs,
       userId: req.authUser?.id ?? null,
     };
-    if (req.url === "/api/health") {
+    const isObservabilityProbe =
+      path === "/api/health" ||
+      path === "/api/health/live" ||
+      path === "/api/health/ready" ||
+      path === "/api/metrics";
+
+    if (isObservabilityProbe) {
       req.log.debug(logFields, "http.health");
     } else if (reply.statusCode >= 500) {
       req.log.error(logFields, "http.request");
@@ -93,7 +145,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       global: true,
       max: 300,
       timeWindow: "1 minute",
-      allowList: (req) => req.url === "/api/health" || req.url.startsWith("/api/events"),
+      allowList: (req) => {
+        const path = req.url.split("?")[0] ?? "";
+        return (
+          path === "/api/health" ||
+          path === "/api/health/live" ||
+          path === "/api/health/ready" ||
+          path === "/api/metrics" ||
+          path.startsWith("/api/events")
+        );
+      },
     });
   }
 
@@ -116,9 +177,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     secret: env.AUTH_COOKIE_SECRET,
   });
 
+  app.addHook("onRequest", csrfProtectionHook);
   app.addHook("preHandler", attachAuthHook);
 
   app.setErrorHandler((err, req, reply) => {
+    const normalizedRoute = req.routeOptions?.url ?? (req.is404 ? "__unmatched__" : "__unknown__");
+
     if (err instanceof AppError) {
       const logPayload = {
         code: err.code,
@@ -128,6 +192,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       };
       if (err.statusCode >= 500) {
         req.log.error(logPayload, "app.error");
+        recordDbError("unhandled_5xx");
+        captureBackendException(err, {
+          reqId: req.id,
+          method: req.method,
+          route: normalizedRoute,
+          statusCode: err.statusCode,
+          userId: req.authUser?.id ?? null,
+        });
       } else {
         req.log.warn(logPayload, "app.rejected");
       }
@@ -150,6 +222,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         { statusCode, userId: req.authUser?.id ?? null, err },
         "http.unhandled_error"
       );
+      recordDbError("unhandled_5xx");
+      captureBackendException(err, {
+        reqId: req.id,
+        method: req.method,
+        route: normalizedRoute,
+        statusCode,
+        userId: req.authUser?.id ?? null,
+      });
     } else {
       req.log.warn(
         { statusCode, userId: req.authUser?.id ?? null, err },
@@ -165,6 +245,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   await app.register(eventRoutes);
+  await app.register(metricsRoutes);
   await app.register(authRoutes);
   await app.register(adminRoutes);
   await app.register(settingsRoutes);
@@ -181,6 +262,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(trackingRoutes);
   await app.register(manufacturingRoutes);
   await app.register(posRoutes);
+  await app.register(einvoicingRoutes);
 
   return app;
 }

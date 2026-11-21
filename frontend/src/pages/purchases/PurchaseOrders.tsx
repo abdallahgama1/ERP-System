@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { Plus, Search, Eye, Edit, Trash2, FileText, Download, Printer, Ban } from "lucide-react";
+import { TablePagination } from "@/components/TablePagination";
+import { usePurchaseOrdersPageQuery } from "@/hooks/queries/usePurchasingQueries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +26,8 @@ import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { downloadPurchaseOrderPdf, printPurchaseOrder } from "@/lib/pdf/purchaseOrderPdf";
 import type { PurchaseOrder, PurchaseOrderStatus } from "@/types";
+import { useBranch } from "@/contexts/BranchContext";
+import { useInventory } from "@/contexts/InventoryContext";
 import { usePurchases } from "@/contexts/PurchasesContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
@@ -32,14 +36,58 @@ const PurchaseOrders = () => {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { settings } = useSettings();
-  const { purchaseOrders, deletePurchaseOrder, cancelPurchaseOrder } = usePurchases();
+  const { activeBranchId } = useBranch();
+  const { products, branches } = useInventory();
+  const { purchaseOrders, vendors, deletePurchaseOrder, cancelPurchaseOrder } = usePurchases();
   const [searchTerm, setSearchTerm] = useState("");
+  const [page, setPage] = useState(1);
   const [deletePoId, setDeletePoId] = useState<string | null>(null);
 
-  const filteredOrders = purchaseOrders.filter(
-    (po) =>
-      po.poNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      po.vendorName.toLowerCase().includes(searchTerm.toLowerCase())
+  const { data: purchaseOrdersPage } = usePurchaseOrdersPageQuery({
+    page,
+    pageSize: 25,
+    q: searchTerm,
+    branchId: activeBranchId,
+  });
+
+  const vendorMap = useMemo(() => new Map(vendors.map((v) => [v.id, v])), [vendors]);
+  const branchMap = useMemo(() => new Map(branches.map((b) => [b.branchId, b])), [branches]);
+  const productMap = useMemo(() => new Map(products.map((p) => [p.productId, p])), [products]);
+
+  const filteredOrders = useMemo<PurchaseOrder[]>(
+    () =>
+      (purchaseOrdersPage?.purchaseOrders ?? []).map((po) => ({
+        id: po.id,
+        poNumber: po.poNumber,
+        vendorId: po.vendorId,
+        vendorName: vendorMap.get(po.vendorId)?.displayName ?? "",
+        branchId: po.branchId,
+        branchName: branchMap.get(po.branchId)?.branch_name ?? "",
+        orderDate: po.orderDate.slice(0, 10),
+        expectedDate: (po.expectedDate ?? po.orderDate).slice(0, 10),
+        status: po.status,
+        subtotal: po.subtotal,
+        totalTax: po.taxTotal,
+        grandTotal: po.totalAmount,
+        internalNotes: po.notes || undefined,
+        createdAt: po.createdAt,
+        updatedAt: po.updatedAt,
+        items: (po.lines ?? []).map((l) => {
+          const p = productMap.get(l.productId);
+          return {
+            id: l.id,
+            productId: l.productId,
+            product_name: p?.product_name ?? "",
+            product_sku: p?.product_sku ?? "",
+            quantity: l.quantity,
+            receivedQty: l.receivedQty,
+            unitPrice: l.unitCost,
+            taxPercent: l.taxRate,
+            amount: l.lineTotal,
+          };
+        }),
+      })),
+    [purchaseOrdersPage, vendorMap, branchMap, productMap]
   );
 
   const getStatusBadgeVariant = (status: PurchaseOrderStatus) => {
@@ -104,7 +152,7 @@ const PurchaseOrders = () => {
         </Button>
       </div>
 
-      {purchaseOrders.length === 0 ? (
+      {purchaseOrders.length === 0 && (purchaseOrdersPage?.pageInfo?.total ?? 0) === 0 && !searchTerm.trim() ? (
         <Card className="flex flex-col items-center justify-center py-16">
           <div className="flex h-20 w-20 items-center justify-center rounded-full bg-muted">
             <FileText className="h-10 w-10 text-muted-foreground" />
@@ -130,7 +178,10 @@ const PurchaseOrders = () => {
                 <Input
                   placeholder={t("purchaseOrders.searchPlaceholder")}
                   value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setPage(1);
+                  }}
                   className="ps-9"
                 />
               </div>
@@ -249,6 +300,7 @@ const PurchaseOrders = () => {
                 )}
               </TableBody>
             </Table>
+            <TablePagination pageInfo={purchaseOrdersPage?.pageInfo} onPageChange={setPage} />
           </CardContent>
         </Card>
       )}

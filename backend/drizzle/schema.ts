@@ -130,7 +130,7 @@ export const passwordResetTokens = pgTable(
     usedAt: timestamp("used_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("password_reset_user_idx").on(t.userId)]
+  (t) => [index("password_reset_user_idx").on(t.userId), index("password_reset_expires_idx").on(t.expiresAt)]
 );
 
 export const userBranchScopes = pgTable("user_branch_scopes", {
@@ -296,7 +296,10 @@ export const idempotencyKeys = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [uniqueIndex("idempotency_user_req_uq").on(t.userId, t.method, t.path, t.key)]
+  (t) => [
+    uniqueIndex("idempotency_user_req_uq").on(t.userId, t.method, t.path, t.key),
+    index("idempotency_expires_idx").on(t.expiresAt),
+  ]
 );
 
 // ============================================================================
@@ -453,7 +456,12 @@ export const products = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("products_barcode_idx").on(t.barcode), index("products_category_idx").on(t.category)]
+  (t) => [
+    index("products_barcode_idx").on(t.barcode),
+    index("products_category_idx").on(t.category),
+    index("products_name_id_idx").on(t.name, t.id),
+    index("products_created_id_idx").on(t.createdAt, t.id),
+  ]
 );
 
 export const branchProducts = pgTable(
@@ -500,7 +508,11 @@ export const customers = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("customers_name_idx").on(t.name)]
+  (t) => [
+    index("customers_name_idx").on(t.name),
+    index("customers_name_id_idx").on(t.name, t.id),
+    index("customers_created_id_idx").on(t.createdAt, t.id),
+  ]
 );
 
 export const vendors = pgTable(
@@ -521,7 +533,11 @@ export const vendors = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("vendors_name_idx").on(t.name)]
+  (t) => [
+    index("vendors_name_idx").on(t.name),
+    index("vendors_name_id_idx").on(t.name, t.id),
+    index("vendors_created_id_idx").on(t.createdAt, t.id),
+  ]
 );
 
 // ============================================================================
@@ -770,7 +786,12 @@ export const purchaseOrders = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("purchase_orders_vendor_idx").on(t.vendorId), index("purchase_orders_branch_idx").on(t.branchId)]
+  (t) => [
+    index("purchase_orders_vendor_idx").on(t.vendorId),
+    index("purchase_orders_branch_idx").on(t.branchId),
+    index("purchase_orders_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
+    index("purchase_orders_created_id_idx").on(t.createdAt, t.id),
+  ]
 );
 
 export const purchaseOrderLines = pgTable(
@@ -863,7 +884,12 @@ export const vendorBills = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("vendor_bills_vendor_idx").on(t.vendorId), index("vendor_bills_status_idx").on(t.status)]
+  (t) => [
+    index("vendor_bills_vendor_idx").on(t.vendorId),
+    index("vendor_bills_status_idx").on(t.status),
+    index("vendor_bills_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
+    index("vendor_bills_created_id_idx").on(t.createdAt, t.id),
+  ]
 );
 
 export const vendorBillLines = pgTable(
@@ -1003,7 +1029,12 @@ export const salesOrders = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("sales_orders_customer_idx").on(t.customerId), index("sales_orders_branch_idx").on(t.branchId)]
+  (t) => [
+    index("sales_orders_customer_idx").on(t.customerId),
+    index("sales_orders_branch_idx").on(t.branchId),
+    index("sales_orders_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
+    index("sales_orders_created_id_idx").on(t.createdAt, t.id),
+  ]
 );
 
 export const salesOrderLines = pgTable(
@@ -1080,6 +1111,7 @@ export const salesInvoices = pgTable(
     index("sales_invoices_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
     index("sales_invoices_status_date_id_idx").on(t.status, t.invoiceDate, t.id),
     index("sales_invoices_created_id_idx").on(t.createdAt, t.id),
+    index("sales_invoices_pos_shift_date_id_idx").on(t.posShiftId, t.invoiceDate, t.id),
     uniqueIndex("sales_invoices_pos_terminal_offline_tx_uq").on(t.posTerminalId, t.offlineClientTxId),
   ]
 );
@@ -1587,6 +1619,10 @@ export const posShifts = pgTable(
     totalCardSales: numeric("total_card_sales", { precision: 18, scale: 4 }).notNull().default("0"),
     totalWalletSales: numeric("total_wallet_sales", { precision: 18, scale: 4 }).notNull().default("0"),
     totalSalesCount: integer("total_sales_count").notNull().default(0),
+    totalCashRefunds: numeric("total_cash_refunds", { precision: 18, scale: 4 }).notNull().default("0"),
+    totalCardRefunds: numeric("total_card_refunds", { precision: 18, scale: 4 }).notNull().default("0"),
+    totalWalletRefunds: numeric("total_wallet_refunds", { precision: 18, scale: 4 }).notNull().default("0"),
+    totalRefundsCount: integer("total_refunds_count").notNull().default(0),
     notes: text("notes").notNull().default(""),
     openedAt: timestamp("opened_at", { withTimezone: true }).defaultNow().notNull(),
     closedAt: timestamp("closed_at", { withTimezone: true }),
@@ -1648,13 +1684,79 @@ export const posTenders = pgTable(
   (t) => [index("pos_tenders_invoice_idx").on(t.invoiceId), index("pos_tenders_shift_idx").on(t.shiftId)]
 );
 
+export const posReturns = pgTable(
+  "pos_returns",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    returnNumber: text("return_number").notNull().unique(),
+    originalInvoiceId: uuid("original_invoice_id")
+      .notNull()
+      .references(() => salesInvoices.id, { onDelete: "restrict" }),
+    branchId: uuid("branch_id")
+      .notNull()
+      .references(() => branches.id, { onDelete: "restrict" }),
+    terminalId: uuid("terminal_id")
+      .notNull()
+      .references(() => posTerminals.id, { onDelete: "restrict" }),
+    shiftId: uuid("shift_id")
+      .notNull()
+      .references(() => posShifts.id, { onDelete: "restrict" }),
+    cashierUserId: uuid("cashier_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    approvedByUserId: uuid("approved_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    refundMethod: text("refund_method").$type<"cash" | "card" | "mobile_wallet">().notNull(),
+    restockItems: boolean("restock_items").notNull().default(true),
+    reason: text("reason").notNull().default(""),
+    subtotal: numeric("subtotal", { precision: 18, scale: 4 }).notNull().default("0"),
+    taxAmount: numeric("tax_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+    totalAmount: numeric("total_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+    etaDocumentUuid: text("eta_document_uuid"),
+    etaSubmissionUuid: text("eta_submission_uuid"),
+    etaReceiptStatus: text("eta_receipt_status").notNull().default("not_applicable"),
+    eInvoicePayloadJson: jsonb("e_invoice_payload_json").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("pos_returns_original_inv_idx").on(t.originalInvoiceId),
+    index("pos_returns_shift_idx").on(t.shiftId),
+    index("pos_returns_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
+  ]
+);
+
+export const posReturnLines = pgTable(
+  "pos_return_lines",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    posReturnId: uuid("pos_return_id")
+      .notNull()
+      .references(() => posReturns.id, { onDelete: "cascade" }),
+    originalInvoiceLineId: uuid("original_invoice_line_id")
+      .notNull()
+      .references(() => salesInvoiceLines.id, { onDelete: "restrict" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "restrict" }),
+    quantity: numeric("quantity", { precision: 18, scale: 4 }).notNull(),
+    unitPrice: numeric("unit_price", { precision: 18, scale: 4 }).notNull(),
+    taxRate: numeric("tax_rate", { precision: 8, scale: 4 }).notNull().default("0"),
+    taxAmount: numeric("tax_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+    lineTotal: numeric("line_total", { precision: 18, scale: 4 }).notNull(),
+    restockedQty: numeric("restocked_qty", { precision: 18, scale: 4 }).notNull().default("0"),
+    unitCostSnapshot: numeric("unit_cost_snapshot", { precision: 18, scale: 4 }).notNull().default("0"),
+  },
+  (t) => [
+    index("pos_return_lines_ret_idx").on(t.posReturnId),
+    index("pos_return_lines_orig_line_idx").on(t.originalInvoiceLineId),
+  ]
+);
+
 export const einvoiceSubmissions = pgTable(
   "einvoice_submissions",
   {
     id: uuid("id").defaultRandom().primaryKey(),
-    invoiceId: uuid("invoice_id")
-      .notNull()
-      .references(() => salesInvoices.id, { onDelete: "cascade" }),
+    invoiceId: uuid("invoice_id").references(() => salesInvoices.id, { onDelete: "cascade" }),
+    posReturnId: uuid("pos_return_id").references(() => posReturns.id, { onDelete: "cascade" }),
     provider: text("provider").$type<"eta_egypt" | "zatca_phase2">().notNull(),
     documentType: text("document_type").$type<"receipt" | "invoice">().notNull().default("receipt"),
     documentUuid: text("document_uuid").notNull(),
@@ -1673,6 +1775,11 @@ export const einvoiceSubmissions = pgTable(
   },
   (t) => [
     index("einvoice_sub_status_retry_idx").on(t.status, t.nextRetryAt),
-    uniqueIndex("einvoice_sub_invoice_provider_uq").on(t.invoiceId, t.provider),
+    uniqueIndex("einvoice_sub_invoice_provider_uq")
+      .on(t.invoiceId, t.provider)
+      .where(sql`${t.invoiceId} IS NOT NULL`),
+    uniqueIndex("einvoice_sub_pos_return_provider_uq")
+      .on(t.posReturnId, t.provider)
+      .where(sql`${t.posReturnId} IS NOT NULL`),
   ]
 );

@@ -146,11 +146,85 @@ export function useCustomersQuery() {
   });
 }
 
+export interface CustomersPageFilters {
+  page?: number;
+  pageSize?: number;
+  q?: string;
+}
+
+export function useCustomersPageQuery(filters: CustomersPageFilters = {}) {
+  const { user } = useAuth();
+  const page = filters.page ?? 1;
+  const pageSize = filters.pageSize ?? 25;
+  const params = new URLSearchParams();
+  params.set("page", String(page));
+  params.set("pageSize", String(pageSize));
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+
+  return useQuery({
+    queryKey: [
+      ...erpQueryKeys.sales.customers(),
+      "page",
+      {
+        page,
+        pageSize,
+        q: filters.q?.trim() ?? "",
+      },
+    ],
+    queryFn: () =>
+      apiRequest<{ customers: ApiCustomer[]; items: ApiCustomer[]; pageInfo: OffsetPageInfo }>(
+        `/api/customers?${params.toString()}`
+      ),
+    placeholderData: keepPreviousData,
+    enabled: Boolean(user),
+  });
+}
+
 export function useSalesOrdersQuery() {
   const { user } = useAuth();
   return useQuery({
     queryKey: erpQueryKeys.sales.orders(),
     queryFn: () => apiRequest<{ salesOrders: ApiSalesOrder[] }>("/api/sales-orders"),
+    enabled: Boolean(user),
+  });
+}
+
+export interface SalesOrdersPageFilters {
+  page?: number;
+  pageSize?: number;
+  status?: string;
+  branchId?: string;
+  q?: string;
+}
+
+export function useSalesOrdersPageQuery(filters: SalesOrdersPageFilters = {}) {
+  const { user } = useAuth();
+  const page = filters.page ?? 1;
+  const pageSize = filters.pageSize ?? 25;
+  const params = new URLSearchParams();
+  params.set("page", String(page));
+  params.set("pageSize", String(pageSize));
+  if (filters.status && filters.status !== "all") params.set("status", filters.status);
+  if (filters.branchId && filters.branchId !== "all") params.set("branchId", filters.branchId);
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+
+  return useQuery({
+    queryKey: [
+      ...erpQueryKeys.sales.orders(),
+      "page",
+      {
+        page,
+        pageSize,
+        status: filters.status ?? "all",
+        branchId: filters.branchId ?? "all",
+        q: filters.q?.trim() ?? "",
+      },
+    ],
+    queryFn: () =>
+      apiRequest<{ salesOrders: ApiSalesOrder[]; items: ApiSalesOrder[]; pageInfo: OffsetPageInfo }>(
+        `/api/sales-orders?${params.toString()}`
+      ),
+    placeholderData: keepPreviousData,
     enabled: Boolean(user),
   });
 }

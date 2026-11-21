@@ -43,6 +43,13 @@
       "when": 1795247218510,
       "tag": "0005_pos_register_eta",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795290754408,
+      "tag": "0006_pos_returns_and_scale_indexes",
+      "breakpoints": true
     }
   ]
 }

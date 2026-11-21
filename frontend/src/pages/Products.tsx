@@ -1,5 +1,7 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { TablePagination } from "@/components/TablePagination";
+import { useProductsPageQuery } from "@/hooks/queries/useInventoryQueries";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -57,6 +59,7 @@ const Products = () => {
   const { record } = useAuditLog();
   const { brands, categories } = useTaxonomy();
   const [searchTerm, setSearchTerm] = useState("");
+  const [page, setPage] = useState(1);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -117,11 +120,34 @@ const Products = () => {
     pickingStrategy: "FEFO",
   });
 
-  const filteredProducts = products.filter(product =>
-    product.product_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    product.product_sku.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    product.brand.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    product.category.toLowerCase().includes(searchTerm.toLowerCase())
+  const { data: productsPage } = useProductsPageQuery({
+    page,
+    pageSize: 25,
+    q: searchTerm,
+  });
+
+  const filteredProducts = useMemo<Product[]>(
+    () =>
+      (productsPage?.products ?? []).map((p) => ({
+        productId: p.id,
+        product_name: p.name,
+        product_sku: p.sku,
+        quantity: p.totalQuantity,
+        sellingPrice: p.sellingPrice,
+        costPrice: p.costPrice,
+        brand: p.brand,
+        category: p.category,
+        unit: p.unit,
+        minStockLevel: p.minStockLevel,
+        barcode: p.barcode,
+        itemType: p.itemType ?? "stock",
+        trackingMode: p.trackingMode ?? "none",
+        requiresExpiry: p.requiresExpiry ?? false,
+        shelfLifeDays: p.shelfLifeDays ?? null,
+        pickingStrategy: p.pickingStrategy ?? "FEFO",
+        hasBom: p.hasBom ?? false,
+      })),
+    [productsPage]
   );
 
   const resetForm = () => {
@@ -614,7 +640,10 @@ const Products = () => {
             <Input
               placeholder={t('products.searchProducts')}
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
+                setPage(1);
+              }}
               className="max-w-sm"
             />
           </div>
@@ -639,8 +668,8 @@ const Products = () => {
             </TableHeader>
             <TableBody>
               {filteredProducts.map((product) => {
-                const availableQty = getAvailableQuantity(product.productId);
                 const assignedQty = getAssignedQuantity(product.productId);
+                const availableQty = Math.max(0, product.quantity - assignedQty);
                 const stockStatus = getStockStatus(availableQty, product.quantity);
                 const branchAssignments = getBranchAssignments(product.productId);
                 const isExpanded = expandedProducts.has(product.productId);
@@ -771,6 +800,7 @@ const Products = () => {
               })}
             </TableBody>
           </Table>
+          <TablePagination pageInfo={productsPage?.pageInfo} onPageChange={setPage} />
         </CardContent>
       </Card>
 

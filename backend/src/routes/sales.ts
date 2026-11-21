@@ -51,8 +51,8 @@ import { parseOrThrow } from "../services/stock-locks.ts";
 
 export async function salesRoutes(app: FastifyInstance): Promise<void> {
   // ---------------- Customers ----------------
-  app.get("/api/customers", { preHandler: requirePermission("sales", "view") }, async () => {
-    return { customers: await listCustomers(getDb()) };
+  app.get("/api/customers", { preHandler: requirePermission("sales", "view") }, async (req) => {
+    return listCustomers(getDb(), req.query as Record<string, unknown>);
   });
 
   app.post("/api/customers", { preHandler: requirePermission("sales", "create") }, async (req, reply) => {
@@ -79,7 +79,7 @@ export async function salesRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------------- Sales Orders ----------------
   app.get("/api/sales-orders", { preHandler: requirePermission("sales", "view") }, async (req) => {
-    return { salesOrders: await listSalesOrders(getDb(), req.authUser!) };
+    return listSalesOrders(getDb(), req.authUser!, req.query as Record<string, unknown>);
   });
 
   app.post("/api/sales-orders", { preHandler: requirePermission("sales", "create") }, async (req, reply) => {

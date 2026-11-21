@@ -1,6 +1,15 @@
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
-import { calculateLineAmounts, type customerSchema, type fulfillSalesOrderSchema, type salesOrderSchema } from "@erp/shared";
+import {
+  buildOffsetPageInfo,
+  calculateLineAmounts,
+  customersListQuerySchema,
+  resolveSearchTerm,
+  salesOrdersListQuerySchema,
+  type customerSchema,
+  type fulfillSalesOrderSchema,
+  type salesOrderSchema,
+} from "@erp/shared";
 import {
   customers,
   products,
@@ -14,12 +23,55 @@ import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { assertCustomerCreditLimit } from "./credit-limit.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
-import { groupByKey, listBranchScoped } from "./query-helpers.ts";
+import { groupByKey, listBranchScopedPaginated, parseOffsetQueryOrThrow } from "./query-helpers.ts";
 import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
 
-export async function listCustomers(db: AppDatabase) {
-  const list = await db.select().from(customers).orderBy(asc(customers.name));
-  return list.map((c) => ({ ...c, creditLimit: c.creditLimit === null ? null : num(c.creditLimit) }));
+export async function listCustomers(db: AppDatabase, rawQuery?: Record<string, unknown>) {
+  const query = parseOffsetQueryOrThrow(customersListQuerySchema, rawQuery);
+  const conds: SQL[] = [];
+  const term = resolveSearchTerm(query);
+  if (term) {
+    const pattern = `%${term}%`;
+    conds.push(
+      or(
+        ilike(customers.name, pattern),
+        ilike(customers.code, pattern),
+        ilike(customers.email, pattern),
+        ilike(customers.phone, pattern),
+        ilike(customers.company, pattern),
+        ilike(customers.taxNumber, pattern)
+      )!
+    );
+  }
+  const whereClause = conds.length > 0 ? and(...conds) : undefined;
+
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(customers)
+    .where(whereClause);
+
+  const dir = query.sortDir === "asc" ? asc : desc;
+  const sortCol =
+    query.sortBy === "name"
+      ? customers.name
+      : query.sortBy === "code"
+        ? customers.code
+        : customers.createdAt;
+
+  const list = await db
+    .select()
+    .from(customers)
+    .where(whereClause)
+    .orderBy(dir(sortCol), dir(customers.id))
+    .limit(query.pageSize)
+    .offset((query.page - 1) * query.pageSize);
+
+  const items = list.map((c) => ({
+    ...c,
+    creditLimit: c.creditLimit === null ? null : num(c.creditLimit),
+  }));
+  const pageInfo = buildOffsetPageInfo(query.page, query.pageSize, total);
+  return { items, customers: items, pageInfo };
 }
 
 export async function createCustomer(
@@ -150,15 +202,72 @@ function summarizePriceLines(lines: z.infer<typeof salesOrderSchema>["lines"]) {
   return { subtotal, taxTotal, computed };
 }
 
-export async function listSalesOrders(db: AppDatabase, actor: RequestActor) {
-  const headers = (await listBranchScoped(
+export async function listSalesOrders(
+  db: AppDatabase,
+  actor: RequestActor,
+  rawQuery?: Record<string, unknown>
+) {
+  const query = parseOffsetQueryOrThrow(salesOrdersListQuerySchema, rawQuery);
+  if (query.branchId) {
+    assertBranchAccess(actor, query.branchId);
+  }
+
+  const extraConditions: SQL[] = [];
+  if (query.status) {
+    extraConditions.push(eq(salesOrders.status, query.status));
+  }
+  if (query.customerId) {
+    extraConditions.push(eq(salesOrders.customerId, query.customerId));
+  }
+  const term = resolveSearchTerm(query);
+  if (term) {
+    const pattern = `%${term}%`;
+    const matchedCustomers = await db
+      .select({ id: customers.id })
+      .from(customers)
+      .where(ilike(customers.name, pattern));
+    const customerIds = matchedCustomers.map((c) => c.id);
+    if (customerIds.length > 0) {
+      extraConditions.push(
+        or(
+          ilike(salesOrders.soNumber, pattern),
+          ilike(salesOrders.notes, pattern),
+          inArray(salesOrders.customerId, customerIds)
+        )!
+      );
+    } else {
+      extraConditions.push(
+        or(ilike(salesOrders.soNumber, pattern), ilike(salesOrders.notes, pattern))!
+      );
+    }
+  }
+
+  const sortCol =
+    query.sortBy === "orderDate"
+      ? salesOrders.orderDate
+      : query.sortBy === "soNumber"
+        ? salesOrders.soNumber
+        : query.sortBy === "totalAmount"
+          ? salesOrders.totalAmount
+          : salesOrders.createdAt;
+
+  const { rows, pageInfo } = await listBranchScopedPaginated(
     db,
     salesOrders,
     salesOrders.branchId,
-    salesOrders.createdAt,
-    actor
-  )) as Array<typeof salesOrders.$inferSelect>;
-  if (headers.length === 0) return [];
+    sortCol,
+    salesOrders.id,
+    actor,
+    {
+      page: query.page,
+      pageSize: query.pageSize,
+      sortDir: query.sortDir,
+      requestedBranchId: query.branchId,
+      extraConditions,
+    }
+  );
+  const headers = rows as Array<typeof salesOrders.$inferSelect>;
+  if (headers.length === 0) return { items: [], salesOrders: [], pageInfo };
 
   const lines = await db
     .select()
@@ -166,7 +275,7 @@ export async function listSalesOrders(db: AppDatabase, actor: RequestActor) {
     .where(inArray(salesOrderLines.soId, headers.map((h) => h.id)));
   const linesMap = groupByKey(lines, (l) => l.soId);
 
-  return headers.map((so) => ({
+  const items = headers.map((so) => ({
     ...so,
     fxRate: num(so.fxRate),
     subtotal: num(so.subtotal),
@@ -186,6 +295,8 @@ export async function listSalesOrders(db: AppDatabase, actor: RequestActor) {
       lineTotal: num(l.lineTotal),
     })),
   }));
+
+  return { items, salesOrders: items, pageInfo };
 }
 
 export async function createSalesOrder(

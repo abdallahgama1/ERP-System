@@ -1,33 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
 import { expect, test } from "@playwright/test";
-import postgres from "postgres";
-
-function getTestDbUrl(): string {
-  if (process.env.TEST_DATABASE_URL?.trim()) return process.env.TEST_DATABASE_URL.trim();
-  const envPath = path.resolve(process.cwd(), "backend/.env");
-  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    const m = line.match(/^\s*TEST_DATABASE_URL\s*=\s*(.+)\s*$/);
-    if (m) return m[1].trim().replace(/^['"]|['"]$/g, "");
-  }
-  throw new Error("TEST_DATABASE_URL is required in backend/.env to run Playwright E2E tests");
-}
+import { csrfHeaders } from "./helpers/auth";
+import { resetTestDatabase } from "./helpers/db";
 
 test.describe("POS Offline Outbox & Automatic Reconnect Sync E2E", () => {
   test.beforeAll(async () => {
-    const dbUrl = getTestDbUrl();
-    const expectedDb = new URL(dbUrl).pathname.replace(/^\//, "");
-    const sql = postgres(dbUrl, { connect_timeout: 15, prepare: false });
-    const [{ db }] = await sql`SELECT current_database() AS db`;
-    if (db !== expectedDb) {
-      await sql.end();
-      throw new Error(`Refusing to truncate '${db}' instead of '${expectedDb}'`);
-    }
-    await sql.unsafe(
-      "TRUNCATE TABLE einvoice_submissions, pos_tenders, pos_shift_cash_movements, pos_shifts, pos_terminals, user_pos_pins, idempotency_keys, notification_user_states, notifications, work_order_materials, work_orders, bom_components, bills_of_materials, stock_movement_allocations, stock_serials, branch_lot_balances, stock_lots, approval_requests, approval_rules, journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE"
-    );
-    await sql.end();
+    await resetTestDatabase();
   });
 
   test("completes sale while offline into IndexedDB outbox and syncs cleanly on reconnect", async ({
@@ -49,6 +26,7 @@ test.describe("POS Offline Outbox & Automatic Reconnect Sync E2E", () => {
     const hqId = (await branchesRes.json()).branches[0].id as string;
 
     const prodRes = await page.request.post("/api/products", {
+      headers: csrfHeaders(),
       data: {
         sku: "OFF-01",
         barcode: "6221112223334",
@@ -61,12 +39,14 @@ test.describe("POS Offline Outbox & Automatic Reconnect Sync E2E", () => {
     expect(prodRes.status()).toBe(201);
 
     const termRes = await page.request.post("/api/pos/terminals", {
+      headers: csrfHeaders(),
       data: { branchId: hqId, code: "REG-OFF", name: "Offline Counter" },
     });
     expect(termRes.status()).toBe(201);
     const terminalId = (await termRes.json()).terminal.id as string;
 
     const shiftRes = await page.request.post("/api/pos/shifts/open", {
+      headers: csrfHeaders(),
       data: { terminalId, openingFloat: 100 },
     });
     expect(shiftRes.status()).toBe(201);

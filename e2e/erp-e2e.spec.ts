@@ -1,33 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
 import { expect, test } from "@playwright/test";
-import postgres from "postgres";
-
-function getTestDbUrl(): string {
-  if (process.env.TEST_DATABASE_URL?.trim()) return process.env.TEST_DATABASE_URL.trim();
-  const envPath = path.resolve(process.cwd(), "backend/.env");
-  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    const m = line.match(/^\s*TEST_DATABASE_URL\s*=\s*(.+)\s*$/);
-    if (m) return m[1].trim().replace(/^['"]|['"]$/g, "");
-  }
-  throw new Error("TEST_DATABASE_URL is required in backend/.env to run Playwright E2E tests");
-}
+import { csrfHeaders } from "./helpers/auth";
+import { resetTestDatabase } from "./helpers/db";
 
 test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", () => {
   test.beforeAll(async () => {
-    const dbUrl = getTestDbUrl();
-    const expectedDb = new URL(dbUrl).pathname.replace(/^\//, "");
-    const sql = postgres(dbUrl, { connect_timeout: 15, prepare: false });
-    const [{ db }] = await sql`SELECT current_database() AS db`;
-    if (db !== expectedDb) {
-      await sql.end();
-      throw new Error(`Refusing to truncate '${db}' instead of '${expectedDb}'`);
-    }
-    await sql.unsafe(
-      "TRUNCATE TABLE work_order_materials, work_orders, bom_components, bills_of_materials, stock_movement_allocations, stock_serials, branch_lot_balances, stock_lots, approval_requests, approval_rules, journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE"
-    );
-    await sql.end();
+    await resetTestDatabase();
   });
 
   test("bootstraps admin via Signup UI, renders ZATCA QR invoice, balanced Trial Balance, and Approvals UI", async ({
@@ -53,6 +30,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     const hqId = (await branchesRes.json()).branches[0].id as string;
 
     const compRes = await page.request.put("/api/settings/company", {
+      headers: csrfHeaders(),
       data: {
         companyName: "E2E ERP Corp",
         legalName: "E2E ERP Trading LLC",
@@ -63,6 +41,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     expect(compRes.ok()).toBeTruthy();
 
     const prodRes = await page.request.post("/api/products", {
+      headers: csrfHeaders(),
       data: {
         sku: "E2E-SKU-01",
         name: "Industrial Barcode Scanner",
@@ -75,18 +54,21 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     const productId = (await prodRes.json()).product.id as string;
 
     const vendorRes = await page.request.post("/api/vendors", {
+      headers: csrfHeaders(),
       data: { name: "E2E Supplier" },
     });
     expect(vendorRes.status()).toBe(201);
     const vendorId = (await vendorRes.json()).vendor.id as string;
 
     const custRes = await page.request.post("/api/customers", {
+      headers: csrfHeaders(),
       data: { name: "E2E Customer", creditLimit: 5000 },
     });
     expect(custRes.status()).toBe(201);
     const customerId = (await custRes.json()).customer.id as string;
 
     const poRes = await page.request.post("/api/purchase-orders", {
+      headers: csrfHeaders(),
       data: {
         vendorId,
         branchId: hqId,
@@ -98,6 +80,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     const poId = (await poRes.json()).purchaseOrder.id as string;
 
     const rcvRes = await page.request.post("/api/purchase-receives", {
+      headers: csrfHeaders(),
       data: {
         poId,
         vendorId,
@@ -109,6 +92,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     const receiveId = (await rcvRes.json()).receive.id as string;
 
     const billRes = await page.request.post("/api/vendor-bills", {
+      headers: csrfHeaders(),
       data: {
         vendorId,
         branchId: hqId,
@@ -121,6 +105,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     expect(billRes.status()).toBe(201);
 
     const invRes = await page.request.post("/api/sales-invoices", {
+      headers: csrfHeaders(),
       data: {
         customerId,
         branchId: hqId,
@@ -163,6 +148,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
 
     // 8. Phase D2: Create Lot-tracked item, Serial-tracked item, BOM & Work Order, then verify Tracking & Manufacturing pages
     const lotProdRes = await page.request.post("/api/products", {
+      headers: csrfHeaders(),
       data: {
         sku: "E2E-LOT-01",
         name: "Sterile Reagent",
@@ -176,6 +162,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     const lotProdId = (await lotProdRes.json()).product.id as string;
 
     const rcvLot = await page.request.post("/api/purchase-receives", {
+      headers: csrfHeaders(),
       data: {
         vendorId,
         branchId: hqId,
@@ -193,6 +180,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     expect(rcvLot.status()).toBe(201);
 
     const fgRes = await page.request.post("/api/products", {
+      headers: csrfHeaders(),
       data: {
         sku: "E2E-FG-01",
         name: "Assembled Scanner Kit",
@@ -205,6 +193,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     const fgId = (await fgRes.json()).product.id as string;
 
     const bomRes = await page.request.post("/api/manufacturing/boms", {
+      headers: csrfHeaders(),
       data: {
         productId: fgId,
         name: "Scanner Kit BOM",
@@ -216,6 +205,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     const bomId = (await bomRes.json()).bom.id as string;
 
     const woRes = await page.request.post("/api/manufacturing/work-orders", {
+      headers: csrfHeaders(),
       data: { bomId, branchId: hqId, plannedQty: 2 },
     });
     expect(woRes.status()).toBe(201);
@@ -238,6 +228,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
 
     // 9. Track 3: Verify Serial TrackingLinePicker inside New Invoice UI & Arabic RTL switching
     const serialProdRes = await page.request.post("/api/products", {
+      headers: csrfHeaders(),
       data: {
         sku: "E2E-SER-01",
         name: "Serialized Router",
@@ -250,6 +241,7 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     const serialProdId = (await serialProdRes.json()).product.id as string;
 
     const rcvSer = await page.request.post("/api/purchase-receives", {
+      headers: csrfHeaders(),
       data: {
         vendorId,
         branchId: hqId,

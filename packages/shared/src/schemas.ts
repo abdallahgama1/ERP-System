@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ITEM_TYPES, PICKING_STRATEGIES, TRACKING_MODES, lotAllocationInputSchema } from "./inventory-extensions.ts";
+import { offsetPageQuerySchema, optionalUuidQuery } from "./pagination.ts";
 import { BRANCH_TYPES } from "./permissions.ts";
 import { TAXONOMY_KINDS, TRANSFER_SHORTAGE_RESOLUTIONS } from "./statuses.ts";
 
@@ -419,3 +420,39 @@ export const retainerSchema = z.object({
 export const fulfillSalesOrderSchema = z.object({
   lines: z.array(z.object({ itemId: z.string().uuid(), qty: z.number().positive() })).min(1),
 });
+
+// R6 Back-Office List / Pagination Query Schemas
+export const productsListQuerySchema = offsetPageQuerySchema.extend({
+  sortBy: z.enum(["name", "sku", "sellingPrice", "costPrice", "createdAt"]).optional(),
+  itemType: z.enum(ITEM_TYPES).optional(),
+  isActive: z.enum(["true", "false"]).optional(),
+});
+export type ProductsListQuery = z.infer<typeof productsListQuerySchema>;
+
+export const customersListQuerySchema = offsetPageQuerySchema.extend({
+  sortBy: z.enum(["name", "code", "createdAt"]).optional(),
+});
+export type CustomersListQuery = z.infer<typeof customersListQuerySchema>;
+
+export const vendorsListQuerySchema = offsetPageQuerySchema.extend({
+  sortBy: z.enum(["name", "code", "createdAt"]).optional(),
+});
+export type VendorsListQuery = z.infer<typeof vendorsListQuerySchema>;
+
+export const salesOrdersListQuerySchema = offsetPageQuerySchema.extend({
+  sortBy: z.enum(["orderDate", "soNumber", "totalAmount", "createdAt"]).optional(),
+  customerId: optionalUuidQuery,
+});
+export type SalesOrdersListQuery = z.infer<typeof salesOrdersListQuerySchema>;
+
+export const purchaseOrdersListQuerySchema = offsetPageQuerySchema.extend({
+  sortBy: z.enum(["orderDate", "poNumber", "totalAmount", "createdAt"]).optional(),
+  vendorId: optionalUuidQuery,
+});
+export type PurchaseOrdersListQuery = z.infer<typeof purchaseOrdersListQuerySchema>;
+
+export const vendorBillsListQuerySchema = offsetPageQuerySchema.extend({
+  sortBy: z.enum(["billDate", "dueDate", "billNumber", "totalAmount", "createdAt"]).optional(),
+  vendorId: optionalUuidQuery,
+});
+export type VendorBillsListQuery = z.infer<typeof vendorBillsListQuerySchema>;

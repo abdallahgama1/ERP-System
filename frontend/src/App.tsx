@@ -58,6 +58,7 @@ const SalesVsPurchases = lazy(() => import("./pages/reports/SalesVsPurchases"));
 const ARAging = lazy(() => import("./pages/reports/ARAging"));
 const AuditLog = lazy(() => import("./pages/admin/AuditLog"));
 const Approvals = lazy(() => import("./pages/admin/Approvals"));
+const EInvoiceQueue = lazy(() => import("./pages/admin/EInvoiceQueue"));
 const Roles = lazy(() => import("./pages/admin/Roles"));
 const Notifications = lazy(() => import("./pages/admin/Notifications"));
 const Help = lazy(() => import("./pages/admin/Help"));
@@ -143,6 +144,8 @@ const BackOfficeWorkspace = () => (
                       <Route path="/reports/sales-vs-purchases" element={<SalesVsPurchases />} />
                       <Route path="/audit-log" element={<AuditLog />} />
                       <Route path="/approvals" element={<Approvals />} />
+                      <Route path="/admin/einvoicing" element={<EInvoiceQueue />} />
+                      <Route path="/einvoicing" element={<EInvoiceQueue />} />
                       <Route path="/roles" element={<Roles />} />
                       <Route path="/notifications" element={<Notifications />} />
                       <Route path="/help" element={<Help />} />

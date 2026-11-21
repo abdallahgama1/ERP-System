@@ -17,13 +17,58 @@ export const cursorPageQuerySchema = z.object({
 });
 export type CursorPageQuery = z.infer<typeof cursorPageQuerySchema>;
 
+export const optionalSearchQuery = z
+  .string()
+  .trim()
+  .max(120)
+  .transform((v) => (v === "" ? undefined : v))
+  .optional();
+
+export const optionalFilterQuery = z
+  .string()
+  .trim()
+  .max(120)
+  .transform((v) => (v === "" || v.toLowerCase() === "all" ? undefined : v))
+  .optional();
+
+export const optionalUuidQuery = z
+  .union([z.string().uuid(), z.literal(""), z.literal("all")])
+  .transform((v) => (v === "" || v === "all" ? undefined : v))
+  .optional();
+
 export const offsetPageQuerySchema = z.object({
   page: z.coerce.number().int().min(1).optional().default(1),
   pageSize: z.coerce.number().int().min(1).max(200).optional().default(50),
   sortBy: z.string().trim().max(40).optional(),
   sortDir: z.enum(SORT_DIRECTIONS).optional().default("desc"),
+  q: optionalSearchQuery,
+  search: optionalSearchQuery,
+  status: optionalFilterQuery,
+  branchId: optionalUuidQuery,
+  category: optionalFilterQuery,
 });
 export type OffsetPageQuery = z.infer<typeof offsetPageQuerySchema>;
+
+export function resolveSearchTerm(query: { q?: string; search?: string }): string | undefined {
+  const term = (query.q ?? query.search)?.trim();
+  return term ? term : undefined;
+}
+
+export function parseBackwardCompatibleOffsetQuery<
+  TSchema extends z.ZodType<OffsetPageQuery, z.ZodTypeDef, unknown>,
+>(
+  schema: TSchema,
+  rawQuery: Record<string, unknown> | undefined,
+  legacyDefaultPageSize = 200
+): z.infer<TSchema> {
+  const raw = rawQuery ?? {};
+  const hasExplicitPaging = raw.page !== undefined || raw.pageSize !== undefined;
+  return schema.parse({
+    ...raw,
+    page: raw.page ?? 1,
+    pageSize: raw.pageSize ?? (hasExplicitPaging ? 50 : legacyDefaultPageSize),
+  });
+}
 
 export interface CursorPageInfo {
   nextCursor: string | null;

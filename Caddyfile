@@ -1,0 +1,27 @@
+# Production Caddy v2 reverse proxy with automatic HTTPS.
+# Set SITE_ADDRESS in environment (e.g., erp.example.com). Defaults to localhost for local smoke checks.
+{$SITE_ADDRESS:localhost} {
+	# Strip Caddy Server banner; add defensive baseline headers only if upstream omitted them
+	header {
+		-Server
+		?Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		?X-Content-Type-Options "nosniff"
+	}
+
+	# API + SSE (/api/events) + Prometheus (/api/metrics) + Health (/api/health/live, /api/health/ready)
+	handle /api/* {
+		reverse_proxy backend:3001 {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+			}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Frontend SPA + static assets
+	handle {
+		encode zstd gzip
+		reverse_proxy frontend:80
+	}
+}

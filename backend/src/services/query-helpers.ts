@@ -1,8 +1,11 @@
+import type { z } from "zod";
 import {
   buildOffsetPageInfo,
   decodeCursor,
+  parseBackwardCompatibleOffsetQuery,
   type CursorPayload,
   type OffsetPageInfo,
+  type OffsetPageQuery,
   type SortDirection,
 } from "@erp/shared";
 import { and, asc, desc, eq, gt, inArray, lt, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
@@ -10,6 +13,24 @@ import type { PgTable } from "drizzle-orm/pg-core";
 import { AppError } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import type { RequestActor } from "./stock-locks.ts";
+
+export function parseOffsetQueryOrThrow<
+  TSchema extends z.ZodType<OffsetPageQuery, z.ZodTypeDef, unknown>,
+>(
+  schema: TSchema,
+  rawQuery: Record<string, unknown> | undefined,
+  legacyDefaultPageSize = 200
+): z.infer<TSchema> {
+  try {
+    return parseBackwardCompatibleOffsetQuery(schema, rawQuery, legacyDefaultPageSize);
+  } catch (err) {
+    const issues =
+      err && typeof err === "object" && "issues" in err && Array.isArray((err as { issues: unknown[] }).issues)
+        ? (err as { issues: Array<{ message?: string }> }).issues
+        : [];
+    throw new AppError(400, issues[0]?.message ?? "Invalid pagination query parameters", "VALIDATION_ERROR");
+  }
+}
 
 /**
  * Fetches branch-scoped rows using the actor's assigned branch scope unless admin/all-scope.

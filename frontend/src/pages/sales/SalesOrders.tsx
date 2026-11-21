@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { Plus, Search, Eye, Edit, Trash2, ShoppingCart, Truck, CheckCircle, XCircle } from "lucide-react";
+import { TablePagination } from "@/components/TablePagination";
+import { useSalesOrdersPageQuery } from "@/hooks/queries/useSalesQueries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,11 +13,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { useBranch } from "@/contexts/BranchContext";
 import { useSales } from "@/contexts/SalesContext";
 import { useInventory } from "@/contexts/InventoryContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
-import type { SalesOrderStatus } from "@/types";
+import type { SalesOrder, SalesOrderStatus } from "@/types";
 
 const statusClass = (status: SalesOrderStatus) => {
   switch (status) {
@@ -39,21 +42,60 @@ export default function SalesOrders() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { settings } = useSettings();
-  const { salesOrders, deleteSalesOrder, confirmSalesOrder, cancelSalesOrder, fulfillSalesOrder } = useSales();
-  const { branchProducts } = useInventory();
+  const { activeBranchId } = useBranch();
+  const { salesOrders, customers, deleteSalesOrder, confirmSalesOrder, cancelSalesOrder, fulfillSalesOrder } = useSales();
+  const { branchProducts, products, branches } = useInventory();
   const [searchTerm, setSearchTerm] = useState("");
+  const [page, setPage] = useState(1);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [fulfillId, setFulfillId] = useState<string | null>(null);
   const [shipQty, setShipQty] = useState<Record<string, number>>({});
 
-  const filtered = useMemo(
+  const { data: salesOrdersPage } = useSalesOrdersPageQuery({
+    page,
+    pageSize: 25,
+    q: searchTerm,
+    branchId: activeBranchId,
+  });
+
+  const customerMap = useMemo(() => new Map(customers.map((c) => [c.id, c])), [customers]);
+  const branchMap = useMemo(() => new Map(branches.map((b) => [b.branchId, b])), [branches]);
+  const productMap = useMemo(() => new Map(products.map((p) => [p.productId, p])), [products]);
+
+  const filtered = useMemo<SalesOrder[]>(
     () =>
-      salesOrders.filter(
-        (o) =>
-          o.soNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          o.customerName.toLowerCase().includes(searchTerm.toLowerCase()),
-      ),
-    [salesOrders, searchTerm],
+      (salesOrdersPage?.salesOrders ?? []).map((so) => ({
+        id: so.id,
+        soNumber: so.soNumber,
+        customerId: so.customerId,
+        customerName: customerMap.get(so.customerId)?.displayName ?? "",
+        branchId: so.branchId,
+        branchName: branchMap.get(so.branchId)?.branch_name ?? "",
+        orderDate: so.orderDate.slice(0, 10),
+        expectedShipDate: (so.expectedShipmentDate ?? so.orderDate).slice(0, 10),
+        status: so.status,
+        subtotal: so.subtotal,
+        totalTax: so.taxTotal,
+        grandTotal: so.totalAmount,
+        internalNotes: so.notes || undefined,
+        createdAt: so.createdAt,
+        updatedAt: so.updatedAt,
+        items: (so.lines ?? []).map((l) => {
+          const p = productMap.get(l.productId);
+          return {
+            id: l.id,
+            productId: l.productId,
+            product_name: p?.product_name ?? "",
+            product_sku: p?.product_sku ?? "",
+            quantity: l.quantity,
+            fulfilledQty: l.invoicedQty,
+            unitPrice: l.unitPrice,
+            taxPercent: l.taxRate,
+            amount: l.lineTotal,
+          };
+        }),
+      })),
+    [salesOrdersPage, customerMap, branchMap, productMap]
   );
 
   const fulfillOrder = salesOrders.find((o) => o.id === fulfillId);
@@ -98,7 +140,7 @@ export default function SalesOrders() {
         </Button>
       </div>
 
-      {salesOrders.length === 0 ? (
+      {salesOrders.length === 0 && (salesOrdersPage?.pageInfo?.total ?? 0) === 0 && !searchTerm.trim() ? (
         <Card className="flex flex-col items-center justify-center py-16">
           <div className="flex h-20 w-20 items-center justify-center rounded-full bg-muted">
             <ShoppingCart className="h-10 w-10 text-muted-foreground" />
@@ -122,7 +164,10 @@ export default function SalesOrders() {
                 <Input
                   placeholder={t("salesOrders.searchPlaceholder")}
                   value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setPage(1);
+                  }}
                   className="ps-9"
                 />
               </div>
@@ -217,6 +262,7 @@ export default function SalesOrders() {
                 )}
               </TableBody>
             </Table>
+            <TablePagination pageInfo={salesOrdersPage?.pageInfo} onPageChange={setPage} />
           </CardContent>
         </Card>
       )}

@@ -1,11 +1,14 @@
 import { and, eq } from "drizzle-orm";
+import type { PosOverrideAction } from "@erp/shared";
 import {
   posTerminals,
   userPosPins,
+  userRoles,
   users,
   userSessions,
 } from "../../drizzle/schema.ts";
 import { hashPassword, verifyPassword } from "../auth/password.ts";
+import type { DbOrTx } from "../auth/permissions.ts";
 import { loadAuthUserById, type AuthUser } from "../auth/sessions.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
@@ -283,5 +286,201 @@ export async function switchCashierByPin(
     user: cashierUser,
     terminalId: params.terminalId,
     isLocked: false,
+  };
+}
+
+export async function verifyManagerPinOverride(
+  db: DbOrTx,
+  input: {
+    pin: string;
+    managerUserId?: string;
+    terminalId?: string;
+    action?: PosOverrideAction;
+    reason?: string;
+    requestedByUserId: string;
+    requestedByName?: string;
+    requestedByRole?: string;
+    branchIds: string[];
+    hasAllBranchScope: boolean;
+    ipAddress?: string;
+  }
+): Promise<{
+  verified: true;
+  approver: {
+    id: string;
+    name: string;
+    role: AuthUser["role"];
+  };
+}> {
+  if (!/^\d{4,6}$/.test(input.pin)) {
+    throw new AppError(400, "PIN must be 4 to 6 numeric digits", "VALIDATION_ERROR");
+  }
+
+  const now = new Date();
+  let terminalBranchId: string | null = null;
+  if (input.terminalId) {
+    const [terminal] = await db
+      .select({ id: posTerminals.id, branchId: posTerminals.branchId, isActive: posTerminals.isActive })
+      .from(posTerminals)
+      .where(eq(posTerminals.id, input.terminalId))
+      .limit(1);
+    if (!terminal || !terminal.isActive) {
+      throw new AppError(404, "POS terminal not found or inactive", "TERMINAL_NOT_FOUND");
+    }
+    if (!input.hasAllBranchScope && !input.branchIds.includes(terminal.branchId)) {
+      throw new AppError(403, "Forbidden: you do not have access to this branch", "BRANCH_FORBIDDEN");
+    }
+    terminalBranchId = terminal.branchId;
+  }
+
+  const rawCandidates = input.managerUserId
+    ? await db
+        .select({
+          userId: userPosPins.userId,
+          pinHash: userPosPins.pinHash,
+          failedAttempts: userPosPins.failedAttempts,
+          lockedUntil: userPosPins.lockedUntil,
+          role: userRoles.role,
+        })
+        .from(userPosPins)
+        .innerJoin(users, eq(users.id, userPosPins.userId))
+        .leftJoin(userRoles, eq(userRoles.userId, userPosPins.userId))
+        .where(and(eq(userPosPins.userId, input.managerUserId), eq(users.isActive, true)))
+    : await db
+        .select({
+          userId: userPosPins.userId,
+          pinHash: userPosPins.pinHash,
+          failedAttempts: userPosPins.failedAttempts,
+          lockedUntil: userPosPins.lockedUntil,
+          role: userRoles.role,
+        })
+        .from(userPosPins)
+        .innerJoin(users, eq(users.id, userPosPins.userId))
+        .leftJoin(userRoles, eq(userRoles.userId, userPosPins.userId))
+        .where(eq(users.isActive, true));
+
+  if (rawCandidates.length === 0) {
+    throw new AppError(401, "Invalid manager PIN", "INVALID_PIN");
+  }
+
+  if (input.managerUserId) {
+    const target = rawCandidates[0];
+    if (target.lockedUntil && target.lockedUntil.getTime() > now.getTime()) {
+      throw new AppError(
+        429,
+        "Manager PIN is temporarily locked due to too many failed attempts",
+        "PIN_LOCKED"
+      );
+    }
+  }
+
+  // Prioritize admin/manager accounts before regular cashier accounts if multiple users share a PIN
+  const roleWeight = (role: string | null) => (role === "admin" ? 0 : role === "manager" ? 1 : 2);
+  const candidateRows = [...rawCandidates].sort((a, b) => roleWeight(a.role) - roleWeight(b.role));
+
+  let matchedUserId: string | null = null;
+  for (const candidate of candidateRows) {
+    const ok = await verifyPassword(input.pin, candidate.pinHash);
+    if (ok) {
+      if (candidate.lockedUntil && candidate.lockedUntil.getTime() > now.getTime()) {
+        throw new AppError(
+          429,
+          "Manager PIN is temporarily locked due to too many failed attempts",
+          "PIN_LOCKED"
+        );
+      }
+      matchedUserId = candidate.userId;
+      break;
+    }
+  }
+
+  if (!matchedUserId) {
+    const lockoutTargets = input.managerUserId
+      ? [rawCandidates[0]]
+      : rawCandidates.filter((c) => c.role === "admin" || c.role === "manager");
+
+    let triggeredLockout = false;
+    for (const target of lockoutTargets) {
+      if (target.lockedUntil && target.lockedUntil.getTime() > now.getTime()) {
+        triggeredLockout = true;
+        continue;
+      }
+      const nextAttempts = target.failedAttempts + 1;
+      const lockedUntil =
+        nextAttempts >= MAX_PIN_ATTEMPTS ? new Date(now.getTime() + PIN_LOCKOUT_MS) : null;
+      await db
+        .update(userPosPins)
+        .set({ failedAttempts: nextAttempts, lockedUntil, updatedAt: now })
+        .where(eq(userPosPins.userId, target.userId));
+      if (lockedUntil) {
+        triggeredLockout = true;
+      }
+    }
+
+    if (triggeredLockout) {
+      throw new AppError(
+        429,
+        "Manager PIN is temporarily locked due to too many failed attempts",
+        "PIN_LOCKED"
+      );
+    }
+    throw new AppError(401, "Invalid manager PIN", "INVALID_PIN");
+  }
+
+  const approver = await loadAuthUserById(db, matchedUserId);
+  if (!approver || !approver.isActive) {
+    throw new AppError(403, "Approver account is inactive", "ACCOUNT_DISABLED");
+  }
+
+  const hasApprovePrivilege =
+    approver.role === "admin" ||
+    approver.role === "manager" ||
+    Boolean(approver.permissions.pos?.approve);
+
+  if (!hasApprovePrivilege) {
+    throw new AppError(
+      403,
+      "Manager or Admin privilege required for POS override",
+      "POS_OVERRIDE_FORBIDDEN"
+    );
+  }
+
+  if (terminalBranchId) {
+    assertBranchAccess(approver, terminalBranchId);
+  }
+
+  await db
+    .update(userPosPins)
+    .set({ failedAttempts: 0, lockedUntil: null, updatedAt: now })
+    .where(eq(userPosPins.userId, matchedUserId));
+
+  await writeAuditLog(db, {
+    userId: input.requestedByUserId,
+    userName: input.requestedByName ?? approver.name,
+    userRole: input.requestedByRole ?? approver.role,
+    branchId: terminalBranchId,
+    action: "pos_manager_override",
+    entityType: "pos_terminal",
+    entityId: input.terminalId ?? approver.id,
+    entityLabel: approver.email,
+    details: {
+      action: input.action ?? "discount",
+      reason: input.reason ?? "",
+      requestedByUserId: input.requestedByUserId,
+      approvedByUserId: approver.id,
+      approvedByName: approver.name,
+      approvedByRole: approver.role,
+      terminalId: input.terminalId ?? null,
+    },
+    ipAddress: input.ipAddress,
+  });
+
+  return {
+    verified: true,
+    approver: {
+      id: approver.id,
+      name: approver.name,
+      role: approver.role,
+    },
   };
 }

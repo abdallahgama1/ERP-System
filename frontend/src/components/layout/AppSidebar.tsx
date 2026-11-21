@@ -127,6 +127,7 @@ const taxonomyItems = [
 
 const adminItems = [
   { titleKey: "nav.admin.approvals", url: "/approvals", icon: ClipboardCheck },
+  { titleKey: "nav.admin.einvoicing", url: "/admin/einvoicing", icon: Receipt },
   { titleKey: "nav.admin.auditLog", url: "/audit-log", icon: History },
   { titleKey: "nav.admin.roles", url: "/roles", icon: Shield },
   { titleKey: "nav.admin.notifications", url: "/notifications", icon: Bell },

@@ -130,6 +130,7 @@
     "admin": {
       "title": "Administration",
       "approvals": "Approvals",
+      "einvoicing": "E-Invoice Queue",
       "auditLog": "Audit Log",
       "roles": "Roles & Permissions",
       "notifications": "Notifications",
@@ -1424,5 +1425,24 @@
     "printReceipt": "Print Receipt",
     "newSale": "New Sale",
     "syncPending": "Sync"
+  },
+  "einvoicing": {
+    "title": "E-Invoicing & ETA Queue",
+    "description": "Monitor Egyptian Tax Authority (ETA e-Receipt v1.2) sale ('S') and return ('R') submissions, inspect payloads, and trigger manual polling or retries.",
+    "unconfiguredTitle": "ETA Egypt API Credentials Not Configured",
+    "unconfiguredDesc": "ETA OAuth client credentials are not configured on this server. E-Receipts ('S' Sales and 'R' Returns) are safely queued locally in pending status until credentials are provided.",
+    "processNow": "Process Queue / Poll ETA",
+    "retryAll": "Retry Failed & Rejected",
+    "allStatuses": "All Statuses",
+    "searchPlaceholder": "Search document #, UUID, or error...",
+    "viewPayload": "View Payload",
+    "retry": "Retry",
+    "saleReceipt": "S · Sale",
+    "returnReceipt": "R · Return",
+    "empty": "No e-invoice or e-receipt submissions found.",
+    "payloadDialogTitle": "E-Receipt Submission Payload",
+    "requestPayload": "Canonical Request Payload (ETA v1.2)",
+    "responsePayload": "ETA Gateway Response Payload",
+    "noResponseYet": "No remote response recorded yet (queued locally)."
   }
 }

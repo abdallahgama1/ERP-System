@@ -1,8 +1,10 @@
-import { desc, eq, inArray, sql } from "drizzle-orm";
+import { desc, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import {
   calculateLineAmounts,
+  resolveSearchTerm,
   roundCurrency,
+  vendorBillsListQuerySchema,
   type billSchema,
   type paymentMadeSchema,
   type purchaseReturnSchema,
@@ -16,12 +18,19 @@ import {
   purchaseReturns,
   vendorBillLines,
   vendorBills,
+  vendors,
 } from "../../drizzle/schema.ts";
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal, reverseJournalEntriesForSource, type MappedLineSpec } from "./gl.service.ts";
-import { buildBranchScopeCondition, groupByKey, listBranchScoped } from "./query-helpers.ts";
+import {
+  buildBranchScopeCondition,
+  groupByKey,
+  listBranchScoped,
+  listBranchScopedPaginated,
+  parseOffsetQueryOrThrow,
+} from "./query-helpers.ts";
 import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
 function summarizeCostLines<T extends { quantity: number; unitCost: number; taxRate: number }>(lines: T[]) {
@@ -39,15 +48,74 @@ function summarizeCostLines<T extends { quantity: number; unitCost: number; taxR
   return { subtotal, taxTotal, computed };
 }
 
-export async function listVendorBills(db: AppDatabase, actor: RequestActor) {
-  const headers = (await listBranchScoped(
+export async function listVendorBills(
+  db: AppDatabase,
+  actor: RequestActor,
+  rawQuery?: Record<string, unknown>
+) {
+  const query = parseOffsetQueryOrThrow(vendorBillsListQuerySchema, rawQuery);
+  if (query.branchId) {
+    assertBranchAccess(actor, query.branchId);
+  }
+
+  const extraConditions: SQL[] = [];
+  if (query.status) {
+    extraConditions.push(eq(vendorBills.status, query.status));
+  }
+  if (query.vendorId) {
+    extraConditions.push(eq(vendorBills.vendorId, query.vendorId));
+  }
+  const term = resolveSearchTerm(query);
+  if (term) {
+    const pattern = `%${term}%`;
+    const matchedVendors = await db
+      .select({ id: vendors.id })
+      .from(vendors)
+      .where(ilike(vendors.name, pattern));
+    const vendorIds = matchedVendors.map((v) => v.id);
+    if (vendorIds.length > 0) {
+      extraConditions.push(
+        or(
+          ilike(vendorBills.billNumber, pattern),
+          ilike(vendorBills.notes, pattern),
+          inArray(vendorBills.vendorId, vendorIds)
+        )!
+      );
+    } else {
+      extraConditions.push(
+        or(ilike(vendorBills.billNumber, pattern), ilike(vendorBills.notes, pattern))!
+      );
+    }
+  }
+
+  const sortCol =
+    query.sortBy === "billDate"
+      ? vendorBills.billDate
+      : query.sortBy === "dueDate"
+        ? vendorBills.dueDate
+        : query.sortBy === "billNumber"
+          ? vendorBills.billNumber
+          : query.sortBy === "totalAmount"
+            ? vendorBills.totalAmount
+            : vendorBills.createdAt;
+
+  const { rows, pageInfo } = await listBranchScopedPaginated(
     db,
     vendorBills,
     vendorBills.branchId,
-    vendorBills.createdAt,
-    actor
-  )) as Array<typeof vendorBills.$inferSelect>;
-  if (headers.length === 0) return [];
+    sortCol,
+    vendorBills.id,
+    actor,
+    {
+      page: query.page,
+      pageSize: query.pageSize,
+      sortDir: query.sortDir,
+      requestedBranchId: query.branchId,
+      extraConditions,
+    }
+  );
+  const headers = rows as Array<typeof vendorBills.$inferSelect>;
+  if (headers.length === 0) return { items: [], bills: [], pageInfo };
 
   const lines = await db
     .select()
@@ -55,7 +123,7 @@ export async function listVendorBills(db: AppDatabase, actor: RequestActor) {
     .where(inArray(vendorBillLines.billId, headers.map((h) => h.id)));
   const linesMap = groupByKey(lines, (l) => l.billId);
 
-  return headers.map((b) => ({
+  const items = headers.map((b) => ({
     ...b,
     fxRate: num(b.fxRate),
     subtotal: num(b.subtotal),
@@ -74,6 +142,8 @@ export async function listVendorBills(db: AppDatabase, actor: RequestActor) {
       lineTotal: num(l.lineTotal),
     })),
   }));
+
+  return { items, bills: items, pageInfo };
 }
 
 export async function createVendorBill(

@@ -1,6 +1,15 @@
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
-import { calculateLineAmounts, type poSchema, type receiveSchema, type vendorSchema } from "@erp/shared";
+import {
+  buildOffsetPageInfo,
+  calculateLineAmounts,
+  purchaseOrdersListQuerySchema,
+  resolveSearchTerm,
+  vendorsListQuerySchema,
+  type poSchema,
+  type receiveSchema,
+  type vendorSchema,
+} from "@erp/shared";
 import {
   products,
   purchaseOrderLines,
@@ -17,11 +26,56 @@ import { assertBranchAccess } from "../middleware/auth.ts";
 import { checkApprovalRequired, createApprovalRequest } from "./approvals.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { receiveTrackedStock } from "./lots-serials.service.ts";
-import { groupByKey, listBranchScoped } from "./query-helpers.ts";
+import {
+  groupByKey,
+  listBranchScoped,
+  listBranchScopedPaginated,
+  parseOffsetQueryOrThrow,
+} from "./query-helpers.ts";
 import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
 
-export async function listVendors(db: AppDatabase) {
-  return db.select().from(vendors).orderBy(asc(vendors.name));
+export async function listVendors(db: AppDatabase, rawQuery?: Record<string, unknown>) {
+  const query = parseOffsetQueryOrThrow(vendorsListQuerySchema, rawQuery);
+  const conds: SQL[] = [];
+  const term = resolveSearchTerm(query);
+  if (term) {
+    const pattern = `%${term}%`;
+    conds.push(
+      or(
+        ilike(vendors.name, pattern),
+        ilike(vendors.code, pattern),
+        ilike(vendors.email, pattern),
+        ilike(vendors.phone, pattern),
+        ilike(vendors.company, pattern),
+        ilike(vendors.taxNumber, pattern)
+      )!
+    );
+  }
+  const whereClause = conds.length > 0 ? and(...conds) : undefined;
+
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(vendors)
+    .where(whereClause);
+
+  const dir = query.sortDir === "asc" ? asc : desc;
+  const sortCol =
+    query.sortBy === "name"
+      ? vendors.name
+      : query.sortBy === "code"
+        ? vendors.code
+        : vendors.createdAt;
+
+  const items = await db
+    .select()
+    .from(vendors)
+    .where(whereClause)
+    .orderBy(dir(sortCol), dir(vendors.id))
+    .limit(query.pageSize)
+    .offset((query.page - 1) * query.pageSize);
+
+  const pageInfo = buildOffsetPageInfo(query.page, query.pageSize, total);
+  return { items, vendors: items, pageInfo };
 }
 
 export async function createVendor(
@@ -127,15 +181,72 @@ function summarizeCostLines(lines: z.infer<typeof poSchema>["lines"]) {
   return { subtotal, taxTotal, computed };
 }
 
-export async function listPurchaseOrders(db: AppDatabase, actor: RequestActor) {
-  const headers = (await listBranchScoped(
+export async function listPurchaseOrders(
+  db: AppDatabase,
+  actor: RequestActor,
+  rawQuery?: Record<string, unknown>
+) {
+  const query = parseOffsetQueryOrThrow(purchaseOrdersListQuerySchema, rawQuery);
+  if (query.branchId) {
+    assertBranchAccess(actor, query.branchId);
+  }
+
+  const extraConditions: SQL[] = [];
+  if (query.status) {
+    extraConditions.push(eq(purchaseOrders.status, query.status));
+  }
+  if (query.vendorId) {
+    extraConditions.push(eq(purchaseOrders.vendorId, query.vendorId));
+  }
+  const term = resolveSearchTerm(query);
+  if (term) {
+    const pattern = `%${term}%`;
+    const matchedVendors = await db
+      .select({ id: vendors.id })
+      .from(vendors)
+      .where(ilike(vendors.name, pattern));
+    const vendorIds = matchedVendors.map((v) => v.id);
+    if (vendorIds.length > 0) {
+      extraConditions.push(
+        or(
+          ilike(purchaseOrders.poNumber, pattern),
+          ilike(purchaseOrders.notes, pattern),
+          inArray(purchaseOrders.vendorId, vendorIds)
+        )!
+      );
+    } else {
+      extraConditions.push(
+        or(ilike(purchaseOrders.poNumber, pattern), ilike(purchaseOrders.notes, pattern))!
+      );
+    }
+  }
+
+  const sortCol =
+    query.sortBy === "orderDate"
+      ? purchaseOrders.orderDate
+      : query.sortBy === "poNumber"
+        ? purchaseOrders.poNumber
+        : query.sortBy === "totalAmount"
+          ? purchaseOrders.totalAmount
+          : purchaseOrders.createdAt;
+
+  const { rows, pageInfo } = await listBranchScopedPaginated(
     db,
     purchaseOrders,
     purchaseOrders.branchId,
-    purchaseOrders.createdAt,
-    actor
-  )) as Array<typeof purchaseOrders.$inferSelect>;
-  if (headers.length === 0) return [];
+    sortCol,
+    purchaseOrders.id,
+    actor,
+    {
+      page: query.page,
+      pageSize: query.pageSize,
+      sortDir: query.sortDir,
+      requestedBranchId: query.branchId,
+      extraConditions,
+    }
+  );
+  const headers = rows as Array<typeof purchaseOrders.$inferSelect>;
+  if (headers.length === 0) return { items: [], purchaseOrders: [], pageInfo };
 
   const lines = await db
     .select()
@@ -143,7 +254,7 @@ export async function listPurchaseOrders(db: AppDatabase, actor: RequestActor) {
     .where(inArray(purchaseOrderLines.poId, headers.map((h) => h.id)));
   const linesMap = groupByKey(lines, (l) => l.poId);
 
-  return headers.map((po) => ({
+  const items = headers.map((po) => ({
     ...po,
     fxRate: num(po.fxRate),
     subtotal: num(po.subtotal),
@@ -162,6 +273,8 @@ export async function listPurchaseOrders(db: AppDatabase, actor: RequestActor) {
       lineTotal: num(l.lineTotal),
     })),
   }));
+
+  return { items, purchaseOrders: items, pageInfo };
 }
 
 export async function createPurchaseOrder(

@@ -19,6 +19,7 @@ import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
 import { requireAuth, requirePermission, requireRole } from "../middleware/auth.ts";
+import { runHousekeeping } from "../services/housekeeping.service.ts";
 import { runOverdueSweep } from "../services/overdue-sweep.service.ts";
 
 const createUserSchema = z.object({
@@ -539,5 +540,12 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       eventBroadcaster.broadcast("notifications_updated", { source: "overdue_sweep" });
     }
     return result;
+  });
+
+  app.post("/api/admin/jobs/housekeeping", { preHandler: requireRole("admin") }, async (req) => {
+    return runHousekeeping(getDb(), {
+      actor: req.authUser!,
+      ipAddress: req.ip,
+    });
   });
 }

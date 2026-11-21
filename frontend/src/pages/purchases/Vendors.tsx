@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus, Search, Edit, Trash2, History, Truck } from "lucide-react";
 import { z } from "zod";
+import { TablePagination } from "@/components/TablePagination";
+import { useVendorsPageQuery } from "@/hooks/queries/usePurchasingQueries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -64,21 +66,45 @@ const initialFormData: VendorFormData = {
   shippingAddress: "",
 };
 
+const termsFromDays = (days: number): "NET15" | "NET30" | "COD" =>
+  days <= 0 ? "COD" : days <= 15 ? "NET15" : "NET30";
+
 const Vendors = () => {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { vendors, addVendor, updateVendor, deleteVendor, vendorPayables } = usePurchases();
   const [searchTerm, setSearchTerm] = useState("");
+  const [page, setPage] = useState(1);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingVendor, setEditingVendor] = useState<Vendor | null>(null);
   const [deleteVendorId, setDeleteVendorId] = useState<string | null>(null);
   const [formData, setFormData] = useState<VendorFormData>(initialFormData);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
 
-  const filteredVendors = vendors.filter(
-    (vendor) =>
-      vendor.displayName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (vendor.taxNumber?.toLowerCase().includes(searchTerm.toLowerCase()) ?? false)
+  const { data: vendorsPage } = useVendorsPageQuery({
+    page,
+    pageSize: 25,
+    q: searchTerm,
+  });
+
+  const filteredVendors = useMemo<Vendor[]>(
+    () =>
+      (vendorsPage?.vendors ?? []).map((v) => ({
+        id: v.id,
+        displayName: v.name,
+        companyName: v.company || undefined,
+        email: v.email || undefined,
+        phone: v.phone || undefined,
+        taxNumber: v.taxNumber || undefined,
+        currency: v.currency === "SAR" || v.currency === "AED" || v.currency === "EGP" ? v.currency : "USD",
+        paymentTerms: termsFromDays(v.paymentTermsDays),
+        billingAddress: v.address || undefined,
+        shippingAddress: v.address || undefined,
+        payablesBalance: vendorPayables(v.id),
+        createdAt: v.createdAt,
+        updatedAt: v.updatedAt,
+      })),
+    [vendorsPage, vendorPayables]
   );
 
   const resetForm = () => {
@@ -240,7 +266,7 @@ const Vendors = () => {
         </Button>
       </div>
 
-      {vendors.length === 0 ? (
+      {vendors.length === 0 && (vendorsPage?.pageInfo?.total ?? 0) === 0 && !searchTerm.trim() ? (
         // Empty State
         <Card className="flex flex-col items-center justify-center py-16">
           <div className="flex h-20 w-20 items-center justify-center rounded-full bg-muted">
@@ -265,7 +291,10 @@ const Vendors = () => {
                 <Input
                   placeholder={t("vendors.searchPlaceholder")}
                   value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setPage(1);
+                  }}
                   className="ps-9"
                 />
               </div>
@@ -345,6 +374,7 @@ const Vendors = () => {
                 )}
               </TableBody>
             </Table>
+            <TablePagination pageInfo={vendorsPage?.pageInfo} onPageChange={setPage} />
           </CardContent>
         </Card>
       )}

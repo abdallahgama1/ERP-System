@@ -7,18 +7,21 @@ import {
   Calculator,
   CloudOff,
   CreditCard,
+  History,
   KeyRound,
   Lock,
   Minus,
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   ShoppingCart,
   Trash2,
   User as UserIcon,
   Wifi,
 } from "lucide-react";
 import {
+  DEFAULT_POS_MAX_CASHIER_DISCOUNT_PCT,
   calculateLineAmounts,
   roundCurrency,
   type PosCashMovementType,
@@ -63,6 +66,8 @@ import { SplitTenderDialog } from "@/components/pos/SplitTenderDialog";
 import { ShiftReconciliationDialog, type PosShiftDto } from "@/components/pos/ShiftReconciliationDialog";
 import { ThermalReceiptPrintView } from "@/components/pos/ThermalReceiptPrintView";
 import { PinLockOverlay, type PosCashierOption } from "@/components/pos/PinLockOverlay";
+import { RecentReceiptsDrawer } from "@/components/pos/RecentReceiptsDrawer";
+import { PosReturnDialog, type ReturnableReceiptDto } from "@/components/pos/PosReturnDialog";
 import type { User } from "@/types";
 
 interface PosTerminalDto {
@@ -118,6 +123,13 @@ export default function PosRegister() {
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>("");
   const [cart, setCart] = useState<CartLine[]>([]);
+  const [cartDiscountPct, setCartDiscountPct] = useState<string>("");
+  const [overrideApprovedPct, setOverrideApprovedPct] = useState<number | null>(null);
+  const [discountOverrideOpen, setDiscountOverrideOpen] = useState(false);
+  const [discountOverridePin, setDiscountOverridePin] = useState("");
+  const [isVerifyingOverride, setIsVerifyingOverride] = useState(false);
+  const [receiptsDrawerOpen, setReceiptsDrawerOpen] = useState(false);
+  const [returnReceipt, setReturnReceipt] = useState<ReturnableReceiptDto | null>(null);
   const [outboxCount, setOutboxCount] = useState(0);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
@@ -358,7 +370,14 @@ export default function PosRegister() {
 
   // Fast keyboard-wedge barcode scan
   useBarcodeScanner({
-    enabled: !isHardLocked && !pinOverlayOpen && !tenderOpen && !shiftDialogOpen,
+    enabled:
+      !isHardLocked &&
+      !pinOverlayOpen &&
+      !tenderOpen &&
+      !shiftDialogOpen &&
+      !discountOverrideOpen &&
+      !receiptsDrawerOpen &&
+      !returnReceipt,
     ignoreAllInputs: true,
     onScan: (code) => {
       const matched = matchProductByScanCode(products, code);
@@ -375,6 +394,28 @@ export default function PosRegister() {
     },
   });
 
+  const cartDiscountPctNum = useMemo(() => {
+    const parsed = Number(cartDiscountPct);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+    return Math.min(100, Math.max(0, parsed));
+  }, [cartDiscountPct]);
+
+  const handleStartCharge = useCallback(() => {
+    if (cart.length === 0 || !activeShift || isHardLocked) return;
+    const canApproveDiscount =
+      user?.role === "admin" || user?.role === "manager" || can("pos", "approve");
+    if (
+      cartDiscountPctNum > DEFAULT_POS_MAX_CASHIER_DISCOUNT_PCT &&
+      !canApproveDiscount &&
+      overrideApprovedPct !== cartDiscountPctNum
+    ) {
+      setDiscountOverridePin("");
+      setDiscountOverrideOpen(true);
+      return;
+    }
+    setTenderOpen(true);
+  }, [activeShift, can, cart.length, cartDiscountPctNum, isHardLocked, overrideApprovedPct, user?.role]);
+
   // Keyboard shortcuts (F2 search, F9 charge, Ctrl+L lock)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -383,7 +424,7 @@ export default function PosRegister() {
         searchInputRef.current?.focus();
       } else if (e.key === "F9" && cart.length > 0 && activeShift && !isHardLocked) {
         e.preventDefault();
-        setTenderOpen(true);
+        handleStartCharge();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l") {
         e.preventDefault();
         void handleLockTerminal();
@@ -415,12 +456,19 @@ export default function PosRegister() {
   const cartSummary = useMemo(() => {
     let subtotal = 0;
     let taxTotal = 0;
+    let discountTotal = 0;
     const computedLines = cart.map((item) => {
+      const gross = roundCurrency(item.quantity * item.product.sellingPrice, 2);
+      const effectiveDiscount =
+        cartDiscountPctNum > 0
+          ? roundCurrency((gross * cartDiscountPctNum) / 100, 2)
+          : item.discount;
+      discountTotal = roundCurrency(discountTotal + effectiveDiscount, 2);
       const calc = calculateLineAmounts(
         {
           quantity: item.quantity,
           unitPrice: item.product.sellingPrice,
-          discount: item.discount,
+          discount: effectiveDiscount,
           taxRate: item.product.taxRate,
           isTaxInclusive: item.product.isTaxInclusive,
         },
@@ -428,15 +476,16 @@ export default function PosRegister() {
       );
       subtotal = roundCurrency(subtotal + calc.taxable, 2);
       taxTotal = roundCurrency(taxTotal + calc.taxAmount, 2);
-      return { item, ...calc };
+      return { item, effectiveDiscount, ...calc };
     });
     return {
       computedLines,
       subtotal,
       taxTotal,
+      discountTotal,
       grandTotal: roundCurrency(subtotal + taxTotal, 2),
     };
-  }, [cart]);
+  }, [cart, cartDiscountPctNum]);
 
   const handleLockTerminal = async () => {
     try {
@@ -499,14 +548,14 @@ export default function PosRegister() {
       notes: "",
       offlineClientTxId,
       offlineCreatedAt: nowIso,
-      lines: cart.map((c) => ({
-        productId: c.product.id,
-        description: c.product.name,
-        quantity: c.quantity,
-        unitPrice: c.product.sellingPrice,
-        discount: c.discount,
-        taxRate: c.product.taxRate,
-        isTaxInclusive: c.product.isTaxInclusive,
+      lines: cartSummary.computedLines.map((cl) => ({
+        productId: cl.item.product.id,
+        description: cl.item.product.name,
+        quantity: cl.item.quantity,
+        unitPrice: cl.item.product.sellingPrice,
+        discount: cl.effectiveDiscount,
+        taxRate: cl.item.product.taxRate,
+        isTaxInclusive: cl.item.product.isTaxInclusive,
       })),
       tenders,
     };
@@ -547,7 +596,7 @@ export default function PosRegister() {
         description: cl.item.product.name,
         quantity: cl.item.quantity,
         unitPrice: cl.item.product.sellingPrice,
-        discount: cl.item.discount,
+        discount: cl.effectiveDiscount,
         taxRate: cl.item.product.taxRate,
         taxAmount: cl.taxAmount,
         lineTotal: cl.lineTotal,
@@ -571,6 +620,8 @@ export default function PosRegister() {
           })
         );
         setCart([]);
+        setCartDiscountPct("");
+        setOverrideApprovedPct(null);
         setTenderOpen(false);
         setLastReceipt(preview);
         toast({
@@ -585,6 +636,8 @@ export default function PosRegister() {
         body: payload,
       });
       setCart([]);
+      setCartDiscountPct("");
+      setOverrideApprovedPct(null);
       setTenderOpen(false);
       setLastReceipt(res.receipt);
       void loadTerminalContext(selectedTerminal);
@@ -597,6 +650,8 @@ export default function PosRegister() {
         await enqueueOfflineSale(payload, preview);
         await refreshOutboxCount(selectedTerminal.id);
         setCart([]);
+        setCartDiscountPct("");
+        setOverrideApprovedPct(null);
         setTenderOpen(false);
         setLastReceipt(preview);
         toast({
@@ -674,15 +729,26 @@ export default function PosRegister() {
           )}
 
           {selectedTerminal && (
-            <Button
-              size="sm"
-              variant={activeShift ? "outline" : "default"}
-              onClick={() => setShiftDialogOpen(true)}
-              className="gap-1.5"
-            >
-              <Calculator className="h-4 w-4" />
-              {activeShift ? activeShift.shiftNumber : t("pos.openShift", "Open Shift")}
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setReceiptsDrawerOpen(true)}
+                className="gap-1.5"
+              >
+                <History className="h-4 w-4" />
+                {t("pos.receipts", "Receipts")}
+              </Button>
+              <Button
+                size="sm"
+                variant={activeShift ? "outline" : "default"}
+                onClick={() => setShiftDialogOpen(true)}
+                className="gap-1.5"
+              >
+                <Calculator className="h-4 w-4" />
+                {activeShift ? activeShift.shiftNumber : t("pos.openShift", "Open Shift")}
+              </Button>
+            </>
           )}
 
           <Button size="sm" variant="outline" onClick={() => setSetPinOpen(true)} className="gap-1.5">
@@ -829,7 +895,16 @@ export default function PosRegister() {
                   {t("pos.currentSale", "Current Sale")} ({cart.reduce((s, c) => s + c.quantity, 0)})
                 </h2>
                 {cart.length > 0 && (
-                  <Button variant="ghost" size="sm" onClick={() => setCart([])} className="text-destructive h-7">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setCart([]);
+                      setCartDiscountPct("");
+                      setOverrideApprovedPct(null);
+                    }}
+                    className="text-destructive h-7"
+                  >
                     {t("pos.clearCart", "Clear")}
                   </Button>
                 )}
@@ -931,11 +1006,38 @@ export default function PosRegister() {
             </div>
 
             <div className="p-4 border-t bg-muted/30 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="pos-cart-discount-pct" className="text-xs text-muted-foreground">
+                  {t("pos.cartDiscountPct", "Cart Discount %")}
+                </Label>
+                <Input
+                  id="pos-cart-discount-pct"
+                  aria-label="Cart discount percent"
+                  placeholder="Discount %"
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="1"
+                  value={cartDiscountPct}
+                  onChange={(e) => {
+                    setCartDiscountPct(e.target.value);
+                    setOverrideApprovedPct(null);
+                  }}
+                  className="h-8 w-28 text-end text-sm bg-background"
+                />
+              </div>
+
               <div className="space-y-1 text-sm tabular-nums">
                 <div className="flex justify-between text-muted-foreground">
                   <span>{t("invoices.subtotal", "Subtotal")}</span>
                   <span>{fmt(cartSummary.subtotal)}</span>
                 </div>
+                {cartSummary.discountTotal > 0 && (
+                  <div className="flex justify-between text-amber-600">
+                    <span>{t("pos.discount", "Discount")}</span>
+                    <span>-{fmt(cartSummary.discountTotal)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-muted-foreground">
                   <span>{t("invoices.totalTax", "VAT / Tax")}</span>
                   <span>{fmt(cartSummary.taxTotal)}</span>
@@ -955,7 +1057,7 @@ export default function PosRegister() {
                 <Button
                   className="w-full h-12 text-base gap-2"
                   disabled={cart.length === 0 || isCheckingOut}
-                  onClick={() => setTenderOpen(true)}
+                  onClick={handleStartCharge}
                 >
                   <CreditCard className="h-5 w-5" />
                   {t("pos.charge", "Charge")} {fmt(cartSummary.grandTotal)} (F9)
@@ -1160,6 +1262,107 @@ export default function PosRegister() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Manager PIN Override Dialog for Cart Discounts > Threshold */}
+      <Dialog open={discountOverrideOpen} onOpenChange={setDiscountOverrideOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldCheck className="h-5 w-5 text-primary" />
+              {t("pos.managerOverrideTitle", "Manager PIN Override")}
+            </DialogTitle>
+            <DialogDescription>
+              {t(
+                "pos.managerOverrideDiscountDesc",
+                `Cart discount (${cartDiscountPctNum}%) exceeds cashier limit (${DEFAULT_POS_MAX_CASHIER_DISCOUNT_PCT}%). Enter Manager or Admin PIN to authorize.`
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="pos-override-pin">{t("pos.managerPin", "Manager PIN")}</Label>
+            <Input
+              id="pos-override-pin"
+              name="pin"
+              type="password"
+              inputMode="numeric"
+              maxLength={6}
+              placeholder="Manager PIN"
+              value={discountOverridePin}
+              onChange={(e) => setDiscountOverridePin(e.target.value.replace(/\D/g, ""))}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDiscountOverrideOpen(false)}
+              disabled={isVerifyingOverride}
+            >
+              {t("common.cancel", "Cancel")}
+            </Button>
+            <Button
+              disabled={discountOverridePin.length < 4 || isVerifyingOverride}
+              onClick={async () => {
+                setIsVerifyingOverride(true);
+                try {
+                  await apiRequest("/api/pos/override/verify", {
+                    method: "POST",
+                    body: {
+                      pin: discountOverridePin,
+                      terminalId: selectedTerminal?.id,
+                      action: "discount",
+                      reason: `Cart discount ${cartDiscountPctNum}%`,
+                    },
+                  });
+                  setOverrideApprovedPct(cartDiscountPctNum);
+                  setDiscountOverrideOpen(false);
+                  setDiscountOverridePin("");
+                  setTenderOpen(true);
+                } catch (err) {
+                  toast({
+                    title: err instanceof Error ? err.message : "Invalid manager PIN",
+                    variant: "destructive",
+                  });
+                } finally {
+                  setIsVerifyingOverride(false);
+                }
+              }}
+            >
+              {t("pos.authorizeOverride", "Authorize Override")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Recent POS Receipts Search, Reprint & Return Drawer */}
+      <RecentReceiptsDrawer
+        open={receiptsDrawerOpen}
+        onOpenChange={setReceiptsDrawerOpen}
+        terminalId={selectedTerminal?.id}
+        currency={currency}
+        onReprint={(rec) => setLastReceipt(rec)}
+        onStartReturn={(rec) => setReturnReceipt(rec)}
+      />
+
+      {/* POS Return / Refund Modal */}
+      <PosReturnDialog
+        open={Boolean(returnReceipt)}
+        onOpenChange={(open) => {
+          if (!open) setReturnReceipt(null);
+        }}
+        receipt={returnReceipt}
+        terminalId={selectedTerminal?.id ?? ""}
+        shiftId={activeShift?.id ?? ""}
+        currency={currency}
+        requireManagerPin={
+          user?.role !== "admin" && user?.role !== "manager" && !can("pos", "approve")
+        }
+        onSuccess={() => {
+          setReturnReceipt(null);
+          if (selectedTerminal) {
+            void loadTerminalContext(selectedTerminal);
+          }
+        }}
+      />
     </div>
   );
 }

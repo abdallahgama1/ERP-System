@@ -86,6 +86,13 @@ export const erpQueryKeys = {
     activeShift: (terminalId?: string) => ["pos", "activeShift", terminalId ?? "none"] as const,
     cashiers: (branchId?: string) => ["pos", "cashiers", branchId ?? "all"] as const,
   },
+
+  einvoicing: {
+    all: ["einvoicing"] as const,
+    submissions: (params?: Record<string, unknown>) => ["einvoicing", "submissions", params ?? {}] as const,
+    summary: () => ["einvoicing", "summary"] as const,
+    detail: (id: string) => ["einvoicing", "detail", id] as const,
+  },
 };
 
 export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<readonly unknown[]> {
@@ -116,7 +123,9 @@ export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<reado
     case "notifications_updated":
       return [erpQueryKeys.notifications];
     case "pos_updated":
-      return [erpQueryKeys.pos.all, erpQueryKeys.sales.all, erpQueryKeys.inventory.all];
+      return [erpQueryKeys.pos.all, erpQueryKeys.sales.all, erpQueryKeys.inventory.all, erpQueryKeys.einvoicing.all];
+    case "einvoicing_updated":
+      return [erpQueryKeys.einvoicing.all, erpQueryKeys.sales.all, erpQueryKeys.pos.all];
     default:
       return [];
   }
