@@ -1,7 +1,13 @@
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { asc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
-import { calculateLineAmounts, type invoiceSchema } from "@erp/shared";
 import {
+  calculateLineAmounts,
+  offsetPageQuerySchema,
+  type SalesInvoiceStatusShared,
+  type invoiceSchema,
+} from "@erp/shared";
+import {
+  customers,
   products,
   salesInvoiceLines,
   salesInvoices,
@@ -15,18 +21,84 @@ import { assertCustomerCreditLimit } from "./credit-limit.service.ts";
 import { applyInvoiceEInvoiceMetadata } from "./einvoicing.service.ts";
 import { postMappedJournal, reverseJournalEntriesForSource } from "./gl.service.ts";
 import { consumeTrackedStock, linkConsumedAllocations } from "./lots-serials.service.ts";
-import { groupByKey, listBranchScoped } from "./query-helpers.ts";
+import { groupByKey, listBranchScopedPaginated } from "./query-helpers.ts";
 import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
 
-export async function listSalesInvoices(db: AppDatabase, actor: RequestActor) {
-  const headers = (await listBranchScoped(
+export interface SalesInvoiceListQuery {
+  page?: string | number;
+  pageSize?: string | number;
+  status?: string;
+  customerId?: string;
+  branchId?: string;
+  fromDate?: string;
+  toDate?: string;
+  q?: string;
+  search?: string;
+}
+
+export async function listSalesInvoices(
+  db: AppDatabase,
+  actor: RequestActor,
+  query: SalesInvoiceListQuery = {}
+) {
+  const hasExplicitPaging = query.page !== undefined || query.pageSize !== undefined;
+  const parsed = offsetPageQuerySchema.safeParse({
+    page: query.page ?? 1,
+    pageSize: query.pageSize ?? (hasExplicitPaging ? 50 : 200),
+  });
+  const page = parsed.success ? parsed.data.page : 1;
+  const pageSize = parsed.success ? parsed.data.pageSize : 200;
+
+  if (query.branchId) {
+    assertBranchAccess(actor, query.branchId);
+  }
+
+  const extraConditions: SQL[] = [];
+  if (query.status && query.status !== "all") {
+    extraConditions.push(eq(salesInvoices.status, query.status as SalesInvoiceStatusShared));
+  }
+  if (query.customerId) {
+    extraConditions.push(eq(salesInvoices.customerId, query.customerId));
+  }
+  if (query.fromDate) {
+    extraConditions.push(gte(salesInvoices.invoiceDate, new Date(query.fromDate)));
+  }
+  if (query.toDate) {
+    extraConditions.push(lte(salesInvoices.invoiceDate, new Date(query.toDate)));
+  }
+  const term = (query.q ?? query.search)?.trim();
+  if (term) {
+    const pattern = `%${term}%`;
+    const matchedCustomers = await db
+      .select({ id: customers.id })
+      .from(customers)
+      .where(ilike(customers.name, pattern));
+    const customerIds = matchedCustomers.map((c) => c.id);
+    if (customerIds.length > 0) {
+      extraConditions.push(
+        or(ilike(salesInvoices.invoiceNumber, pattern), inArray(salesInvoices.customerId, customerIds))!
+      );
+    } else {
+      extraConditions.push(ilike(salesInvoices.invoiceNumber, pattern));
+    }
+  }
+
+  const { rows, pageInfo } = await listBranchScopedPaginated(
     db,
     salesInvoices,
     salesInvoices.branchId,
     salesInvoices.createdAt,
-    actor
-  )) as Array<typeof salesInvoices.$inferSelect>;
-  if (headers.length === 0) return [];
+    salesInvoices.id,
+    actor,
+    {
+      page,
+      pageSize,
+      requestedBranchId: query.branchId,
+      extraConditions,
+    }
+  );
+  const headers = rows as Array<typeof salesInvoices.$inferSelect>;
+  if (headers.length === 0) return { items: [], pageInfo };
 
   const lines = await db
     .select()
@@ -34,7 +106,7 @@ export async function listSalesInvoices(db: AppDatabase, actor: RequestActor) {
     .where(inArray(salesInvoiceLines.invoiceId, headers.map((h) => h.id)));
   const linesMap = groupByKey(lines, (l) => l.invoiceId);
 
-  return headers.map((inv) => ({
+  const items = headers.map((inv) => ({
     ...inv,
     fxRate: num(inv.fxRate),
     subtotal: num(inv.subtotal),
@@ -57,6 +129,8 @@ export async function listSalesInvoices(db: AppDatabase, actor: RequestActor) {
       lineTotal: num(l.lineTotal),
     })),
   }));
+
+  return { items, pageInfo };
 }
 
 export async function createSalesInvoice(
@@ -115,35 +189,38 @@ export async function createSalesInvoice(
         const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
         if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
 
-        const tracked = await consumeTrackedStock(tx, {
-          product: prod,
-          branchId: data.branchId,
-          quantity: line.quantity,
-          lotAllocations: line.lotAllocations,
-          serialNumbers: line.serialNumbers,
-          serialNextStatus: "sold",
-          soldInvoiceId: inv.id,
-        });
+        const isStockItem = prod.itemType !== "non_stock" && prod.itemType !== "service";
+        if (isStockItem) {
+          const tracked = await consumeTrackedStock(tx, {
+            product: prod,
+            branchId: data.branchId,
+            quantity: line.quantity,
+            lotAllocations: line.lotAllocations,
+            serialNumbers: line.serialNumbers,
+            serialNextStatus: "sold",
+            soldInvoiceId: inv.id,
+          });
 
-        const moved = await applyBranchStockMovement(tx, {
-          branchId: data.branchId,
-          productId: line.productId,
-          qtyDelta: -line.quantity,
-          fallbackCost: num(prod.costPrice),
-          movementType: "sales_invoice",
-          movementUnitCost: tracked.tracked ? tracked.unitCost : undefined,
-          referenceType: "sales_invoice",
-          referenceId: inv.id,
-          referenceNumber: inv.invoiceNumber,
-          insufficientStockMessage: `Insufficient stock for ${prod.name}: requested ${line.quantity}`,
-          notes: `Sales invoice ${inv.invoiceNumber}`,
-          actorId: actor.id,
-        });
-        if (tracked.tracked) {
-          await linkConsumedAllocations(tx, moved.movementId, tracked.allocations);
+          const moved = await applyBranchStockMovement(tx, {
+            branchId: data.branchId,
+            productId: line.productId,
+            qtyDelta: -line.quantity,
+            fallbackCost: num(prod.costPrice),
+            movementType: "sales_invoice",
+            movementUnitCost: tracked.tracked ? tracked.unitCost : undefined,
+            referenceType: "sales_invoice",
+            referenceId: inv.id,
+            referenceNumber: inv.invoiceNumber,
+            insufficientStockMessage: `Insufficient stock for ${prod.name}: requested ${line.quantity}`,
+            notes: `Sales invoice ${inv.invoiceNumber}`,
+            actorId: actor.id,
+          });
+          if (tracked.tracked) {
+            await linkConsumedAllocations(tx, moved.movementId, tracked.allocations);
+          }
+          unitCostSnapshot = tracked.tracked ? tracked.unitCost : moved.movementCost;
+          totalCogsVal += tracked.tracked ? tracked.totalCost : Math.abs(moved.totalValueDelta);
         }
-        unitCostSnapshot = tracked.tracked ? tracked.unitCost : moved.movementCost;
-        totalCogsVal += tracked.tracked ? tracked.totalCost : Math.abs(moved.totalValueDelta);
       }
 
       await tx.insert(salesInvoiceLines).values({
@@ -275,6 +352,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
       const qty = num(line.quantity);
       const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
+      if (prod.itemType === "non_stock" || prod.itemType === "service") continue;
 
       const tracked = await consumeTrackedStock(tx, {
         product: prod,
@@ -390,6 +468,12 @@ export async function voidSalesInvoice(
 
       for (const line of lines) {
         if (!line.productId) continue;
+        const [prod] = await tx
+          .select({ itemType: products.itemType })
+          .from(products)
+          .where(eq(products.id, line.productId))
+          .limit(1);
+        if (prod && (prod.itemType === "non_stock" || prod.itemType === "service")) continue;
         const qty = num(line.quantity);
         const unitCost = num(line.unitCostSnapshot);
         await applyBranchStockMovement(tx, {

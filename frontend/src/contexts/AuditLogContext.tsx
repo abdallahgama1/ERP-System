@@ -1,6 +1,8 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useMemo, useState, ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
 import { useAuth } from "@/contexts/AuthContext";
+import { erpQueryKeys } from "@/hooks/queries/queryKeys";
 import type { AuditEntry, AuditModule } from "@/types";
 
 interface AuditLogContextType {
@@ -18,36 +20,12 @@ const AuditLogContext = createContext<AuditLogContextType | undefined>(undefined
 
 export function AuditLogProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const [entries, setEntries] = useState<AuditEntry[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
 
-  const loadEntries = useCallback(async () => {
-    if (!user) {
-      setEntries([]);
-      return;
-    }
-    setIsLoading(true);
-    try {
-      const res = await apiRequest<{ entries: AuditEntry[] }>("/api/audit-logs?limit=250");
-      setEntries(res.entries ?? []);
-    } catch {
-      // ignore if role doesn't have reports.view yet
-    } finally {
-      setIsLoading(false);
-    }
-  }, [user]);
-
-  useEffect(() => {
-    void loadEntries();
-  }, [loadEntries]);
-
-  useEffect(() => {
-    const onServerEvent = () => {
-      void loadEntries();
-    };
-    window.addEventListener("erp:server-event", onServerEvent);
-    return () => window.removeEventListener("erp:server-event", onServerEvent);
-  }, [loadEntries]);
+  const refresh = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: erpQueryKeys.auditLogs });
+  }, [queryClient]);
 
   const record = useCallback<AuditLogContextType["record"]>(
     (module, action, opts) => {
@@ -62,7 +40,7 @@ export function AuditLogProvider({ children }: { children: ReactNode }) {
         user: opts?.user ?? user?.name ?? "System",
         meta: opts?.meta,
       };
-      setEntries((prev) => [optimistic, ...prev].slice(0, 500));
+      setEntries((prev) => [optimistic, ...prev].slice(0, 50));
 
       if (!user) return;
       void apiRequest("/api/audit-logs", {
@@ -75,16 +53,20 @@ export function AuditLogProvider({ children }: { children: ReactNode }) {
           branchId: opts?.branchId ?? null,
           meta: opts?.meta ?? {},
         },
-      }).catch(() => {
-        // non-blocking client audit write
-      });
+      })
+        .then(() => {
+          void queryClient.invalidateQueries({ queryKey: erpQueryKeys.auditLogs });
+        })
+        .catch(() => {
+          // non-blocking client audit write
+        });
     },
-    [user]
+    [queryClient, user]
   );
 
   const value = useMemo(
-    () => ({ entries, isLoading, record, refresh: loadEntries }),
-    [entries, isLoading, record, loadEntries]
+    () => ({ entries, isLoading: false, record, refresh }),
+    [entries, record, refresh]
   );
 
   return <AuditLogContext.Provider value={value}>{children}</AuditLogContext.Provider>;

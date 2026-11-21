@@ -29,6 +29,20 @@
       "when": 1795201231395,
       "tag": "0003_milestone_d2_tracking_bom",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795246358589,
+      "tag": "0004_pagination_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795247218510,
+      "tag": "0005_pos_register_eta",
+      "breakpoints": true
     }
   ]
 }

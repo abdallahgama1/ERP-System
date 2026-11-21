@@ -1,7 +1,10 @@
 import { buildApp } from "./app.ts";
 import { DEV_COOKIE_SECRET_PLACEHOLDER, env } from "./config.ts";
 import { checkDatabaseConnection, closeDatabase, getDb, isDatabaseConfigured } from "./db/index.ts";
+import { createModuleLogger } from "./logging/logger.ts";
 import { runOverdueSweep } from "./services/overdue-sweep.service.ts";
+
+const log = createModuleLogger("server");
 
 async function start(): Promise<void> {
   if (
@@ -20,20 +23,21 @@ async function start(): Promise<void> {
   let overdueTimer: ReturnType<typeof setInterval> | null = null;
 
   if (!isDatabaseConfigured()) {
-    console.warn(
-      "\n[ERP API WARNING] DATABASE_URL is not set in .env.\n" +
-        "Set DATABASE_URL=postgresql://... in .env and run `npm run db:push` (or `npm run db:migrate`).\n"
-    );
+    log.warn("DATABASE_URL is not configured; set DATABASE_URL in backend/.env and run `npm run db:migrate`.");
   } else {
     const status = await checkDatabaseConnection();
     if (!status.connected) {
-      console.warn(`[ERP API WARNING] Could not reach PostgreSQL at startup: ${status.error}`);
+      log.warn({ error: status.error }, "Could not reach PostgreSQL at startup");
     } else {
-      console.log("[ERP API] Connected to PostgreSQL cleanly.");
+      log.info("Connected to PostgreSQL cleanly");
       const safeSweep = () => {
-        void runOverdueSweep(getDb()).catch((err) => {
-          console.warn("[ERP API] Scheduled overdue sweep failed:", err instanceof Error ? err.message : err);
-        });
+        void runOverdueSweep(getDb())
+          .then((res) => {
+            log.info({ ...res }, "Scheduled overdue & lot expiry sweep completed");
+          })
+          .catch((err) => {
+            log.warn({ err }, "Scheduled overdue sweep failed");
+          });
       };
       // Run daily/6-hour overdue sweep in server runtime (never during Vitest buildApp())
       overdueTimer = setInterval(safeSweep, 6 * 60 * 60 * 1000);
@@ -41,6 +45,7 @@ async function start(): Promise<void> {
   }
 
   const shutdown = async () => {
+    log.info("Shutting down ERP API gracefully");
     if (overdueTimer) clearInterval(overdueTimer);
     await app.close();
     await closeDatabase();
@@ -51,10 +56,10 @@ async function start(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   await app.listen({ port: env.PORT, host: env.HOST });
-  console.log(`[ERP API] Listening on http://${env.HOST}:${env.PORT}`);
+  log.info({ host: env.HOST, port: env.PORT }, "ERP API listening");
 }
 
 start().catch((err) => {
-  console.error("[ERP API FATAL]", err);
+  log.fatal({ err }, "ERP API fatal startup error");
   process.exit(1);
 });

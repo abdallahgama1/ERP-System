@@ -76,6 +76,7 @@ const ChartOfAccounts = lazy(() => import("./pages/accounting/ChartOfAccounts"))
 const JournalEntries = lazy(() => import("./pages/accounting/JournalEntries"));
 const FiscalPeriods = lazy(() => import("./pages/accounting/FiscalPeriods"));
 const FinancialStatements = lazy(() => import("./pages/accounting/FinancialStatements"));
+const PosRegister = lazy(() => import("./pages/pos/PosRegister"));
 
 const PageLoader = () => (
   <div className="flex items-center justify-center min-h-[40vh]">
@@ -92,112 +93,133 @@ const queryClient = new QueryClient({
   },
 });
 
+const BackOfficeWorkspace = () => (
+  <AuditLogProvider>
+    <InventoryProvider>
+      <TaxonomyProvider>
+        <PurchasesProvider>
+          <NotificationsProvider>
+            <SessionsProvider>
+              <SalesProvider>
+                <AppLayout>
+                  <Suspense fallback={<PageLoader />}>
+                    <Routes>
+                      <Route path="/" element={<Dashboard />} />
+                      <Route path="/products" element={<Products />} />
+                      <Route path="/branches" element={<Branches />} />
+                      <Route path="/branches/:branchId" element={<BranchDetail />} />
+                      <Route path="/sessions" element={<Sessions />} />
+                      <Route path="/sessions/:sessionId" element={<SessionDetail />} />
+                      <Route path="/users" element={<Users />} />
+                      <Route path="/profile" element={<Profile />} />
+                      <Route path="/purchases/vendors" element={<Vendors />} />
+                      <Route path="/purchases/vendors/:vendorId" element={<VendorDetail />} />
+                      <Route path="/purchases/orders" element={<PurchaseOrders />} />
+                      <Route path="/purchases/orders/new" element={<PurchaseOrderForm />} />
+                      <Route path="/purchases/orders/:orderId" element={<PurchaseOrderForm />} />
+                      <Route path="/purchases/orders/:orderId/edit" element={<PurchaseOrderForm />} />
+                      <Route path="/purchases/receives" element={<PurchaseReceives />} />
+                      <Route path="/purchases/receives/new" element={<PurchaseReceiveForm />} />
+                      <Route path="/purchases/receives/:receiveId" element={<PurchaseReceiveForm />} />
+                      <Route path="/purchases/bills" element={<VendorBills />} />
+                      <Route path="/purchases/returns" element={<PurchaseReturns />} />
+                      <Route path="/purchases/payments" element={<PaymentsMade />} />
+                      <Route path="/sales/customers" element={<Customers />} />
+                      <Route path="/sales/customers/:customerId" element={<CustomerDetail />} />
+                      <Route path="/sales/orders" element={<SalesOrders />} />
+                      <Route path="/sales/orders/new" element={<SalesOrderForm />} />
+                      <Route path="/sales/orders/:orderId" element={<SalesOrderForm />} />
+                      <Route path="/sales/orders/:orderId/edit" element={<SalesOrderForm />} />
+                      <Route path="/sales/invoices" element={<Invoices />} />
+                      <Route path="/sales/retainer-invoices" element={<RetainerInvoices />} />
+                      <Route path="/sales/payments" element={<ReceivedPayments />} />
+                      <Route path="/sales/returns" element={<SalesReturns />} />
+                      <Route path="/analytics" element={<Analytics />} />
+                      <Route path="/reports/inventory-valuation" element={<InventoryValuation />} />
+                      <Route path="/reports/stock-aging" element={<StockAging />} />
+                      <Route path="/reports/movement-history" element={<MovementHistory />} />
+                      <Route path="/reports/po-aging" element={<POAging />} />
+                      <Route path="/reports/ar-aging" element={<ARAging />} />
+                      <Route path="/reports/sales-vs-purchases" element={<SalesVsPurchases />} />
+                      <Route path="/audit-log" element={<AuditLog />} />
+                      <Route path="/approvals" element={<Approvals />} />
+                      <Route path="/roles" element={<Roles />} />
+                      <Route path="/notifications" element={<Notifications />} />
+                      <Route path="/help" element={<Help />} />
+                      <Route path="/inventory/transfers" element={<Transfers />} />
+                      <Route path="/inventory/transfers/:transferId" element={<TransferDetail />} />
+                      <Route path="/inventory/adjustments" element={<Adjustments />} />
+                      <Route path="/inventory/write-offs" element={<WriteOffs />} />
+                      <Route path="/inventory/lots" element={<LotsAndExpiry />} />
+                      <Route path="/inventory/serials" element={<SerialNumbers />} />
+                      <Route path="/manufacturing/boms" element={<BillsOfMaterials />} />
+                      <Route path="/manufacturing/work-orders" element={<WorkOrders />} />
+                      <Route path="/categories" element={<Categories />} />
+                      <Route path="/brands" element={<Brands />} />
+                      <Route path="/units-of-measure" element={<UnitsOfMeasure />} />
+                      <Route path="/accounting/accounts" element={<ChartOfAccounts />} />
+                      <Route path="/accounting/journal-entries" element={<JournalEntries />} />
+                      <Route path="/accounting/periods" element={<FiscalPeriods />} />
+                      <Route path="/accounting/statements" element={<FinancialStatements />} />
+                      <Route path="/settings" element={<Settings />} />
+                      <Route path="*" element={<NotFound />} />
+                    </Routes>
+                  </Suspense>
+                </AppLayout>
+              </SalesProvider>
+            </SessionsProvider>
+          </NotificationsProvider>
+        </PurchasesProvider>
+      </TaxonomyProvider>
+    </InventoryProvider>
+  </AuditLogProvider>
+);
+
 const App = () => (
   <ErrorBoundary>
     <QueryClientProvider client={queryClient}>
-    <BrowserRouter>
-      <AuthProvider>
-        <BranchProvider>
-        <AuditLogProvider>
-        <SettingsProvider>
-          <InventoryProvider>
-            <TaxonomyProvider>
-            <PurchasesProvider>
+      <BrowserRouter>
+        <AuthProvider>
+          <BranchProvider>
+            <SettingsProvider>
               <PermissionsProvider>
-              <NotificationsProvider>
-              <SessionsProvider>
-              <SalesProvider>
-              <TooltipProvider>
-              <Toaster />
-              <Sonner />
-              <Routes>
-                <Route path="/login" element={<Login />} />
-                <Route path="/signup" element={<Signup />} />
-                <Route path="/reset-password" element={<ResetPassword />} />
-                <Route path="/*" element={
-                  <ProtectedRoute>
-                    <AppLayout>
-                      <Suspense fallback={<PageLoader />}>
-                        <Routes>
-                          <Route path="/" element={<Dashboard />} />
-                          <Route path="/products" element={<Products />} />
-                          <Route path="/branches" element={<Branches />} />
-                          <Route path="/branches/:branchId" element={<BranchDetail />} />
-                          <Route path="/sessions" element={<Sessions />} />
-                          <Route path="/sessions/:sessionId" element={<SessionDetail />} />
-                          <Route path="/users" element={<Users />} />
-                          <Route path="/profile" element={<Profile />} />
-                          <Route path="/purchases/vendors" element={<Vendors />} />
-                          <Route path="/purchases/vendors/:vendorId" element={<VendorDetail />} />
-                          <Route path="/purchases/orders" element={<PurchaseOrders />} />
-                          <Route path="/purchases/orders/new" element={<PurchaseOrderForm />} />
-                          <Route path="/purchases/orders/:orderId" element={<PurchaseOrderForm />} />
-                          <Route path="/purchases/orders/:orderId/edit" element={<PurchaseOrderForm />} />
-                          <Route path="/purchases/receives" element={<PurchaseReceives />} />
-                          <Route path="/purchases/receives/new" element={<PurchaseReceiveForm />} />
-                          <Route path="/purchases/receives/:receiveId" element={<PurchaseReceiveForm />} />
-                          <Route path="/purchases/bills" element={<VendorBills />} />
-                          <Route path="/purchases/returns" element={<PurchaseReturns />} />
-                          <Route path="/purchases/payments" element={<PaymentsMade />} />
-                          <Route path="/sales/customers" element={<Customers />} />
-                          <Route path="/sales/customers/:customerId" element={<CustomerDetail />} />
-                          <Route path="/sales/orders" element={<SalesOrders />} />
-                          <Route path="/sales/orders/new" element={<SalesOrderForm />} />
-                          <Route path="/sales/orders/:orderId" element={<SalesOrderForm />} />
-                          <Route path="/sales/orders/:orderId/edit" element={<SalesOrderForm />} />
-                          <Route path="/sales/invoices" element={<Invoices />} />
-                          <Route path="/sales/retainer-invoices" element={<RetainerInvoices />} />
-                          <Route path="/sales/payments" element={<ReceivedPayments />} />
-                          <Route path="/sales/returns" element={<SalesReturns />} />
-                          <Route path="/analytics" element={<Analytics />} />
-                          <Route path="/reports/inventory-valuation" element={<InventoryValuation />} />
-                          <Route path="/reports/stock-aging" element={<StockAging />} />
-                          <Route path="/reports/movement-history" element={<MovementHistory />} />
-                          <Route path="/reports/po-aging" element={<POAging />} />
-                          <Route path="/reports/ar-aging" element={<ARAging />} />
-                          <Route path="/reports/sales-vs-purchases" element={<SalesVsPurchases />} />
-                          <Route path="/audit-log" element={<AuditLog />} />
-                          <Route path="/approvals" element={<Approvals />} />
-                          <Route path="/roles" element={<Roles />} />
-                          <Route path="/notifications" element={<Notifications />} />
-                          <Route path="/help" element={<Help />} />
-                          <Route path="/inventory/transfers" element={<Transfers />} />
-                          <Route path="/inventory/transfers/:transferId" element={<TransferDetail />} />
-                          <Route path="/inventory/adjustments" element={<Adjustments />} />
-                          <Route path="/inventory/write-offs" element={<WriteOffs />} />
-                          <Route path="/inventory/lots" element={<LotsAndExpiry />} />
-                          <Route path="/inventory/serials" element={<SerialNumbers />} />
-                          <Route path="/manufacturing/boms" element={<BillsOfMaterials />} />
-                          <Route path="/manufacturing/work-orders" element={<WorkOrders />} />
-                          <Route path="/categories" element={<Categories />} />
-                          <Route path="/brands" element={<Brands />} />
-                          <Route path="/units-of-measure" element={<UnitsOfMeasure />} />
-                          <Route path="/accounting/accounts" element={<ChartOfAccounts />} />
-                          <Route path="/accounting/journal-entries" element={<JournalEntries />} />
-                          <Route path="/accounting/periods" element={<FiscalPeriods />} />
-                          <Route path="/accounting/statements" element={<FinancialStatements />} />
-                          <Route path="/settings" element={<Settings />} />
-                          <Route path="*" element={<NotFound />} />
-                        </Routes>
-                      </Suspense>
-                    </AppLayout>
-                  </ProtectedRoute>
-                } />
-              </Routes>
-              </TooltipProvider>
-              </SalesProvider>
-              </SessionsProvider>
-              </NotificationsProvider>
+                <TooltipProvider>
+                  <Toaster />
+                  <Sonner />
+                  <Routes>
+                    <Route path="/login" element={<Login />} />
+                    <Route path="/signup" element={<Signup />} />
+                    <Route path="/reset-password" element={<ResetPassword />} />
+                    {/* Dedicated lightweight POS / Cashier Register PWA workspace */}
+                    <Route
+                      path="/pos/*"
+                      element={
+                        <ProtectedRoute>
+                          <Suspense fallback={<PageLoader />}>
+                            <Routes>
+                              <Route path="/" element={<PosRegister />} />
+                              <Route path="*" element={<PosRegister />} />
+                            </Routes>
+                          </Suspense>
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="/*"
+                      element={
+                        <ProtectedRoute>
+                          <BackOfficeWorkspace />
+                        </ProtectedRoute>
+                      }
+                    />
+                  </Routes>
+                </TooltipProvider>
               </PermissionsProvider>
-            </PurchasesProvider>
-            </TaxonomyProvider>
-          </InventoryProvider>
-        </SettingsProvider>
-        </AuditLogProvider>
-        </BranchProvider>
-      </AuthProvider>
-    </BrowserRouter>
-  </QueryClientProvider>
+            </SettingsProvider>
+          </BranchProvider>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   </ErrorBoundary>
 );
 

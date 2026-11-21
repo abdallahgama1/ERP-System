@@ -29,6 +29,10 @@ export interface AuthUser {
 
 export interface AuthSessionResult {
   sessionId: string;
+  terminalSessionOwnerId: string;
+  posTerminalId: string | null;
+  activeCashierId: string | null;
+  isTerminalLocked: boolean;
   user: AuthUser;
 }
 
@@ -87,55 +91,75 @@ export async function createSessionRecord(
   return { rawToken, sessionId: created.id };
 }
 
-export async function loadAuthUserById(txOrDb: DbOrTx, userId: string): Promise<AuthUser | null> {
-  const [userRow] = await txOrDb.select().from(users).where(eq(users.id, userId)).limit(1);
-  if (!userRow || !userRow.isActive) {
-    return null;
+async function resolveUserBranchesAndPermissions(
+  txOrDb: DbOrTx,
+  row: {
+    id: string;
+    email: string;
+    name: string;
+    isActive: boolean;
+    defaultBranchId: string | null;
+    role: AppRole | null;
+    scopeMode: BranchScopeMode | null;
   }
+): Promise<AuthUser> {
+  const role: AppRole = row.role ?? "user";
+  const branchScopeMode: BranchScopeMode = role === "admin" ? "all" : (row.scopeMode ?? "selected");
 
-  const [roleRow] = await txOrDb.select().from(userRoles).where(eq(userRoles.userId, userId)).limit(1);
-  const role: AppRole = roleRow?.role ?? "user";
+  const [branchIds, matrix] = await Promise.all([
+    branchScopeMode === "all"
+      ? txOrDb
+          .select({ id: branches.id })
+          .from(branches)
+          .where(eq(branches.isActive, true))
+          .then((list) => list.map((b) => b.id))
+      : txOrDb
+          .select({ branchId: userBranches.branchId })
+          .from(userBranches)
+          .where(eq(userBranches.userId, row.id))
+          .then((list) => list.map((b) => b.branchId)),
+    loadPermissionMatrix(txOrDb),
+  ]);
 
-  const [scopeRow] = await txOrDb
-    .select()
-    .from(userBranchScopes)
-    .where(eq(userBranchScopes.userId, userId))
-    .limit(1);
-  const branchScopeMode: BranchScopeMode =
-    role === "admin" ? "all" : (scopeRow?.scopeMode ?? "selected");
-
-  let branchIds: string[] = [];
-  if (branchScopeMode === "all") {
-    const activeBranches = await txOrDb
-      .select({ id: branches.id })
-      .from(branches)
-      .where(eq(branches.isActive, true));
-    branchIds = activeBranches.map((b) => b.id);
-  } else {
-    const assigned = await txOrDb
-      .select({ branchId: userBranches.branchId })
-      .from(userBranches)
-      .where(eq(userBranches.userId, userId));
-    branchIds = assigned.map((b) => b.branchId);
-  }
-
-  const matrix = await loadPermissionMatrix(txOrDb);
   const defaultBranchId =
-    userRow.defaultBranchId && branchIds.includes(userRow.defaultBranchId)
-      ? userRow.defaultBranchId
+    row.defaultBranchId && branchIds.includes(row.defaultBranchId)
+      ? row.defaultBranchId
       : (branchIds[0] ?? null);
 
   return {
-    id: userRow.id,
-    email: userRow.email,
-    name: userRow.name,
+    id: row.id,
+    email: row.email,
+    name: row.name,
     role,
-    isActive: userRow.isActive,
+    isActive: row.isActive,
     branchScopeMode,
     branchIds,
     defaultBranchId,
     permissions: matrix[role],
   };
+}
+
+export async function loadAuthUserById(txOrDb: DbOrTx, userId: string): Promise<AuthUser | null> {
+  const [row] = await txOrDb
+    .select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      isActive: users.isActive,
+      defaultBranchId: users.defaultBranchId,
+      role: userRoles.role,
+      scopeMode: userBranchScopes.scopeMode,
+    })
+    .from(users)
+    .leftJoin(userRoles, eq(userRoles.userId, users.id))
+    .leftJoin(userBranchScopes, eq(userBranchScopes.userId, users.id))
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  if (!row || !row.isActive) {
+    return null;
+  }
+  return resolveUserBranchesAndPermissions(txOrDb, row);
 }
 
 export async function getAuthenticatedSession(rawToken: string | undefined): Promise<AuthSessionResult | null> {
@@ -147,28 +171,57 @@ export async function getAuthenticatedSession(rawToken: string | undefined): Pro
   const tokenHash = hashToken(rawToken);
   const now = new Date();
 
-  const [session] = await db
-    .select()
+  const [row] = await db
+    .select({
+      sessionId: userSessions.id,
+      sessionUserId: userSessions.userId,
+      posTerminalId: userSessions.posTerminalId,
+      activeCashierId: userSessions.activeCashierId,
+      isTerminalLocked: userSessions.isTerminalLocked,
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      isActive: users.isActive,
+      defaultBranchId: users.defaultBranchId,
+      role: userRoles.role,
+      scopeMode: userBranchScopes.scopeMode,
+    })
     .from(userSessions)
+    .innerJoin(users, eq(users.id, userSessions.userId))
+    .leftJoin(userRoles, eq(userRoles.userId, users.id))
+    .leftJoin(userBranchScopes, eq(userBranchScopes.userId, users.id))
     .where(
       and(
         eq(userSessions.tokenHash, tokenHash),
         isNull(userSessions.revokedAt),
-        gt(userSessions.expiresAt, now)
+        gt(userSessions.expiresAt, now),
+        eq(users.isActive, true)
       )
     )
     .limit(1);
 
-  if (!session) {
+  if (!row) {
     return null;
   }
 
-  const user = await loadAuthUserById(db, session.userId);
-  if (!user) {
-    return null;
+  let effectiveUser: AuthUser | null;
+  if (row.activeCashierId && row.activeCashierId !== row.sessionUserId) {
+    effectiveUser = await loadAuthUserById(db, row.activeCashierId);
+    if (!effectiveUser) {
+      return null;
+    }
+  } else {
+    effectiveUser = await resolveUserBranchesAndPermissions(db, row);
   }
 
-  return { sessionId: session.id, user };
+  return {
+    sessionId: row.sessionId,
+    terminalSessionOwnerId: row.sessionUserId,
+    posTerminalId: row.posTerminalId,
+    activeCashierId: row.activeCashierId,
+    isTerminalLocked: row.isTerminalLocked,
+    user: effectiveUser,
+  };
 }
 
 export async function revokeSessionByToken(rawToken: string | undefined): Promise<void> {

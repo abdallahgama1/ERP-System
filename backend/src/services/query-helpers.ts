@@ -1,7 +1,15 @@
-import { and, desc, inArray, sql, type AnyColumn, type SQL } from "drizzle-orm";
+import {
+  buildOffsetPageInfo,
+  decodeCursor,
+  type CursorPayload,
+  type OffsetPageInfo,
+  type SortDirection,
+} from "@erp/shared";
+import { and, asc, desc, eq, gt, inArray, lt, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
-import type { RequestActor } from "./stock-locks.ts";
+import { AppError } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
+import type { RequestActor } from "./stock-locks.ts";
 
 /**
  * Fetches branch-scoped rows using the actor's assigned branch scope unless admin/all-scope.
@@ -28,6 +36,92 @@ export async function listBranchScoped<TTable extends PgTable>(
     .from(table as PgTable)
     .where(extraCondition ? and(scopeFilter, extraCondition) : scopeFilter)
     .orderBy(desc(createdAtCol));
+}
+
+export function buildBranchScopeCondition(
+  branchIdCol: AnyColumn,
+  actor: RequestActor,
+  requestedBranchId?: string,
+  allowNullBranch = false
+): SQL | null | "EMPTY" {
+  if (requestedBranchId) {
+    return eq(branchIdCol, requestedBranchId);
+  }
+  if (actor.role === "admin" || actor.branchScopeMode === "all") {
+    return null;
+  }
+  if (actor.branchIds.length === 0) {
+    return allowNullBranch ? sql`${branchIdCol} IS NULL` : "EMPTY";
+  }
+  const inBranches = inArray(branchIdCol, actor.branchIds);
+  return allowNullBranch ? or(sql`${branchIdCol} IS NULL`, inBranches)! : inBranches;
+}
+
+export function parseCursorOrThrow(raw?: string): CursorPayload | null {
+  if (!raw || !raw.trim()) return null;
+  const decoded = decodeCursor(raw);
+  if (!decoded) {
+    throw new AppError(400, "Malformed pagination cursor", "INVALID_CURSOR");
+  }
+  return decoded;
+}
+
+export function buildKeysetCondition(
+  createdAtCol: AnyColumn,
+  idCol: AnyColumn,
+  cursor: CursorPayload,
+  sortDir: SortDirection = "desc"
+): SQL {
+  const ts = new Date(cursor.ts);
+  if (sortDir === "asc") {
+    return or(gt(createdAtCol, ts), and(eq(createdAtCol, ts), gt(idCol, cursor.id)))!;
+  }
+  return or(lt(createdAtCol, ts), and(eq(createdAtCol, ts), lt(idCol, cursor.id)))!;
+}
+
+export async function listBranchScopedPaginated<TTable extends PgTable>(
+  db: AppDatabase,
+  table: TTable,
+  branchIdCol: AnyColumn,
+  createdAtCol: AnyColumn,
+  idCol: AnyColumn,
+  actor: RequestActor,
+  options: {
+    page: number;
+    pageSize: number;
+    sortDir?: SortDirection;
+    requestedBranchId?: string;
+    extraConditions?: SQL[];
+  }
+): Promise<{ rows: Array<Record<string, unknown>>; pageInfo: OffsetPageInfo }> {
+  const scopeCond = buildBranchScopeCondition(branchIdCol, actor, options.requestedBranchId);
+  if (scopeCond === "EMPTY") {
+    return { rows: [], pageInfo: buildOffsetPageInfo(options.page, options.pageSize, 0) };
+  }
+
+  const conds: SQL[] = [];
+  if (scopeCond) conds.push(scopeCond);
+  if (options.extraConditions) conds.push(...options.extraConditions);
+  const whereClause = conds.length > 0 ? and(...conds) : undefined;
+
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(table as PgTable)
+    .where(whereClause);
+
+  const dir = options.sortDir === "asc" ? asc : desc;
+  const rows = await db
+    .select()
+    .from(table as PgTable)
+    .where(whereClause)
+    .orderBy(dir(createdAtCol), dir(idCol))
+    .limit(options.pageSize)
+    .offset((options.page - 1) * options.pageSize);
+
+  return {
+    rows: rows as Array<Record<string, unknown>>,
+    pageInfo: buildOffsetPageInfo(options.page, options.pageSize, total),
+  };
 }
 
 /**

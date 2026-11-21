@@ -1,15 +1,17 @@
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import QRCode from "qrcode";
+import type jsPDF from "jspdf";
 import { formatMoney } from "@/lib/money";
 import type { Invoice } from "@/types";
 
-export const generateInvoicePdf = (
+export const generateInvoicePdf = async (
   inv: Invoice,
   currency = "USD",
   qrDataUrl?: string | null
-): jsPDF => {
-  const doc = new jsPDF();
+): Promise<jsPDF> => {
+  const [{ default: JsPDF }, { default: autoTable }] = await Promise.all([
+    import("jspdf"),
+    import("jspdf-autotable"),
+  ]);
+  const doc = new JsPDF();
   const w = doc.internal.pageSize.getWidth();
   doc.setFontSize(24);
   doc.setFont("helvetica", "bold");
@@ -96,10 +98,12 @@ export const downloadInvoicePdf = async (inv: Invoice, currency = "USD") => {
   let qrDataUrl: string | null = null;
   if (inv.qrTlv) {
     try {
+      const QRCode = await import("qrcode");
       qrDataUrl = await QRCode.toDataURL(inv.qrTlv, { width: 160, margin: 1 });
     } catch {
       qrDataUrl = null;
     }
   }
-  generateInvoicePdf(inv, currency, qrDataUrl).save(`${inv.invoiceNumber}.pdf`);
+  const doc = await generateInvoicePdf(inv, currency, qrDataUrl);
+  doc.save(`${inv.invoiceNumber}.pdf`);
 };

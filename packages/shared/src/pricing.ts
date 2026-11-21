@@ -35,6 +35,7 @@ export interface LinePricingInput {
   unitPrice: number;
   discount?: number;
   taxRate?: number;
+  isTaxInclusive?: boolean;
 }
 
 export interface LinePricingResult {
@@ -46,12 +47,22 @@ export interface LinePricingResult {
 
 /**
  * Computes deterministic line subtotal, tax amount, and total with discount clamping.
+ * Supports both tax-exclusive (default) and tax-inclusive (retail POS / VAT-included) pricing.
  */
 export function calculateLineAmounts(line: LinePricingInput, scale = 2): LinePricingResult {
   const gross = roundCurrency(line.quantity * line.unitPrice, scale);
   const clampedDiscount = Math.min(Math.max(line.discount ?? 0, 0), gross);
-  const taxable = roundCurrency(Math.max(0, gross - clampedDiscount), scale);
-  const taxAmount = roundCurrency((taxable * (line.taxRate ?? 0)) / 100, scale);
+  const netAfterDiscount = roundCurrency(Math.max(0, gross - clampedDiscount), scale);
+  const rate = Math.max(0, line.taxRate ?? 0);
+
+  if (line.isTaxInclusive && rate > 0) {
+    const taxable = roundCurrency(netAfterDiscount / (1 + rate / 100), scale);
+    const taxAmount = roundCurrency(netAfterDiscount - taxable, scale);
+    return { gross, taxable, taxAmount, lineTotal: netAfterDiscount };
+  }
+
+  const taxable = netAfterDiscount;
+  const taxAmount = roundCurrency((taxable * rate) / 100, scale);
   const lineTotal = roundCurrency(taxable + taxAmount, scale);
   return { gross, taxable, taxAmount, lineTotal };
 }

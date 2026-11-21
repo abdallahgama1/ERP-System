@@ -21,7 +21,7 @@ import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/he
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal, reverseJournalEntriesForSource, type MappedLineSpec } from "./gl.service.ts";
-import { groupByKey, listBranchScoped } from "./query-helpers.ts";
+import { buildBranchScopeCondition, groupByKey, listBranchScoped } from "./query-helpers.ts";
 import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
 function summarizeCostLines<T extends { quantity: number; unitCost: number; taxRate: number }>(lines: T[]) {
@@ -264,8 +264,15 @@ export async function voidVendorBill(
   });
 }
 
-export async function listPaymentsMade(db: AppDatabase) {
-  const list = await db.select().from(paymentsMade).orderBy(desc(paymentsMade.createdAt));
+export async function listPaymentsMade(db: AppDatabase, actor: RequestActor) {
+  const scopeCond = buildBranchScopeCondition(paymentsMade.branchId, actor, undefined, true);
+  if (scopeCond === "EMPTY") return [];
+
+  const list = await db
+    .select()
+    .from(paymentsMade)
+    .where(scopeCond ?? undefined)
+    .orderBy(desc(paymentsMade.createdAt));
   if (list.length === 0) return [];
 
   const allocs = await db

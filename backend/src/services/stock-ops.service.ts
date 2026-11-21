@@ -1,4 +1,5 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { encodeCursor, type CursorPageInfo, type SortDirection } from "@erp/shared";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, or, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import type { adjustmentSchema, writeOffSchema } from "@erp/shared";
 import {
@@ -9,6 +10,7 @@ import {
   stockMovements,
   stockWriteOffLines,
   stockWriteOffs,
+  type MovementType,
 } from "../../drizzle/schema.ts";
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
@@ -16,35 +18,70 @@ import { assertBranchAccess } from "../middleware/auth.ts";
 import { checkApprovalRequired, createApprovalRequest } from "./approvals.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { consumeTrackedStock, linkConsumedAllocations, receiveTrackedStock } from "./lots-serials.service.ts";
-import { groupByKey, listBranchScoped } from "./query-helpers.ts";
+import { buildKeysetCondition, groupByKey, listBranchScoped, parseCursorOrThrow } from "./query-helpers.ts";
 import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
 export async function listMovements(
   db: AppDatabase,
   actor: RequestActor,
-  query: { branchId?: string; productId?: string; limit?: string }
+  query: {
+    branchId?: string;
+    productId?: string;
+    movementType?: string;
+    fromDate?: string;
+    toDate?: string;
+    q?: string;
+    cursor?: string;
+    limit?: string;
+    sortDir?: string;
+  }
 ) {
-  const limit = Math.min(1000, Math.max(1, Number.parseInt(query.limit ?? "500", 10) || 500));
-  const conditions = [];
+  const hasExplicitPagination = Boolean(query.cursor || query.limit);
+  const limit = hasExplicitPagination
+    ? Math.min(500, Math.max(1, Number.parseInt(query.limit ?? "50", 10) || 50))
+    : 200;
+  const sortDir: SortDirection = query.sortDir === "asc" ? "asc" : "desc";
+  const cursor = parseCursorOrThrow(query.cursor);
+
+  const conditions: SQL[] = [];
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
     conditions.push(eq(stockMovements.branchId, query.branchId));
   } else if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
-    if (actor.branchIds.length === 0) return [];
+    if (actor.branchIds.length === 0) {
+      return { items: [], pageInfo: { nextCursor: null, hasMore: false, limit } satisfies CursorPageInfo };
+    }
     conditions.push(inArray(stockMovements.branchId, actor.branchIds));
   }
-  if (query.productId) {
-    conditions.push(eq(stockMovements.productId, query.productId));
+  if (query.productId) conditions.push(eq(stockMovements.productId, query.productId));
+  if (query.movementType && query.movementType !== "all") {
+    conditions.push(eq(stockMovements.movementType, query.movementType as MovementType));
+  }
+  if (query.fromDate) conditions.push(gte(stockMovements.createdAt, new Date(query.fromDate)));
+  if (query.toDate) conditions.push(lte(stockMovements.createdAt, new Date(query.toDate)));
+  if (query.q?.trim()) {
+    const pattern = `%${query.q.trim()}%`;
+    conditions.push(
+      or(ilike(stockMovements.referenceNumber, pattern), ilike(stockMovements.notes, pattern))!
+    );
+  }
+  if (cursor) {
+    conditions.push(buildKeysetCondition(stockMovements.createdAt, stockMovements.id, cursor, sortDir));
   }
 
-  const rows = await db
+  const orderDir = sortDir === "asc" ? asc : desc;
+  const rawRows = await db
     .select()
     .from(stockMovements)
     .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(stockMovements.createdAt))
-    .limit(limit);
+    .orderBy(orderDir(stockMovements.createdAt), orderDir(stockMovements.id))
+    .limit(limit + 1);
 
-  return rows.map((r) => ({
+  const hasMore = rawRows.length > limit;
+  const rows = hasMore ? rawRows.slice(0, limit) : rawRows;
+  const last = rows[rows.length - 1];
+
+  const items = rows.map((r) => ({
     id: r.id,
     branchId: r.branchId,
     productId: r.productId,
@@ -59,6 +96,14 @@ export async function listMovements(
     notes: r.notes,
     createdAt: r.createdAt.toISOString(),
   }));
+
+  const pageInfo: CursorPageInfo = {
+    nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null,
+    hasMore,
+    limit,
+  };
+
+  return { items, pageInfo };
 }
 
 export async function listAdjustments(db: AppDatabase, actor: RequestActor) {

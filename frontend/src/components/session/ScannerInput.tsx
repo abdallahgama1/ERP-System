@@ -6,8 +6,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { Product } from "@/types";
-import { BrowserMultiFormatReader, IScannerControls } from "@zxing/browser";
+import type { IScannerControls } from "@zxing/browser";
 import { feedback } from "@/lib/feedback";
+import {
+  matchProductByScanCode,
+  sanitizeScannedCode,
+  useBarcodeScanner,
+} from "@/hooks/useBarcodeScanner";
 
 interface ScannerInputProps {
   onProductScanned: (product: Product) => void;
@@ -36,25 +41,21 @@ export const ScannerInput = ({
   const suggestionsRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
-  const [isScanning, setIsScanning] = useState(false);
-  const scannerBuffer = useRef("");
-  const scannerTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scanDelay = 100;
-
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const lastScanRef = useRef<{ code: string; at: number }>({ code: "", at: 0 });
 
   useEffect(() => {
     if (searchQuery.trim() && products.length > 0) {
+      const q = searchQuery.toLowerCase();
       const filtered = products
         .filter(
           (product) =>
-            product.product_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            product.product_sku.toLowerCase().includes(searchQuery.toLowerCase())
+            product.product_name.toLowerCase().includes(q) ||
+            product.product_sku.toLowerCase().includes(q) ||
+            (product.barcode ? product.barcode.toLowerCase().includes(q) : false)
         )
         .slice(0, 10)
         .map((product) => ({
@@ -86,66 +87,17 @@ export const ScannerInput = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const processScannerInputRef = useRef<(input: string) => void>(() => {});
+  const handleScanRef = useRef<(code: string) => void>(() => {});
 
-  // Global keydown listener for scanner
-  useEffect(() => {
-    if (disabled) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "F10") {
-        event.preventDefault();
-        return;
-      }
-
-      // Ignore events from input fields
-      if (
-        event.target instanceof HTMLInputElement &&
-        (event.target.id === "productSearch" || event.target.id === "skuInput")
-      ) {
-        return;
-      }
-
-      if (event.key.length === 1 || event.key === "Enter") {
-        setIsScanning(true);
-        scannerBuffer.current += event.key;
-
-        if (scannerTimeout.current) {
-          clearTimeout(scannerTimeout.current);
-        }
-
-        scannerTimeout.current = setTimeout(() => {
-          const finalInput = scannerBuffer.current;
-          scannerBuffer.current = "";
-          setIsScanning(false);
-          processScannerInputRef.current(finalInput);
-        }, scanDelay);
-      } else {
-        setIsScanning(false);
-        scannerBuffer.current = "";
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-      if (scannerTimeout.current) {
-        clearTimeout(scannerTimeout.current);
-      }
-    };
-  }, [disabled]);
-
-  const processScannerInput = (input: string) => {
-    let cleanedInput = input.replace(/Enter/g, "");
-    cleanedInput = cleanedInput.trim();
-    cleanedInput = cleanedInput.replace(/[^a-zA-Z0-9-]/g, "");
-
-    if (cleanedInput.length > 0) {
-      setSkuInput(cleanedInput);
-      handleScan(cleanedInput);
-    }
-  };
-  processScannerInputRef.current = processScannerInput;
+  const { isScanning } = useBarcodeScanner({
+    enabled: !disabled,
+    scanTimeoutMs: 100,
+    ignoreInputIds: ["productSearch", "skuInput"],
+    onScan: (code) => {
+      setSkuInput(code);
+      handleScanRef.current(code);
+    },
+  });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -153,9 +105,9 @@ export const ScannerInput = ({
   };
 
   const handleScan = (sku: string) => {
-    const trimmedSku = sku.trim().toUpperCase();
+    const cleaned = sanitizeScannedCode(sku);
 
-    if (!trimmedSku) {
+    if (!cleaned) {
       feedback.error();
       toast({
         title: t("scanner.invalidInput"),
@@ -165,7 +117,7 @@ export const ScannerInput = ({
       return;
     }
 
-    if (trimmedSku.length < 2) {
+    if (cleaned.length < 2) {
       feedback.error();
       toast({
         title: t("scanner.invalidSku"),
@@ -175,15 +127,13 @@ export const ScannerInput = ({
       return;
     }
 
-    const matchedProduct = products.find(
-      (product) => product.product_sku.toUpperCase() === trimmedSku
-    );
+    const matchedProduct = matchProductByScanCode(products, cleaned);
 
     if (!matchedProduct) {
       feedback.error();
       toast({
         title: t("scanner.productNotFound"),
-        description: t("scanner.noProductWithSku", { sku: trimmedSku }),
+        description: t("scanner.noProductWithSku", { sku: cleaned.toUpperCase() }),
         variant: "destructive",
       });
       return;
@@ -194,6 +144,7 @@ export const ScannerInput = ({
     setSkuInput("");
     setSearchQuery("");
   };
+  handleScanRef.current = handleScan;
 
   const handleSuggestionClick = (suggestion: SearchSuggestion) => {
     setSkuInput(suggestion.sku);
@@ -241,11 +192,12 @@ export const ScannerInput = ({
 
     let cancelled = false;
     setCameraError(null);
-    const reader = new BrowserMultiFormatReader();
-    readerRef.current = reader;
 
     (async () => {
       try {
+        const { BrowserMultiFormatReader } = await import("@zxing/browser");
+        if (cancelled) return;
+        const reader = new BrowserMultiFormatReader();
         const videoEl = videoRef.current;
         if (!videoEl) return;
         const controls = await reader.decodeFromVideoDevice(
@@ -263,7 +215,7 @@ export const ScannerInput = ({
               return;
             }
             lastScanRef.current = { code, at: now };
-            handleScan(code);
+            handleScanRef.current(code);
           }
         );
         if (cancelled) {

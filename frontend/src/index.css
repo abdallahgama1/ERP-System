@@ -113,3 +113,40 @@ All colors MUST be HSL.
     inset-inline-end: calc(var(--sidebar-width) * -1);
   }
 }
+
+/* Tier-1 Thermal Receipt Print Styles (80mm / 58mm roll printers) */
+@media print {
+  @page {
+    margin: 0;
+  }
+
+  body.pos-printing * {
+    visibility: hidden;
+  }
+
+  body.pos-printing #pos-thermal-receipt,
+  body.pos-printing #pos-thermal-receipt * {
+    visibility: visible;
+  }
+
+  body.pos-printing #pos-thermal-receipt {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 80mm;
+    padding: 4mm;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.35;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  body.pos-printing.pos-paper-58mm #pos-thermal-receipt {
+    width: 58mm;
+    padding: 2mm;
+    font-size: 10px;
+  }
+}

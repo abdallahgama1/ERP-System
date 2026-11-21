@@ -1,5 +1,5 @@
-import { roundCurrency, type AccountTypeShared, type GlMappingKey, type NormalBalanceShared, type createAccountSchema, type createFiscalYearSchema, type createJournalEntrySchema } from "@erp/shared";
-import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { buildOffsetPageInfo, roundCurrency, type AccountTypeShared, type GlMappingKey, type NormalBalanceShared, type OffsetPageInfo, type createAccountSchema, type createFiscalYearSchema, type createJournalEntrySchema } from "@erp/shared";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import {
   chartOfAccounts,
@@ -26,6 +26,8 @@ interface DefaultAccountDef {
 
 export const DEFAULT_COA: DefaultAccountDef[] = [
   { code: "1000", name: "Cash & Bank", accountType: "asset", normalBalance: "debit", mappingKey: "default_cash_bank" },
+  { code: "1010", name: "POS Cash Drawer", accountType: "asset", normalBalance: "debit", mappingKey: "pos_cash_drawer" },
+  { code: "1020", name: "Card & Mobile Wallet Clearing", accountType: "asset", normalBalance: "debit", mappingKey: "card_clearing" },
   { code: "1100", name: "Accounts Receivable", accountType: "asset", normalBalance: "debit", mappingKey: "accounts_receivable" },
   { code: "1200", name: "Inventory Asset", accountType: "asset", normalBalance: "debit", mappingKey: "inventory_asset" },
   { code: "1210", name: "In-Transit Inventory", accountType: "asset", normalBalance: "debit", mappingKey: "in_transit_inventory" },
@@ -40,6 +42,7 @@ export const DEFAULT_COA: DefaultAccountDef[] = [
   { code: "5000", name: "Cost of Goods Sold", accountType: "expense", normalBalance: "debit", mappingKey: "cogs" },
   { code: "5100", name: "Inventory Adjustment & Shrinkage", accountType: "expense", normalBalance: "debit", mappingKey: "inventory_adjustment" },
   { code: "5200", name: "Inventory Write-Off Expense", accountType: "expense", normalBalance: "debit", mappingKey: "write_off_expense" },
+  { code: "5400", name: "Cash Over & Short", accountType: "expense", normalBalance: "debit", mappingKey: "cash_over_short" },
   { code: "5900", name: "Purchase Price & Rounding Variance", accountType: "expense", normalBalance: "debit", mappingKey: "rounding_variance" },
 ];
 
@@ -559,26 +562,62 @@ export async function updateGlMapping(
 export async function listJournalEntries(
   db: AppDatabase,
   actor: RequestActor,
-  filters: { branchId?: string; fromDate?: string; toDate?: string }
+  filters: {
+    branchId?: string;
+    fromDate?: string;
+    toDate?: string;
+    search?: string;
+    q?: string;
+    status?: string;
+    page?: string;
+    pageSize?: string;
+  }
 ) {
-  const conditions = [];
+  const page = Math.max(1, Number.parseInt(filters.page ?? "1", 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number.parseInt(filters.pageSize ?? "50", 10) || 50));
+
+  const conditions: SQL[] = [];
   if (filters.branchId) {
     conditions.push(eq(journalEntries.branchId, filters.branchId));
   } else if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
-    if (actor.branchIds.length === 0) return [];
+    if (actor.branchIds.length === 0) {
+      return { items: [], pageInfo: buildOffsetPageInfo(page, pageSize, 0) satisfies OffsetPageInfo };
+    }
     conditions.push(inArray(journalEntries.branchId, actor.branchIds));
   }
   if (filters.fromDate) conditions.push(gte(journalEntries.entryDate, new Date(filters.fromDate)));
   if (filters.toDate) conditions.push(lte(journalEntries.entryDate, new Date(filters.toDate)));
+  if (filters.status && filters.status !== "all") {
+    conditions.push(eq(journalEntries.status, filters.status as "posted" | "reversed"));
+  }
+  const term = (filters.search ?? filters.q)?.trim();
+  if (term) {
+    const pattern = `%${term}%`;
+    conditions.push(
+      or(
+        ilike(journalEntries.entryNumber, pattern),
+        ilike(journalEntries.memo, pattern),
+        ilike(journalEntries.referenceNumber, pattern)
+      )!
+    );
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(journalEntries)
+    .where(whereClause);
 
   const headers = await db
     .select()
     .from(journalEntries)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(journalEntries.entryDate), desc(journalEntries.createdAt))
-    .limit(500);
+    .where(whereClause)
+    .orderBy(desc(journalEntries.entryDate), desc(journalEntries.createdAt), desc(journalEntries.id))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
 
-  if (headers.length === 0) return [];
+  const pageInfo = buildOffsetPageInfo(page, pageSize, total);
+  if (headers.length === 0) return { items: [], pageInfo };
 
   const lines = await db
     .select()
@@ -586,7 +625,7 @@ export async function listJournalEntries(
     .where(inArray(journalLines.entryId, headers.map((h) => h.id)));
   const linesMap = groupByKey(lines, (l) => l.entryId);
 
-  return headers.map((je) => ({
+  const items = headers.map((je) => ({
     ...je,
     entryDate: je.entryDate.toISOString(),
     createdAt: je.createdAt.toISOString(),
@@ -599,6 +638,8 @@ export async function listJournalEntries(
       creditTx: num(l.creditTx),
     })),
   }));
+
+  return { items, pageInfo };
 }
 
 export async function createManualJournal(

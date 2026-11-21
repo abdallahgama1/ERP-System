@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Package, Plus, Search, Edit, Trash2, ChevronDown, ChevronRight, MapPin, FileText, Upload, Download } from "lucide-react";
-import * as XLSX from "xlsx";
+import { exportJsonToExcel } from "@/lib/export/excel";
 import { Product } from "@/types";
 import { useToast } from "@/hooks/use-toast";
 import { useInventory } from "@/contexts/InventoryContext";
@@ -43,10 +43,12 @@ import { useAuditLog } from "@/contexts/AuditLogContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import ProductLedgerDialog from "@/components/inventory/ProductLedgerDialog";
-import BulkImportDialog, { ImportColumn } from "@/components/import/BulkImportDialog";
+import type { ImportColumn } from "@/components/import/BulkImportDialog";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { TaxonomySelect } from "@/components/taxonomy/TaxonomySelect";
 import { useTaxonomy } from "@/contexts/TaxonomyContext";
+
+const BulkImportDialog = lazy(() => import("@/components/import/BulkImportDialog"));
 
 const Products = () => {
   const { t } = useTranslation();
@@ -332,7 +334,7 @@ const Products = () => {
     record('inventory', `Bulk imported ${importedCount} products`, { entity: 'product' });
   };
 
-  const handleExportProducts = () => {
+  const handleExportProducts = async () => {
     const exportData = filteredProducts.map(product => ({
       SKU: product.product_sku,
       Name: product.product_name,
@@ -345,10 +347,11 @@ const Products = () => {
       "Available": getAvailableQuantity(product.productId),
     }));
 
-    const ws = XLSX.utils.json_to_sheet(exportData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Products");
-    XLSX.writeFile(wb, `products_export_${new Date().toISOString().split('T')[0]}.xlsx`);
+    await exportJsonToExcel({
+      rows: exportData,
+      sheetName: "Products",
+      fileName: `products_export_${new Date().toISOString().split('T')[0]}.xlsx`,
+    });
     
     toast({
       title: t('bulkImport.exportSuccess'),
@@ -783,15 +786,19 @@ const Products = () => {
       )}
 
       {/* Bulk Import Dialog */}
-      <BulkImportDialog
-        open={isImportDialogOpen}
-        onOpenChange={setIsImportDialogOpen}
-        title={t('bulkImport.importProducts')}
-        description={t('bulkImport.productsDescription')}
-        columns={productImportColumns}
-        templateFileName="products_import_template.xlsx"
-        onConfirmImport={handleProductImport}
-      />
+      {isImportDialogOpen && (
+        <Suspense fallback={null}>
+          <BulkImportDialog
+            open={isImportDialogOpen}
+            onOpenChange={setIsImportDialogOpen}
+            title={t('bulkImport.importProducts')}
+            description={t('bulkImport.productsDescription')}
+            columns={productImportColumns}
+            templateFileName="products_import_template.xlsx"
+            onConfirmImport={handleProductImport}
+          />
+        </Suspense>
+      )}
 
       <ConfirmDeleteDialog
         open={deleteProductId !== null}

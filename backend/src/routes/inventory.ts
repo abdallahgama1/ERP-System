@@ -65,9 +65,19 @@ export async function inventoryRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------------- Movements ----------------
   app.get("/api/movements", { preHandler: requirePermission("inventory", "view") }, async (req) => {
-    const query = req.query as { branchId?: string; productId?: string; limit?: string };
-    const movements = await listMovements(getDb(), req.authUser!, query);
-    return { movements };
+    const query = req.query as {
+      branchId?: string;
+      productId?: string;
+      movementType?: string;
+      fromDate?: string;
+      toDate?: string;
+      q?: string;
+      cursor?: string;
+      limit?: string;
+      sortDir?: string;
+    };
+    const { items, pageInfo } = await listMovements(getDb(), req.authUser!, query);
+    return { movements: items, items, pageInfo };
   });
 
   // ---------------- Adjustments ----------------

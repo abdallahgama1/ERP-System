@@ -106,6 +106,7 @@ export async function applyBranchStockMovement(
 ): Promise<{
   movementId: string;
   previousQty: number;
+  rawNewQty: number;
   newQty: number;
   previousAvgCost: number;
   newAvgCost: number;
@@ -176,6 +177,7 @@ export async function applyBranchStockMovement(
   return {
     movementId: movementRow.id,
     previousQty,
+    rawNewQty,
     newQty,
     previousAvgCost: bp.avgCost,
     newAvgCost,

@@ -1,10 +1,13 @@
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
+import type jsPDF from "jspdf";
 import { formatMoney } from "@/lib/money";
 import type { PurchaseOrder } from "@/types";
 
-export const generatePurchaseOrderPdf = (po: PurchaseOrder, currency = "USD"): jsPDF => {
-  const doc = new jsPDF();
+export const generatePurchaseOrderPdf = async (po: PurchaseOrder, currency = "USD"): Promise<jsPDF> => {
+  const [{ default: JsPDF }, { default: autoTable }] = await Promise.all([
+    import("jspdf"),
+    import("jspdf-autotable"),
+  ]);
+  const doc = new JsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
   
   // Header
@@ -158,13 +161,13 @@ export const generatePurchaseOrderPdf = (po: PurchaseOrder, currency = "USD"): j
   return doc;
 };
 
-export const downloadPurchaseOrderPdf = (po: PurchaseOrder, currency = "USD") => {
-  const doc = generatePurchaseOrderPdf(po, currency);
+export const downloadPurchaseOrderPdf = async (po: PurchaseOrder, currency = "USD") => {
+  const doc = await generatePurchaseOrderPdf(po, currency);
   doc.save(`${po.poNumber}.pdf`);
 };
 
-export const printPurchaseOrder = (po: PurchaseOrder, currency = "USD") => {
-  const doc = generatePurchaseOrderPdf(po, currency);
+export const printPurchaseOrder = async (po: PurchaseOrder, currency = "USD") => {
+  const doc = await generatePurchaseOrderPdf(po, currency);
   doc.autoPrint();
   window.open(doc.output("bloburl"), "_blank");
 };

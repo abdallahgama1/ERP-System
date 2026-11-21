@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   pgEnum,
@@ -106,6 +107,10 @@ export const userSessions = pgTable(
     tokenHash: text("token_hash").notNull().unique(),
     ipAddress: text("ip_address"),
     userAgent: text("user_agent"),
+    posTerminalId: uuid("pos_terminal_id").references(() => posTerminals.id, { onDelete: "set null" }),
+    activeCashierId: uuid("active_cashier_id").references(() => users.id, { onDelete: "set null" }),
+    isTerminalLocked: boolean("is_terminal_locked").notNull().default(false),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).defaultNow().notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -238,6 +243,9 @@ export const auditLogs = pgTable(
     index("audit_logs_created_idx").on(t.createdAt),
     index("audit_logs_entity_idx").on(t.entityType, t.entityId),
     index("audit_logs_branch_idx").on(t.branchId),
+    index("audit_logs_created_id_idx").on(t.createdAt, t.id),
+    index("audit_logs_entity_created_id_idx").on(t.entityType, t.createdAt, t.id),
+    index("audit_logs_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
   ]
 );
 
@@ -282,8 +290,10 @@ export const idempotencyKeys = pgTable(
     key: text("key").notNull(),
     method: text("method").notNull(),
     path: text("path").notNull(),
+    posTerminalId: uuid("pos_terminal_id"),
     statusCode: integer("status_code").notNull(),
     responseBody: jsonb("response_body").$type<unknown>().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [uniqueIndex("idempotency_user_req_uq").on(t.userId, t.method, t.path, t.key)]
@@ -484,6 +494,7 @@ export const customers = pgTable(
     currency: text("currency").notNull().default("USD"),
     paymentTermsDays: integer("payment_terms_days").notNull().default(30),
     creditLimit: numeric("credit_limit", { precision: 18, scale: 4 }),
+    isWalkIn: boolean("is_walk_in").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
     notes: text("notes").notNull().default(""),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -542,6 +553,8 @@ export const stockMovements = pgTable(
   (t) => [
     index("stock_movements_branch_product_idx").on(t.branchId, t.productId, t.createdAt),
     index("stock_movements_ref_idx").on(t.referenceType, t.referenceId),
+    index("stock_movements_created_id_idx").on(t.createdAt, t.id),
+    index("stock_movements_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
   ]
 );
 
@@ -1044,6 +1057,15 @@ export const salesInvoices = pgTable(
     prevInvoiceHash: text("prev_invoice_hash"),
     qrTlv: text("qr_tlv"),
     eInvoicePayloadJson: jsonb("e_invoice_payload_json").$type<Record<string, unknown>>(),
+    sourceChannel: text("source_channel").$type<"erp" | "pos">().notNull().default("erp"),
+    posTerminalId: uuid("pos_terminal_id").references(() => posTerminals.id, { onDelete: "set null" }),
+    posShiftId: uuid("pos_shift_id").references(() => posShifts.id, { onDelete: "set null" }),
+    cashierUserId: uuid("cashier_user_id").references(() => users.id, { onDelete: "set null" }),
+    offlineClientTxId: text("offline_client_tx_id"),
+    syncStatus: text("sync_status").$type<"synced" | "reconciled_conflict">().notNull().default("synced"),
+    etaDocumentUuid: text("eta_document_uuid"),
+    etaSubmissionUuid: text("eta_submission_uuid"),
+    etaReceiptStatus: text("eta_receipt_status").notNull().default("not_applicable"),
     voidReason: text("void_reason"),
     voidedAt: timestamp("voided_at", { withTimezone: true }),
     voidedBy: uuid("voided_by").references(() => users.id, { onDelete: "set null" }),
@@ -1052,7 +1074,14 @@ export const salesInvoices = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("sales_invoices_customer_idx").on(t.customerId), index("sales_invoices_status_idx").on(t.status)]
+  (t) => [
+    index("sales_invoices_customer_idx").on(t.customerId),
+    index("sales_invoices_status_idx").on(t.status),
+    index("sales_invoices_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
+    index("sales_invoices_status_date_id_idx").on(t.status, t.invoiceDate, t.id),
+    index("sales_invoices_created_id_idx").on(t.createdAt, t.id),
+    uniqueIndex("sales_invoices_pos_terminal_offline_tx_uq").on(t.posTerminalId, t.offlineClientTxId),
+  ]
 );
 
 export const salesInvoiceLines = pgTable(
@@ -1246,6 +1275,8 @@ export const journalEntries = pgTable(
     index("journal_entries_date_idx").on(t.entryDate),
     index("journal_entries_source_idx").on(t.sourceType, t.sourceId),
     index("journal_entries_branch_idx").on(t.branchId),
+    index("journal_entries_date_created_id_idx").on(t.entryDate, t.createdAt, t.id),
+    index("journal_entries_branch_date_created_id_idx").on(t.branchId, t.entryDate, t.createdAt, t.id),
   ]
 );
 
@@ -1504,4 +1535,144 @@ export const workOrderMaterials = pgTable(
     unitCostSnapshot: numeric("unit_cost_snapshot", { precision: 18, scale: 4 }).notNull().default("0"),
   },
   (t) => [index("wo_materials_wo_idx").on(t.workOrderId)]
+);
+
+// ============================================================================
+// POS / Cashier Register Mode & ETA Egypt E-Receipt Submissions
+// ============================================================================
+
+export const posTerminals = pgTable(
+  "pos_terminals",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    branchId: uuid("branch_id")
+      .notNull()
+      .references(() => branches.id, { onDelete: "restrict" }),
+    code: text("code").notNull().unique(),
+    name: text("name").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    receiptHeader: text("receipt_header").notNull().default(""),
+    receiptFooter: text("receipt_footer").notNull().default(""),
+    paperWidthMm: integer("paper_width_mm").notNull().default(80),
+    defaultCustomerId: uuid("default_customer_id").references(() => customers.id, { onDelete: "set null" }),
+    etaPosSerial: text("eta_pos_serial").notNull().default(""),
+    etaPosOsVersion: text("eta_pos_os_version").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("pos_terminals_branch_idx").on(t.branchId)]
+);
+
+export const posShifts = pgTable(
+  "pos_shifts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    shiftNumber: text("shift_number").notNull().unique(),
+    terminalId: uuid("terminal_id")
+      .notNull()
+      .references(() => posTerminals.id, { onDelete: "restrict" }),
+    branchId: uuid("branch_id")
+      .notNull()
+      .references(() => branches.id, { onDelete: "restrict" }),
+    openedByUserId: uuid("opened_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    closedByUserId: uuid("closed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    status: text("status").$type<"open" | "closed">().notNull().default("open"),
+    openingFloat: numeric("opening_float", { precision: 18, scale: 4 }).notNull().default("0"),
+    expectedCash: numeric("expected_cash", { precision: 18, scale: 4 }).notNull().default("0"),
+    countedCash: numeric("counted_cash", { precision: 18, scale: 4 }),
+    cashVariance: numeric("cash_variance", { precision: 18, scale: 4 }),
+    totalCashSales: numeric("total_cash_sales", { precision: 18, scale: 4 }).notNull().default("0"),
+    totalCardSales: numeric("total_card_sales", { precision: 18, scale: 4 }).notNull().default("0"),
+    totalWalletSales: numeric("total_wallet_sales", { precision: 18, scale: 4 }).notNull().default("0"),
+    totalSalesCount: integer("total_sales_count").notNull().default(0),
+    notes: text("notes").notNull().default(""),
+    openedAt: timestamp("opened_at", { withTimezone: true }).defaultNow().notNull(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("pos_shifts_terminal_status_idx").on(t.terminalId, t.status),
+    index("pos_shifts_branch_opened_idx").on(t.branchId, t.openedAt),
+    uniqueIndex("pos_shifts_one_open_per_terminal_uq")
+      .on(t.terminalId)
+      .where(sql`${t.status} = 'open'`),
+  ]
+);
+
+export const posShiftCashMovements = pgTable(
+  "pos_shift_cash_movements",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    shiftId: uuid("shift_id")
+      .notNull()
+      .references(() => posShifts.id, { onDelete: "cascade" }),
+    type: text("type").$type<"pay_in" | "pay_out" | "safe_drop">().notNull(),
+    amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+    reason: text("reason").notNull().default(""),
+    performedByUserId: uuid("performed_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("pos_shift_cash_mov_shift_idx").on(t.shiftId)]
+);
+
+export const userPosPins = pgTable("user_pos_pins", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  pinHash: text("pin_hash").notNull(),
+  failedAttempts: integer("failed_attempts").notNull().default(0),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const posTenders = pgTable(
+  "pos_tenders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    invoiceId: uuid("invoice_id")
+      .notNull()
+      .references(() => salesInvoices.id, { onDelete: "cascade" }),
+    shiftId: uuid("shift_id")
+      .notNull()
+      .references(() => posShifts.id, { onDelete: "restrict" }),
+    method: text("method").$type<"cash" | "card" | "mobile_wallet">().notNull(),
+    amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+    tenderedAmount: numeric("tendered_amount", { precision: 18, scale: 4 }).notNull(),
+    changeGiven: numeric("change_given", { precision: 18, scale: 4 }).notNull().default("0"),
+    reference: text("reference").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("pos_tenders_invoice_idx").on(t.invoiceId), index("pos_tenders_shift_idx").on(t.shiftId)]
+);
+
+export const einvoiceSubmissions = pgTable(
+  "einvoice_submissions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    invoiceId: uuid("invoice_id")
+      .notNull()
+      .references(() => salesInvoices.id, { onDelete: "cascade" }),
+    provider: text("provider").$type<"eta_egypt" | "zatca_phase2">().notNull(),
+    documentType: text("document_type").$type<"receipt" | "invoice">().notNull().default("receipt"),
+    documentUuid: text("document_uuid").notNull(),
+    submissionUuid: text("submission_uuid"),
+    status: text("status")
+      .$type<"pending" | "submitted" | "accepted" | "rejected" | "failed">()
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    requestPayloadJson: jsonb("request_payload_json").$type<Record<string, unknown>>().notNull().default({}),
+    responsePayloadJson: jsonb("response_payload_json").$type<Record<string, unknown>>(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("einvoice_sub_status_retry_idx").on(t.status, t.nextRetryAt),
+    uniqueIndex("einvoice_sub_invoice_provider_uq").on(t.invoiceId, t.provider),
+  ]
 );

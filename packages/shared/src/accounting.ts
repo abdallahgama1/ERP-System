@@ -14,6 +14,8 @@ export type JournalEntryStatusShared = (typeof JOURNAL_ENTRY_STATUSES)[number];
 
 export const GL_MAPPING_KEYS = [
   "default_cash_bank",
+  "pos_cash_drawer",
+  "card_clearing",
   "accounts_receivable",
   "inventory_asset",
   "in_transit_inventory",
@@ -28,6 +30,7 @@ export const GL_MAPPING_KEYS = [
   "cogs",
   "inventory_adjustment",
   "write_off_expense",
+  "cash_over_short",
   "rounding_variance",
 ] as const;
 export type GlMappingKey = (typeof GL_MAPPING_KEYS)[number];

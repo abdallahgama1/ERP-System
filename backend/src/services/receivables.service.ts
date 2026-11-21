@@ -22,11 +22,18 @@ import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/he
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal, reverseJournalEntriesForSource } from "./gl.service.ts";
-import { groupByKey, listBranchScoped } from "./query-helpers.ts";
+import { buildBranchScopeCondition, groupByKey, listBranchScoped } from "./query-helpers.ts";
 import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
 
-export async function listReceivedPayments(db: AppDatabase) {
-  const list = await db.select().from(receivedPayments).orderBy(desc(receivedPayments.createdAt));
+export async function listReceivedPayments(db: AppDatabase, actor: RequestActor) {
+  const scopeCond = buildBranchScopeCondition(receivedPayments.branchId, actor, undefined, true);
+  if (scopeCond === "EMPTY") return [];
+
+  const list = await db
+    .select()
+    .from(receivedPayments)
+    .where(scopeCond ?? undefined)
+    .orderBy(desc(receivedPayments.createdAt));
   if (list.length === 0) return [];
 
   const allocs = await db
@@ -467,8 +474,15 @@ export async function applySalesReturnCredit(
   });
 }
 
-export async function listRetainerInvoices(db: AppDatabase) {
-  const list = await db.select().from(retainerInvoices).orderBy(desc(retainerInvoices.createdAt));
+export async function listRetainerInvoices(db: AppDatabase, actor: RequestActor) {
+  const scopeCond = buildBranchScopeCondition(retainerInvoices.branchId, actor, undefined, true);
+  if (scopeCond === "EMPTY") return [];
+
+  const list = await db
+    .select()
+    .from(retainerInvoices)
+    .where(scopeCond ?? undefined)
+    .orderBy(desc(retainerInvoices.createdAt));
   return list.map((r) => ({
     ...r,
     fxRate: num(r.fxRate),

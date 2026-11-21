@@ -1,5 +1,8 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { env } from "../config.ts";
+import { createModuleLogger } from "../logging/logger.ts";
+
+const log = createModuleLogger("email");
 
 export interface SendEmailInput {
   to: string | string[];
@@ -67,7 +70,7 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
     });
     return { sent: true };
   } catch (err) {
-    console.warn("[ERP Email] Failed to send email:", err instanceof Error ? err.message : err);
+    log.warn({ err }, "Failed to send SMTP email");
     return { sent: false, skippedReason: "smtp_error" };
   }
 }

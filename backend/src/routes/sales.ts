@@ -129,7 +129,19 @@ export async function salesRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------------- Sales Invoices ----------------
   app.get("/api/sales-invoices", { preHandler: requirePermission("sales", "view") }, async (req) => {
-    return { invoices: await listSalesInvoices(getDb(), req.authUser!) };
+    const query = req.query as {
+      page?: string;
+      pageSize?: string;
+      status?: string;
+      customerId?: string;
+      branchId?: string;
+      fromDate?: string;
+      toDate?: string;
+      q?: string;
+      search?: string;
+    };
+    const { items, pageInfo } = await listSalesInvoices(getDb(), req.authUser!, query);
+    return { invoices: items, items, pageInfo };
   });
 
   app.post("/api/sales-invoices", { preHandler: requirePermission("sales", "create") }, async (req, reply) => {
@@ -157,8 +169,8 @@ export async function salesRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---------------- Received Payments ----------------
-  app.get("/api/received-payments", { preHandler: requirePermission("sales", "view") }, async () => {
-    return { payments: await listReceivedPayments(getDb()) };
+  app.get("/api/received-payments", { preHandler: requirePermission("sales", "view") }, async (req) => {
+    return { payments: await listReceivedPayments(getDb(), req.authUser!) };
   });
 
   app.post("/api/received-payments", { preHandler: requirePermission("sales", "create") }, async (req, reply) => {
@@ -197,8 +209,8 @@ export async function salesRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---------------- Retainer Invoices ----------------
-  app.get("/api/retainer-invoices", { preHandler: requirePermission("sales", "view") }, async () => {
-    return { retainers: await listRetainerInvoices(getDb()) };
+  app.get("/api/retainer-invoices", { preHandler: requirePermission("sales", "view") }, async (req) => {
+    return { retainers: await listRetainerInvoices(getDb(), req.authUser!) };
   });
 
   app.post("/api/retainer-invoices", { preHandler: requirePermission("sales", "create") }, async (req, reply) => {

@@ -11,7 +11,7 @@ import {
   type RolePermissionMatrix,
 } from "@erp/shared";
 import * as schema from "../../drizzle/schema.ts";
-import { rolePermissions, branches, companySettings, taxCodes, documentSequences, taxonomyItems } from "../../drizzle/schema.ts";
+import { rolePermissions, branches, companySettings, customers, taxCodes, documentSequences, taxonomyItems } from "../../drizzle/schema.ts";
 import { ensureAccountingDefaults } from "../services/gl.service.ts";
 import { ensureApprovalDefaults } from "../services/approvals.service.ts";
 
@@ -27,26 +27,23 @@ export type DbOrTx =
  * and default role permission rows exist inside PostgreSQL. Safe to call repeatedly.
  */
 export async function ensureSeededDefaults(tx: DbOrTx): Promise<string> {
-  // Seed role permissions if missing
-  const existingPerms = await tx.select({ id: rolePermissions.id }).from(rolePermissions).limit(1);
-  if (existingPerms.length === 0) {
-    const rows: Array<typeof rolePermissions.$inferInsert> = [];
-    for (const role of ["admin", "manager", "user"] as const) {
-      for (const moduleName of PERMISSION_MODULES) {
-        const perm = DEFAULT_PERMISSION_MATRIX[role][moduleName];
-        rows.push({
-          role,
-          module: moduleName,
-          canView: perm.view,
-          canCreate: perm.create,
-          canEdit: perm.edit,
-          canDelete: perm.delete,
-          canApprove: perm.approve,
-        });
-      }
+  // Seed any missing role permissions idempotently (safe on existing databases when new modules are added)
+  const permRows: Array<typeof rolePermissions.$inferInsert> = [];
+  for (const role of ["admin", "manager", "user"] as const) {
+    for (const moduleName of PERMISSION_MODULES) {
+      const perm = DEFAULT_PERMISSION_MATRIX[role][moduleName];
+      permRows.push({
+        role,
+        module: moduleName,
+        canView: perm.view,
+        canCreate: perm.create,
+        canEdit: perm.edit,
+        canDelete: perm.delete,
+        canApprove: perm.approve,
+      });
     }
-    await tx.insert(rolePermissions).values(rows).onConflictDoNothing();
   }
+  await tx.insert(rolePermissions).values(permRows).onConflictDoNothing();
 
   // Ensure default HQ branch exists
   let defaultBranchId: string;
@@ -127,6 +124,8 @@ export async function ensureSeededDefaults(tx: DbOrTx): Promise<string> {
     { docType: "JE", prefix: "JE-", padding: 4 },
     { docType: "BOM", prefix: "BOM-", padding: 4 },
     { docType: "MFG", prefix: "MO-", padding: 4 },
+    { docType: "SHIFT", prefix: "SHF-", padding: 4 },
+    { docType: "POS", prefix: "POS-", padding: 5 },
   ];
 
   await tx
@@ -156,13 +155,37 @@ export async function ensureSeededDefaults(tx: DbOrTx): Promise<string> {
     ]);
   }
 
+  // Ensure default Walk-in customer exists for POS rapid checkout
+  await tx
+    .insert(customers)
+    .values({
+      code: "WALK-IN",
+      name: "Walk-in Customer",
+      currency: "USD",
+      paymentTermsDays: 0,
+      isWalkIn: true,
+      isActive: true,
+    })
+    .onConflictDoNothing();
+
   await ensureAccountingDefaults(tx);
   await ensureApprovalDefaults(tx);
 
   return defaultBranchId;
 }
 
-export async function loadPermissionMatrix(tx: DbOrTx): Promise<RolePermissionMatrix> {
+const PERMISSION_CACHE_TTL_MS = 30_000;
+let cachedPermissionMatrix: { expiresAt: number; matrix: RolePermissionMatrix } | null = null;
+
+export function invalidatePermissionMatrixCache(): void {
+  cachedPermissionMatrix = null;
+}
+
+export async function loadPermissionMatrix(tx: DbOrTx, opts?: { bypassCache?: boolean }): Promise<RolePermissionMatrix> {
+  if (!opts?.bypassCache && cachedPermissionMatrix && cachedPermissionMatrix.expiresAt > Date.now()) {
+    return structuredClone(cachedPermissionMatrix.matrix);
+  }
+
   const rows = await tx.select().from(rolePermissions);
   const matrix: RolePermissionMatrix = {
     admin: structuredClone(DEFAULT_PERMISSION_MATRIX.admin),
@@ -182,5 +205,9 @@ export async function loadPermissionMatrix(tx: DbOrTx): Promise<RolePermissionMa
       };
     }
   }
+  cachedPermissionMatrix = {
+    expiresAt: Date.now() + PERMISSION_CACHE_TTL_MS,
+    matrix: structuredClone(matrix),
+  };
   return matrix;
 }

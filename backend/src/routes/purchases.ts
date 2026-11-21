@@ -139,8 +139,8 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---------------- Payments Made ----------------
-  app.get("/api/payments-made", { preHandler: requirePermission("purchases", "view") }, async () => {
-    return { payments: await listPaymentsMade(getDb()) };
+  app.get("/api/payments-made", { preHandler: requirePermission("purchases", "view") }, async (req) => {
+    return { payments: await listPaymentsMade(getDb(), req.authUser!) };
   });
 
   app.post("/api/payments-made", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {

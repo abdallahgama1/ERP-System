@@ -65,6 +65,7 @@
   },
   "nav": {
     "dashboard": "لوحة التحكم",
+    "pos": "نقطة البيع (الكاشير)",
     "products": "المنتجات",
     "branches": "الفروع",
     "sessions": "الجلسات",
@@ -1397,5 +1398,25 @@
       "required": "المطلوب",
       "issuedQty": "المصروف"
     }
+  },
+  "pos": {
+    "welcomeTitle": "شاشة نقطة البيع (الكاشير)",
+    "selectTerminal": "اختر جهاز الكاشير...",
+    "newRegister": "جهاز جديد",
+    "online": "متصل",
+    "offline": "غير متصل",
+    "openShift": "فتح وردية",
+    "closeShift": "إغلاق ومطابقة",
+    "charge": "تحصيل",
+    "collectPayment": "تحصيل الدفع",
+    "completeSale": "إتمام البيع",
+    "changeDue": "الباقي للعميل",
+    "terminalLocked": "الجهاز مقفل",
+    "switchCashier": "تبديل الكاشير",
+    "unlock": "فتح القفل",
+    "lock": "قفل",
+    "printReceipt": "طباعة الإيصال",
+    "newSale": "عملية بيع جديدة",
+    "syncPending": "مزامنة"
   }
 }

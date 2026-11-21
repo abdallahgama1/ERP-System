@@ -5,15 +5,29 @@ import { getSerialTrace, listLots, listSerials } from "../services/lots-serials.
 
 export async function trackingRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/tracking/lots", { preHandler: requirePermission("inventory", "view") }, async (req) => {
-    const query = req.query as { branchId?: string; productId?: string; includeZero?: string };
-    const lots = await listLots(getDb(), req.authUser!, query);
-    return { lots };
+    const query = req.query as {
+      branchId?: string;
+      productId?: string;
+      includeZero?: string;
+      page?: string;
+      pageSize?: string;
+    };
+    const { items, pageInfo } = await listLots(getDb(), req.authUser!, query);
+    return { lots: items, items, pageInfo };
   });
 
   app.get("/api/tracking/serials", { preHandler: requirePermission("inventory", "view") }, async (req) => {
-    const query = req.query as { branchId?: string; productId?: string; status?: string; search?: string };
-    const serials = await listSerials(getDb(), req.authUser!, query);
-    return { serials };
+    const query = req.query as {
+      branchId?: string;
+      productId?: string;
+      status?: string;
+      search?: string;
+      q?: string;
+      page?: string;
+      pageSize?: string;
+    };
+    const { items, pageInfo } = await listSerials(getDb(), req.authUser!, query);
+    return { serials: items, items, pageInfo };
   });
 
   app.get("/api/tracking/serials/:id/trace", { preHandler: requirePermission("inventory", "view") }, async (req) => {

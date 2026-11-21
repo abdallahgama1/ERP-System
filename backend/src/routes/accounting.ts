@@ -80,10 +80,19 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------------- Journal Entries ----------------
   app.get("/api/accounting/journal-entries", { preHandler: requirePermission("accounting", "view") }, async (req) => {
-    const query = req.query as { branchId?: string; fromDate?: string; toDate?: string };
+    const query = req.query as {
+      branchId?: string;
+      fromDate?: string;
+      toDate?: string;
+      search?: string;
+      q?: string;
+      status?: string;
+      page?: string;
+      pageSize?: string;
+    };
     if (query.branchId) assertBranchAccess(req.authUser!, query.branchId);
-    const entries = await listJournalEntries(getDb(), req.authUser!, query);
-    return { entries };
+    const { items, pageInfo } = await listJournalEntries(getDb(), req.authUser!, query);
+    return { entries: items, items, pageInfo };
   });
 
   app.post("/api/accounting/journal-entries", { preHandler: requirePermission("accounting", "create") }, async (req, reply) => {
@@ -155,10 +164,16 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/accounting/reports/ledger/:accountId", { preHandler: requirePermission("accounting", "view") }, async (req) => {
     const accountId = (req.params as { accountId: string }).accountId;
-    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string };
+    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string; cursor?: string; limit?: string };
     if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
-    const entries = await getAccountLedger(getDb(), req.authUser!, accountId, q);
-    return { entries };
+    const parsedLimit = q.limit ? Number(q.limit) : undefined;
+    return getAccountLedger(getDb(), req.authUser!, accountId, {
+      fromDate: q.fromDate,
+      toDate: q.toDate,
+      branchId: q.branchId,
+      cursor: q.cursor,
+      limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+    });
   });
 
   // ---------------- Tax Codes ----------------

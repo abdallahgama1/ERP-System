@@ -9,6 +9,28 @@ declare module "fastify" {
   interface FastifyRequest {
     authUser: AuthUser | null;
     authSessionId: string | null;
+    terminalSessionOwnerId: string | null;
+    posTerminalId: string | null;
+    isTerminalLocked: boolean;
+  }
+}
+
+const LOCKED_TERMINAL_EXEMPT_PREFIXES = [
+  "/api/pos/terminal/pin-switch",
+  "/api/pos/terminal/lock",
+  "/api/pos/sync",
+  "/api/auth/logout",
+  "/api/auth/me",
+];
+
+function isLockedTerminalExempt(req: FastifyRequest): boolean {
+  const path = req.url.split("?")[0] ?? "";
+  return LOCKED_TERMINAL_EXEMPT_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
+function assertTerminalUnlocked(req: FastifyRequest): void {
+  if (req.isTerminalLocked && !isLockedTerminalExempt(req)) {
+    throw new AppError(423, "POS terminal is locked. Enter cashier PIN to unlock.", "TERMINAL_LOCKED");
   }
 }
 
@@ -17,15 +39,24 @@ export async function attachAuthHook(req: FastifyRequest): Promise<void> {
   if (!token) {
     req.authUser = null;
     req.authSessionId = null;
+    req.terminalSessionOwnerId = null;
+    req.posTerminalId = null;
+    req.isTerminalLocked = false;
     return;
   }
   try {
     const resolved = await getAuthenticatedSession(token);
     req.authUser = resolved?.user ?? null;
     req.authSessionId = resolved?.sessionId ?? null;
+    req.terminalSessionOwnerId = resolved?.terminalSessionOwnerId ?? null;
+    req.posTerminalId = resolved?.posTerminalId ?? null;
+    req.isTerminalLocked = resolved?.isTerminalLocked ?? false;
   } catch {
     req.authUser = null;
     req.authSessionId = null;
+    req.terminalSessionOwnerId = null;
+    req.posTerminalId = null;
+    req.isTerminalLocked = false;
   }
 }
 
@@ -33,6 +64,7 @@ export async function requireAuth(req: FastifyRequest, _reply: FastifyReply): Pr
   if (!req.authUser) {
     throw new AppError(401, "Authentication required", "UNAUTHORIZED");
   }
+  assertTerminalUnlocked(req);
 }
 
 export function requireRole(...allowedRoles: AppRole[]) {
@@ -40,6 +72,7 @@ export function requireRole(...allowedRoles: AppRole[]) {
     if (!req.authUser) {
       throw new AppError(401, "Authentication required", "UNAUTHORIZED");
     }
+    assertTerminalUnlocked(req);
     if (!allowedRoles.includes(req.authUser.role)) {
       throw new AppError(403, "Insufficient role privileges", "FORBIDDEN");
     }
@@ -51,6 +84,7 @@ export function requirePermission(module: PermissionModule, action: PermissionAc
     if (!req.authUser) {
       throw new AppError(401, "Authentication required", "UNAUTHORIZED");
     }
+    assertTerminalUnlocked(req);
     if (req.authUser.role === "admin") {
       return;
     }

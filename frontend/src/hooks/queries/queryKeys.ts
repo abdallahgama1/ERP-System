@@ -78,6 +78,14 @@ export const erpQueryKeys = {
     boms: () => ["manufacturing", "boms"] as const,
     workOrders: () => ["manufacturing", "workOrders"] as const,
   },
+
+  pos: {
+    all: ["pos"] as const,
+    terminals: (branchId?: string) => ["pos", "terminals", branchId ?? "all"] as const,
+    catalog: (branchId?: string) => ["pos", "catalog", branchId ?? "default"] as const,
+    activeShift: (terminalId?: string) => ["pos", "activeShift", terminalId ?? "none"] as const,
+    cashiers: (branchId?: string) => ["pos", "cashiers", branchId ?? "all"] as const,
+  },
 };
 
 export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<readonly unknown[]> {
@@ -107,6 +115,8 @@ export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<reado
       return [erpQueryKeys.settings, erpQueryKeys.accounting.taxCodes(), erpQueryKeys.accounting.currencies()];
     case "notifications_updated":
       return [erpQueryKeys.notifications];
+    case "pos_updated":
+      return [erpQueryKeys.pos.all, erpQueryKeys.sales.all, erpQueryKeys.inventory.all];
     default:
       return [];
   }

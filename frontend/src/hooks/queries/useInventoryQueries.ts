@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import type { CursorPageInfo } from "@erp/shared";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiRequest } from "@/lib/api-client";
 import { erpQueryKeys } from "./queryKeys";
@@ -151,6 +152,52 @@ export function useMovementsQuery(branchId?: string, productId?: string) {
   return useQuery({
     queryKey: erpQueryKeys.inventory.movements(branchId, productId),
     queryFn: () => apiRequest<{ movements: ApiMovementRow[] }>(`/api/movements${qs ? `?${qs}` : ""}`),
+    enabled: Boolean(user),
+  });
+}
+
+export interface MovementsCursorFilters {
+  branchId?: string;
+  productId?: string;
+  movementType?: string;
+  q?: string;
+  limit?: number;
+}
+
+export function useMovementsCursorQuery(filters: MovementsCursorFilters = {}) {
+  const { user } = useAuth();
+  const limit = filters.limit ?? 50;
+
+  return useInfiniteQuery({
+    queryKey: [
+      "inventory",
+      "movements",
+      "cursor",
+      {
+        branchId: filters.branchId ?? "all",
+        productId: filters.productId ?? "all",
+        movementType: filters.movementType ?? "all",
+        q: filters.q?.trim() ?? "",
+        limit,
+      },
+    ],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      if (pageParam) params.set("cursor", pageParam);
+      if (filters.branchId && filters.branchId !== "all") params.set("branchId", filters.branchId);
+      if (filters.productId) params.set("productId", filters.productId);
+      if (filters.movementType && filters.movementType !== "all") {
+        params.set("movementType", filters.movementType);
+      }
+      if (filters.q?.trim()) params.set("q", filters.q.trim());
+      return apiRequest<{ movements: ApiMovementRow[]; items: ApiMovementRow[]; pageInfo: CursorPageInfo }>(
+        `/api/movements?${params.toString()}`
+      );
+    },
+    getNextPageParam: (lastPage) =>
+      lastPage.pageInfo?.hasMore ? (lastPage.pageInfo.nextCursor ?? undefined) : undefined,
     enabled: Boolean(user),
   });
 }

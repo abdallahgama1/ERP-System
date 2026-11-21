@@ -46,9 +46,11 @@ const updatePreferencesSchema = z.object({
 export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/settings/company", { preHandler: requireAuth }, async () => {
     const db = getDb();
-    await ensureSeededDefaults(db);
-
-    const [company] = await db.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
+    let [company] = await db.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
+    if (!company) {
+      await ensureSeededDefaults(db);
+      [company] = await db.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
+    }
     const taxes = await db.select().from(taxCodes).where(eq(taxCodes.isActive, true));
 
     return {
@@ -67,8 +69,11 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
 
     const updated = await db.transaction(async (tx) => {
-      await ensureSeededDefaults(tx);
-      const [current] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
+      let [current] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
+      if (!current) {
+        await ensureSeededDefaults(tx);
+        [current] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
+      }
 
       if (parsed.data.defaultBranchId) {
         const [branchRow] = await tx

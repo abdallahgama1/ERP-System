@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,7 +30,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { Warehouse, Plus, Search, Edit, Trash2, Building2, Package, AlertCircle, History, Upload, Download, ArrowLeft, MapPin, Phone } from "lucide-react";
-import * as XLSX from "xlsx";
+import { exportJsonToExcel } from "@/lib/export/excel";
 import { BranchProduct } from "@/types";
 import { useToast } from "@/hooks/use-toast";
 import { useInventory } from "@/contexts/InventoryContext";
@@ -38,8 +38,9 @@ import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import MovementHistoryTable from "@/components/inventory/MovementHistoryTable";
-import BulkImportDialog from "@/components/import/BulkImportDialog";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+
+const BulkImportDialog = lazy(() => import("@/components/import/BulkImportDialog"));
 
 const BranchDetail = () => {
   const { branchId } = useParams<{ branchId: string }>();
@@ -243,7 +244,7 @@ const BranchDetail = () => {
     return !isAlreadyInBranch && available > 0;
   });
 
-  const handleExportBranchInventory = () => {
+  const handleExportBranchInventory = async () => {
     const exportData = filteredBranchProducts.map(item => ({
       SKU: item.product_sku,
       "Product Name": item.product_name,
@@ -254,10 +255,11 @@ const BranchDetail = () => {
       "Total Value": item.quantity * item.costPrice,
     }));
 
-    const ws = XLSX.utils.json_to_sheet(exportData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Branch Inventory");
-    XLSX.writeFile(wb, `${selectedBranch?.branch_name || "branch"}_inventory_${new Date().toISOString().split('T')[0]}.xlsx`);
+    await exportJsonToExcel({
+      rows: exportData,
+      sheetName: "Branch Inventory",
+      fileName: `${selectedBranch?.branch_name || "branch"}_inventory_${new Date().toISOString().split('T')[0]}.xlsx`,
+    });
     
     toast({
       title: t('bulkImport.exportSuccess'),
@@ -604,33 +606,37 @@ const BranchDetail = () => {
       </Tabs>
 
       {/* Bulk Import Dialog */}
-      <BulkImportDialog
-        open={isImportDialogOpen}
-        onOpenChange={setIsImportDialogOpen}
-        title={t('bulkImport.importBranchAssignment')}
-        description={t('bulkImport.branchAssignmentDescription')}
-        columns={[
-          { key: "sku", label: "SKU", required: true },
-          { key: "branch_name", label: "Branch Name", required: true },
-          { key: "quantity", label: "Quantity", required: true },
-        ]}
-        templateFileName="branch_assignment_import_template.xlsx"
-        onConfirmImport={async (data) => {
-          for (const row of data) {
-            const product = products.find(p => p.product_sku === String(row.sku));
-            const branch = branches.find(b => b.branch_name === String(row.branch_name));
-            if (product && branch) {
-              await assignToBranch(
-                product.productId,
-                branch.branchId,
-                Number(row.quantity) || 0,
-                product.sellingPrice,
-                product.costPrice
-              );
-            }
-          }
-        }}
-      />
+      {isImportDialogOpen && (
+        <Suspense fallback={null}>
+          <BulkImportDialog
+            open={isImportDialogOpen}
+            onOpenChange={setIsImportDialogOpen}
+            title={t('bulkImport.importBranchAssignment')}
+            description={t('bulkImport.branchAssignmentDescription')}
+            columns={[
+              { key: "sku", label: "SKU", required: true },
+              { key: "branch_name", label: "Branch Name", required: true },
+              { key: "quantity", label: "Quantity", required: true },
+            ]}
+            templateFileName="branch_assignment_import_template.xlsx"
+            onConfirmImport={async (data) => {
+              for (const row of data) {
+                const product = products.find(p => p.product_sku === String(row.sku));
+                const branch = branches.find(b => b.branch_name === String(row.branch_name));
+                if (product && branch) {
+                  await assignToBranch(
+                    product.productId,
+                    branch.branchId,
+                    Number(row.quantity) || 0,
+                    product.sellingPrice,
+                    product.costPrice
+                  );
+                }
+              }
+            }}
+          />
+        </Suspense>
+      )}
 
       <ConfirmDeleteDialog
         open={deleteProductId !== null}

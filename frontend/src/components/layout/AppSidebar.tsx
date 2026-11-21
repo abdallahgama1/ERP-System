@@ -39,7 +39,8 @@ import {
   Layers,
   Barcode,
   Boxes,
-  Factory
+  Factory,
+  MonitorSmartphone
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
@@ -64,6 +65,7 @@ import {
 
 const mainItems: Array<{ titleKey: string; url: string; icon: typeof LayoutDashboard; module?: PermissionModule }> = [
   { titleKey: "nav.dashboard", url: "/", icon: LayoutDashboard },
+  { titleKey: "nav.pos", url: "/pos", icon: MonitorSmartphone, module: "pos" },
   { titleKey: "nav.products", url: "/products", icon: Package, module: "products" },
   { titleKey: "nav.branches", url: "/branches", icon: Building2, module: "branches" },
   { titleKey: "nav.sessions", url: "/sessions", icon: ClipboardList, module: "sessions" },

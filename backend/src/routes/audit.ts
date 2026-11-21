@@ -1,10 +1,12 @@
+import { encodeCursor, type SortDirection } from "@erp/shared";
 import type { FastifyInstance } from "fastify";
-import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, isNull, lte, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { auditLogs } from "../../drizzle/schema.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
-import { requireAuth, requirePermission } from "../middleware/auth.ts";
+import { assertBranchAccess, requireAuth, requirePermission } from "../middleware/auth.ts";
+import { buildKeysetCondition, parseCursorOrThrow } from "../services/query-helpers.ts";
 
 const createAuditSchema = z.object({
   module: z.string().trim().min(1).max(60),
@@ -17,46 +19,93 @@ const createAuditSchema = z.object({
 
 export async function auditRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/audit-logs", { preHandler: requirePermission("reports", "view") }, async (req) => {
-    const query = req.query as { limit?: string; offset?: string; module?: string };
-    const limit = Math.min(500, Math.max(1, Number.parseInt(query.limit ?? "250", 10) || 250));
-    const offset = Math.max(0, Number.parseInt(query.offset ?? "0", 10) || 0);
+    const query = req.query as {
+      cursor?: string;
+      limit?: string;
+      offset?: string;
+      sortDir?: string;
+      module?: string;
+      branchId?: string;
+      userId?: string;
+      action?: string;
+      fromDate?: string;
+      toDate?: string;
+      q?: string;
+    };
+    const limit = Math.min(200, Math.max(1, Number.parseInt(query.limit ?? "50", 10) || 50));
+    const offset = query.cursor ? 0 : Math.max(0, Number.parseInt(query.offset ?? "0", 10) || 0);
+    const sortDir: SortDirection = query.sortDir === "asc" ? "asc" : "desc";
+    const cursor = parseCursorOrThrow(query.cursor);
     const actor = req.authUser!;
     const db = getDb();
 
-    const conditions = [];
+    const conditions: SQL[] = [];
     if (query.module && query.module !== "all") {
       conditions.push(eq(auditLogs.entityType, query.module));
     }
-
-    if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
+    if (query.branchId) {
+      assertBranchAccess(actor, query.branchId);
+      conditions.push(eq(auditLogs.branchId, query.branchId));
+    } else if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
       if (actor.branchIds.length === 0) {
         conditions.push(isNull(auditLogs.branchId));
       } else {
-        conditions.push(or(isNull(auditLogs.branchId), inArray(auditLogs.branchId, actor.branchIds)));
+        conditions.push(or(isNull(auditLogs.branchId), inArray(auditLogs.branchId, actor.branchIds))!);
       }
     }
+    if (query.userId) conditions.push(eq(auditLogs.userId, query.userId));
+    if (query.action) conditions.push(ilike(auditLogs.action, `%${query.action.trim()}%`));
+    if (query.fromDate) conditions.push(gte(auditLogs.createdAt, new Date(query.fromDate)));
+    if (query.toDate) conditions.push(lte(auditLogs.createdAt, new Date(query.toDate)));
+    if (query.q?.trim()) {
+      const pattern = `%${query.q.trim()}%`;
+      conditions.push(
+        or(
+          ilike(auditLogs.action, pattern),
+          ilike(auditLogs.entityLabel, pattern),
+          ilike(auditLogs.userName, pattern),
+          ilike(auditLogs.entityType, pattern)
+        )!
+      );
+    }
+    if (cursor) {
+      conditions.push(buildKeysetCondition(auditLogs.createdAt, auditLogs.id, cursor, sortDir));
+    }
 
-    const rows = await db
+    const orderDir = sortDir === "asc" ? asc : desc;
+    const rawRows = await db
       .select()
       .from(auditLogs)
       .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(auditLogs.createdAt))
-      .limit(limit)
+      .orderBy(orderDir(auditLogs.createdAt), orderDir(auditLogs.id))
+      .limit(limit + 1)
       .offset(offset);
 
+    const hasMore = rawRows.length > limit;
+    const rows = hasMore ? rawRows.slice(0, limit) : rawRows;
+    const last = rows[rows.length - 1];
+
+    const entries = rows.map((r) => ({
+      id: r.id,
+      at: r.createdAt.toISOString(),
+      actorUserId: r.userId ?? undefined,
+      module: r.entityType,
+      action: r.action,
+      entity: r.entityLabel ?? undefined,
+      entityId: r.entityId,
+      user: r.userName,
+      branchId: r.branchId ?? undefined,
+      meta: r.details,
+    }));
+
     return {
-      entries: rows.map((r) => ({
-        id: r.id,
-        at: r.createdAt.toISOString(),
-        actorUserId: r.userId ?? undefined,
-        module: r.entityType,
-        action: r.action,
-        entity: r.entityLabel ?? undefined,
-        entityId: r.entityId,
-        user: r.userName,
-        branchId: r.branchId ?? undefined,
-        meta: r.details,
-      })),
+      entries,
+      items: entries,
+      pageInfo: {
+        nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null,
+        hasMore,
+        limit,
+      },
     };
   });
 

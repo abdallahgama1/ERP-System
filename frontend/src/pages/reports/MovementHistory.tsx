@@ -1,29 +1,62 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeftRight, Search } from "lucide-react";
+import { ArrowLeftRight, Loader2, Search } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import MovementHistoryTable from "@/components/inventory/MovementHistoryTable";
+import { useBranch } from "@/contexts/BranchContext";
 import { useInventory } from "@/contexts/InventoryContext";
+import { useMovementsCursorQuery } from "@/hooks/queries/useInventoryQueries";
+import type { StockMovement } from "@/types";
 
 export default function MovementHistory() {
   const { t } = useTranslation();
-  const { movements } = useInventory();
+  const { activeBranchId } = useBranch();
+  const { products, branches } = useInventory();
   const [search, setSearch] = useState("");
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return movements;
-    return movements.filter(
-      (m) =>
-        m.product_name.toLowerCase().includes(q) ||
-        m.product_sku.toLowerCase().includes(q) ||
-        (m.branchName || "").toLowerCase().includes(q) ||
-        (m.reference || "").toLowerCase().includes(q),
-    );
-  }, [movements, search]);
+  const {
+    data,
+    isLoading,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+  } = useMovementsCursorQuery({
+    branchId: activeBranchId,
+    q: search,
+    limit: 50,
+  });
+
+  const productMap = useMemo(() => new Map(products.map((p) => [p.productId, p])), [products]);
+  const branchMap = useMemo(() => new Map(branches.map((b) => [b.branchId, b])), [branches]);
+
+  const movements = useMemo<StockMovement[]>(
+    () =>
+      (data?.pages ?? [])
+        .flatMap((p) => p.movements ?? [])
+        .map((m) => {
+          const prod = productMap.get(m.productId);
+          const br = branchMap.get(m.branchId);
+          return {
+            id: m.id,
+            productId: m.productId,
+            branchId: m.branchId,
+            product_name: prod?.product_name ?? "",
+            product_sku: prod?.product_sku ?? "",
+            branchName: br?.branch_name,
+            type: m.type,
+            quantity: m.qtyDelta,
+            unitCost: m.unitCost,
+            reference: m.referenceNumber || undefined,
+            notes: m.notes || undefined,
+            createdAt: m.createdAt,
+            balanceAfter: m.balanceAfter,
+          };
+        }),
+    [branchMap, data, productMap]
+  );
 
   return (
     <div className="p-6 space-y-6">
@@ -45,7 +78,7 @@ export default function MovementHistory() {
       <Card>
         <CardHeader>
           <CardTitle>{t("movements.title")}</CardTitle>
-          <CardDescription>{filtered.length} movements</CardDescription>
+          <CardDescription>{movements.length} movements loaded</CardDescription>
           <div className="relative mt-3">
             <Search className="absolute start-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
@@ -57,7 +90,23 @@ export default function MovementHistory() {
           </div>
         </CardHeader>
         <CardContent>
-          <MovementHistoryTable movements={filtered} showProduct showBranch />
+          {isLoading ? (
+            <p className="py-8 text-center text-muted-foreground">{t("common.loading")}</p>
+          ) : (
+            <MovementHistoryTable movements={movements} showProduct showBranch />
+          )}
+          {hasNextPage && (
+            <div className="flex justify-center pt-4">
+              <Button
+                variant="outline"
+                onClick={() => void fetchNextPage()}
+                disabled={isFetchingNextPage}
+              >
+                {isFetchingNextPage && <Loader2 className="me-2 h-4 w-4 animate-spin" />}
+                {t("common.loadMore", "Load more")}
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>

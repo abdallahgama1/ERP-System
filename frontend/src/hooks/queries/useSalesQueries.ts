@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import type { OffsetPageInfo } from "@erp/shared";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiRequest } from "@/lib/api-client";
 import { erpQueryKeys } from "./queryKeys";
@@ -159,6 +160,46 @@ export function useSalesInvoicesQuery() {
   return useQuery({
     queryKey: erpQueryKeys.sales.invoices(),
     queryFn: () => apiRequest<{ invoices: ApiInvoice[] }>("/api/sales-invoices"),
+    enabled: Boolean(user),
+  });
+}
+
+export interface SalesInvoicesPageFilters {
+  page?: number;
+  pageSize?: number;
+  status?: string;
+  branchId?: string;
+  q?: string;
+}
+
+export function useSalesInvoicesPageQuery(filters: SalesInvoicesPageFilters = {}) {
+  const { user } = useAuth();
+  const page = filters.page ?? 1;
+  const pageSize = filters.pageSize ?? 25;
+  const params = new URLSearchParams();
+  params.set("page", String(page));
+  params.set("pageSize", String(pageSize));
+  if (filters.status && filters.status !== "all") params.set("status", filters.status);
+  if (filters.branchId && filters.branchId !== "all") params.set("branchId", filters.branchId);
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+
+  return useQuery({
+    queryKey: [
+      ...erpQueryKeys.sales.invoices(),
+      "page",
+      {
+        page,
+        pageSize,
+        status: filters.status ?? "all",
+        branchId: filters.branchId ?? "all",
+        q: filters.q?.trim() ?? "",
+      },
+    ],
+    queryFn: () =>
+      apiRequest<{ invoices: ApiInvoice[]; items: ApiInvoice[]; pageInfo: OffsetPageInfo }>(
+        `/api/sales-invoices?${params.toString()}`
+      ),
+    placeholderData: keepPreviousData,
     enabled: Boolean(user),
   });
 }

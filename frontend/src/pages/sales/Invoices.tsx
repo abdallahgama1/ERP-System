@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Receipt, Plus, Send, Ban, Trash2, Wallet, Download, QrCode } from "lucide-react";
-import QRCode from "qrcode";
+import { Receipt, Plus, Send, Ban, Trash2, Wallet, Download, QrCode, Search } from "lucide-react";
 import { downloadInvoicePdf } from "@/lib/pdf/invoicePdf";
+import { TablePagination } from "@/components/TablePagination";
+import { useSalesInvoicesPageQuery } from "@/hooks/queries/useSalesQueries";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -84,6 +85,67 @@ export default function Invoices() {
   const [pendingDelete, setPendingDelete] = useState<Invoice | null>(null);
   const [payFor, setPayFor] = useState<Invoice | null>(null);
   const [payAmount, setPayAmount] = useState("");
+  const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const { data: invoicesPage, isLoading: isInvoicesLoading } = useSalesInvoicesPageQuery({
+    page,
+    pageSize: 25,
+    status: statusFilter,
+    branchId: activeBranchId,
+    q: searchQuery,
+  });
+
+  const customerMap = useMemo(() => new Map(customers.map((c) => [c.id, c])), [customers]);
+  const branchMap = useMemo(() => new Map(branches.map((b) => [b.branchId, b])), [branches]);
+  const soNumberMap = useMemo(() => new Map(salesOrders.map((o) => [o.id, o.soNumber])), [salesOrders]);
+
+  const paginatedInvoices = useMemo<Invoice[]>(
+    () =>
+      (invoicesPage?.invoices ?? []).map((inv) => ({
+        id: inv.id,
+        invoiceNumber: inv.invoiceNumber,
+        customerId: inv.customerId,
+        customerName: customerMap.get(inv.customerId)?.displayName ?? "",
+        branchId: inv.branchId,
+        branchName: branchMap.get(inv.branchId)?.branch_name ?? "",
+        salesOrderId: inv.soId ?? undefined,
+        soNumber: inv.soId ? soNumberMap.get(inv.soId) : undefined,
+        invoiceDate: inv.invoiceDate.slice(0, 10),
+        dueDate: inv.dueDate.slice(0, 10),
+        status: inv.status,
+        subtotal: inv.subtotal,
+        totalTax: inv.taxTotal,
+        grandTotal: inv.totalAmount,
+        amountPaid: inv.paidAmount + inv.creditAppliedAmount + inv.retainerAppliedAmount,
+        creditAppliedAmount: inv.creditAppliedAmount,
+        retainerAppliedAmount: inv.retainerAppliedAmount,
+        icv: inv.icv ?? null,
+        invoiceHash: inv.invoiceHash ?? null,
+        prevInvoiceHash: inv.prevInvoiceHash ?? null,
+        qrTlv: inv.qrTlv ?? null,
+        eInvoiceStatus: inv.eInvoiceStatus,
+        voidReason: inv.voidReason ?? undefined,
+        notes: inv.notes || undefined,
+        createdAt: inv.createdAt,
+        updatedAt: inv.updatedAt,
+        items: (inv.lines ?? []).map((l) => {
+          const p = l.productId ? productMap.get(l.productId) : undefined;
+          return {
+            id: l.id,
+            productId: l.productId ?? "",
+            product_name: p?.product_name ?? l.description ?? "",
+            product_sku: p?.product_sku ?? "",
+            quantity: l.quantity,
+            unitPrice: l.unitPrice,
+            taxPercent: l.taxRate,
+            amount: l.lineTotal,
+          };
+        }),
+      })),
+    [branchMap, customerMap, invoicesPage, productMap, soNumberMap]
+  );
 
   useEffect(() => {
     let active = true;
@@ -91,7 +153,8 @@ export default function Invoices() {
       setDetailQrUrl(null);
       return;
     }
-    void QRCode.toDataURL(detail.qrTlv, { width: 144, margin: 1 })
+    void import("qrcode")
+      .then((QRCode) => QRCode.toDataURL(detail.qrTlv!, { width: 144, margin: 1 }))
       .then((url) => {
         if (active) setDetailQrUrl(url);
       })
@@ -228,9 +291,51 @@ export default function Invoices() {
       </div>
 
       <Card>
-        <CardHeader><CardTitle>{t("nav.sales.invoices")} ({invoices.length})</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <CardTitle>
+              {t("nav.sales.invoices")} ({invoicesPage?.pageInfo?.total ?? invoices.length})
+            </CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative w-56">
+                <Search className="absolute start-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  className="ps-9"
+                  value={searchQuery}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setPage(1);
+                  }}
+                  placeholder={t("common.search")}
+                />
+              </div>
+              <Select
+                value={statusFilter}
+                onValueChange={(v) => {
+                  setStatusFilter(v);
+                  setPage(1);
+                }}
+              >
+                <SelectTrigger className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{t("common.all", "All statuses")}</SelectItem>
+                  <SelectItem value="Draft">Draft</SelectItem>
+                  <SelectItem value="Sent">Sent</SelectItem>
+                  <SelectItem value="Partially Paid">Partially Paid</SelectItem>
+                  <SelectItem value="Paid">Paid</SelectItem>
+                  <SelectItem value="Overdue">Overdue</SelectItem>
+                  <SelectItem value="Cancelled">Cancelled</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent>
-          {invoices.length === 0 ? (
+          {isInvoicesLoading ? (
+            <p className="py-12 text-center text-muted-foreground">{t("common.loading")}</p>
+          ) : paginatedInvoices.length === 0 ? (
             <div className="py-12 text-center space-y-3">
               <Receipt className="h-10 w-10 mx-auto text-muted-foreground" />
               <p className="text-muted-foreground">
@@ -256,7 +361,7 @@ export default function Invoices() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {invoices.map(inv => (
+                {paginatedInvoices.map(inv => (
                   <TableRow key={inv.id} className="cursor-pointer" onClick={() => setDetail(inv)}>
                     <TableCell className="font-medium">{inv.invoiceNumber}</TableCell>
                     <TableCell>{inv.customerName}</TableCell>
@@ -303,6 +408,7 @@ export default function Invoices() {
               </TableBody>
             </Table>
           )}
+          <TablePagination pageInfo={invoicesPage?.pageInfo} onPageChange={setPage} />
         </CardContent>
       </Card>
 

@@ -65,6 +65,7 @@
   },
   "nav": {
     "dashboard": "Dashboard",
+    "pos": "POS Register",
     "products": "Products",
     "branches": "Branches",
     "sessions": "Sessions",
@@ -1403,5 +1404,25 @@
       "required": "Required",
       "issuedQty": "Issued"
     }
+  },
+  "pos": {
+    "welcomeTitle": "POS Cashier Register",
+    "selectTerminal": "Select register...",
+    "newRegister": "Register",
+    "online": "Online",
+    "offline": "Offline",
+    "openShift": "Open Shift",
+    "closeShift": "Close & Reconcile",
+    "charge": "Charge",
+    "collectPayment": "Collect Payment",
+    "completeSale": "Complete Sale",
+    "changeDue": "Change Due",
+    "terminalLocked": "Register Locked",
+    "switchCashier": "Switch Cashier",
+    "unlock": "Unlock",
+    "lock": "Lock",
+    "printReceipt": "Print Receipt",
+    "newSale": "New Sale",
+    "syncPending": "Sync"
   }
 }

@@ -1,5 +1,3 @@
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
 import { formatMoney } from "@/lib/money";
 import type { Customer, Invoice, ReceivedPayment, SalesReturn } from "@/types";
 
@@ -73,13 +71,17 @@ export function buildStatementLines(
   });
 }
 
-export function downloadCustomerStatement(
+export async function downloadCustomerStatement(
   customer: Customer,
   invoices: Invoice[],
   payments: ReceivedPayment[],
   returns: SalesReturn[],
   currency = "USD",
 ) {
+  const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+    import("jspdf"),
+    import("jspdf-autotable"),
+  ]);
   const money = (n: number) => formatMoney(n, currency);
   const lines = buildStatementLines(invoices, payments, returns);
   const doc = new jsPDF();

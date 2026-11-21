@@ -1,9 +1,10 @@
-import { roundCurrency } from "@erp/shared";
-import { and, asc, eq, gte, inArray, lte, type SQL } from "drizzle-orm";
+import { encodeCursor, roundCurrency, type CursorPageInfo } from "@erp/shared";
+import { and, asc, eq, gte, inArray, lte, sql, type SQL } from "drizzle-orm";
 import { chartOfAccounts, journalEntries, journalLines } from "../../drizzle/schema.ts";
 import { num } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { ensureAccountingDefaults } from "./gl.service.ts";
+import { buildKeysetCondition, parseCursorOrThrow } from "./query-helpers.ts";
 import type { RequestActor } from "./stock-locks.ts";
 
 export interface ReportFilter {
@@ -11,6 +12,8 @@ export interface ReportFilter {
   toDate?: string;
   asOfDate?: string;
   branchId?: string;
+  cursor?: string;
+  limit?: number;
 }
 
 function buildEntryConditions(actor: RequestActor, filter: ReportFilter): SQL[] {
@@ -28,27 +31,31 @@ function buildEntryConditions(actor: RequestActor, filter: ReportFilter): SQL[] 
   return conds;
 }
 
+/**
+ * Single-pass PostgreSQL GROUP BY aggregation for Trial Balance.
+ */
 export async function getTrialBalance(db: AppDatabase, actor: RequestActor, filter: ReportFilter) {
   await ensureAccountingDefaults(db);
   const accounts = await db.select().from(chartOfAccounts).orderBy(asc(chartOfAccounts.code));
   const conds = buildEntryConditions(actor, filter);
 
-  const lines = await db
+  const grouped = await db
     .select({
       accountId: journalLines.accountId,
-      debitBase: journalLines.debitBase,
-      creditBase: journalLines.creditBase,
+      totalDebit: sql<string>`coalesce(sum(${journalLines.debitBase}), 0)`,
+      totalCredit: sql<string>`coalesce(sum(${journalLines.creditBase}), 0)`,
     })
     .from(journalLines)
     .innerJoin(journalEntries, eq(journalLines.entryId, journalEntries.id))
-    .where(and(...conds));
+    .where(and(...conds))
+    .groupBy(journalLines.accountId);
 
   const totalsByAcct = new Map<string, { debit: number; credit: number }>();
-  for (const l of lines) {
-    const cur = totalsByAcct.get(l.accountId) ?? { debit: 0, credit: 0 };
-    cur.debit = roundCurrency(cur.debit + num(l.debitBase), 4);
-    cur.credit = roundCurrency(cur.credit + num(l.creditBase), 4);
-    totalsByAcct.set(l.accountId, cur);
+  for (const row of grouped) {
+    totalsByAcct.set(row.accountId, {
+      debit: roundCurrency(num(row.totalDebit), 4),
+      credit: roundCurrency(num(row.totalCredit), 4),
+    });
   }
 
   let grandDebit = 0;
@@ -113,9 +120,12 @@ export async function getProfitAndLoss(db: AppDatabase, actor: RequestActor, fil
   };
 }
 
+/**
+ * Single-pass Balance Sheet deriving assets, liabilities, equity, and current-year earnings
+ * from one SQL GROUP BY Trial Balance query instead of scanning journal_lines twice.
+ */
 export async function getBalanceSheet(db: AppDatabase, actor: RequestActor, filter: ReportFilter) {
   const tb = await getTrialBalance(db, actor, { branchId: filter.branchId, asOfDate: filter.asOfDate });
-  const pnl = await getProfitAndLoss(db, actor, { branchId: filter.branchId, toDate: filter.asOfDate });
 
   const assets = tb.rows
     .filter((r) => r.accountType === "asset")
@@ -127,10 +137,23 @@ export async function getBalanceSheet(db: AppDatabase, actor: RequestActor, filt
     .filter((r) => r.accountType === "equity")
     .map((r) => ({ ...r, balance: roundCurrency(r.credit - r.debit, 4) }));
 
+  const totalRevenue = roundCurrency(
+    tb.rows
+      .filter((r) => r.accountType === "revenue")
+      .reduce((s, r) => s + roundCurrency(r.credit - r.debit, 4), 0),
+    4
+  );
+  const totalExpenses = roundCurrency(
+    tb.rows
+      .filter((r) => r.accountType === "expense")
+      .reduce((s, r) => s + roundCurrency(r.debit - r.credit, 4), 0),
+    4
+  );
+
   const totalAssets = roundCurrency(assets.reduce((s, a) => s + a.balance, 0), 4);
   const totalLiabilities = roundCurrency(liabilities.reduce((s, l) => s + l.balance, 0), 4);
   const totalEquityAccounts = roundCurrency(equity.reduce((s, e) => s + e.balance, 0), 4);
-  const currentYearEarnings = pnl.netIncome;
+  const currentYearEarnings = roundCurrency(totalRevenue - totalExpenses, 4);
   const totalEquity = roundCurrency(totalEquityAccounts + currentYearEarnings, 4);
   const totalLiabilitiesAndEquity = roundCurrency(totalLiabilities + totalEquity, 4);
 
@@ -153,7 +176,13 @@ export async function getAccountLedger(
   accountId: string,
   filter: ReportFilter
 ) {
-  const conds = [eq(journalLines.accountId, accountId), ...buildEntryConditions(actor, filter)];
+  const conds: SQL[] = [eq(journalLines.accountId, accountId), ...buildEntryConditions(actor, filter)];
+  const cursor = parseCursorOrThrow(filter.cursor);
+  if (cursor) {
+    conds.push(buildKeysetCondition(journalEntries.entryDate, journalLines.id, cursor, "asc"));
+  }
+  const limit = Math.min(500, Math.max(1, filter.limit ?? 200));
+
   const rows = await db
     .select({
       lineId: journalLines.id,
@@ -170,10 +199,20 @@ export async function getAccountLedger(
     .from(journalLines)
     .innerJoin(journalEntries, eq(journalLines.entryId, journalEntries.id))
     .where(and(...conds))
-    .orderBy(asc(journalEntries.entryDate), asc(journalEntries.createdAt));
+    .orderBy(asc(journalEntries.entryDate), asc(journalLines.id))
+    .limit(limit + 1);
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+  const pageInfo: CursorPageInfo = {
+    nextCursor: hasMore && last ? encodeCursor(last.entryDate, last.lineId) : null,
+    hasMore,
+    limit,
+  };
 
   let runningBalance = 0;
-  return rows.map((r) => {
+  const entries = pageRows.map((r) => {
     const debit = num(r.debitBase);
     const credit = num(r.creditBase);
     runningBalance = roundCurrency(runningBalance + debit - credit, 4);
@@ -185,4 +224,6 @@ export async function getAccountLedger(
       runningBalance,
     };
   });
+
+  return { entries, items: entries, pageInfo };
 }

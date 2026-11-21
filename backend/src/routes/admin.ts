@@ -13,7 +13,7 @@ import {
   type AppRole,
 } from "../../drizzle/schema.ts";
 import { hashPassword } from "../auth/password.ts";
-import { loadPermissionMatrix, PERMISSION_MODULES } from "../auth/permissions.ts";
+import { invalidatePermissionMatrixCache, loadPermissionMatrix, PERMISSION_MODULES } from "../auth/permissions.ts";
 import { generateOpaqueToken, hashToken } from "../auth/sessions.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
@@ -526,6 +526,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       });
     });
 
+    invalidatePermissionMatrixCache();
     eventBroadcaster.broadcast("permissions_updated");
     return { ok: true };
   });

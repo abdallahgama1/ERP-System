@@ -28,11 +28,12 @@ import { useInventory } from "@/contexts/InventoryContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
+import { TablePagination } from "@/components/TablePagination";
 import {
   useAccountingMutations,
   useAccountsQuery,
   useCurrenciesQuery,
-  useJournalEntriesQuery,
+  useJournalEntriesPageQuery,
   type JournalEntryDto,
 } from "@/hooks/queries/useAccountingQueries";
 
@@ -68,12 +69,18 @@ export default function JournalEntries() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
 
-  const { data: entries = [], isLoading } = useJournalEntriesQuery({
+  const { data: journalPage, isLoading } = useJournalEntriesPageQuery({
     branchId: branchFilter,
     fromDate: fromDate || undefined,
     toDate: toDate || undefined,
+    search: search || undefined,
+    page,
+    pageSize: 50,
   });
+  const filteredEntries = journalPage?.entries ?? [];
+  const pageInfo = journalPage?.pageInfo;
   const { data: accounts = [] } = useAccountsQuery();
   const { data: currencyData } = useCurrenciesQuery();
   const { createJournalEntry, reverseJournalEntry } = useAccountingMutations();
@@ -102,18 +109,6 @@ export default function JournalEntries() {
     if (list.length > 0) return list;
     return [{ code: settings.currency || "USD", name: settings.currency || "USD", symbol: settings.currency || "$", decimals: 2, isBase: true, isActive: true }];
   }, [currencyData, settings.currency]);
-
-  const filteredEntries = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter(
-      (e) =>
-        e.entryNumber.toLowerCase().includes(q) ||
-        e.memo.toLowerCase().includes(q) ||
-        e.sourceType.toLowerCase().includes(q) ||
-        (e.referenceNumber ?? "").toLowerCase().includes(q)
-    );
-  }, [entries, search]);
 
   const totals = useMemo(() => {
     let debit = 0;
@@ -234,11 +229,20 @@ export default function JournalEntries() {
               <Input
                 className="ps-9"
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setPage(1);
+                }}
                 placeholder={t("common.search")}
               />
             </div>
-            <Select value={branchFilter} onValueChange={setBranchFilter}>
+            <Select
+              value={branchFilter}
+              onValueChange={(v) => {
+                setBranchFilter(v);
+                setPage(1);
+              }}
+            >
               <SelectTrigger className="w-[200px]">
                 <SelectValue />
               </SelectTrigger>
@@ -255,14 +259,20 @@ export default function JournalEntries() {
               type="date"
               className="w-40"
               value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
+              onChange={(e) => {
+                setFromDate(e.target.value);
+                setPage(1);
+              }}
               aria-label="From date"
             />
             <Input
               type="date"
               className="w-40"
               value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
+              onChange={(e) => {
+                setToDate(e.target.value);
+                setPage(1);
+              }}
               aria-label="To date"
             />
           </div>
@@ -338,6 +348,7 @@ export default function JournalEntries() {
               </TableBody>
             </Table>
           )}
+          <TablePagination pageInfo={pageInfo} onPageChange={setPage} />
         </CardContent>
       </Card>
 

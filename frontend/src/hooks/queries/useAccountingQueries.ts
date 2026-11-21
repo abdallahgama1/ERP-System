@@ -1,10 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AccountTypeShared,
   FiscalPeriodStatusShared,
   GlMappingKey,
   JournalEntryStatusShared,
   NormalBalanceShared,
+  OffsetPageInfo,
 } from "@erp/shared";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
@@ -223,6 +224,38 @@ export function useJournalEntriesQuery(filters?: ReportFilterParams, enabled = t
         `/api/accounting/journal-entries${toQueryString(params)}`
       ),
     select: (data) => data.entries,
+    enabled: Boolean(user) && enabled && can("accounting", "view"),
+  });
+}
+
+export interface JournalEntriesPageParams extends ReportFilterParams {
+  search?: string;
+  status?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export function useJournalEntriesPageQuery(filters?: JournalEntriesPageParams, enabled = true) {
+  const { user } = useAuth();
+  const { can } = usePermissions();
+  const page = filters?.page ?? 1;
+  const pageSize = filters?.pageSize ?? 50;
+  const params = {
+    ...(filters?.branchId && filters.branchId !== "all" ? { branchId: filters.branchId } : {}),
+    ...(filters?.fromDate ? { fromDate: filters.fromDate } : {}),
+    ...(filters?.toDate ? { toDate: filters.toDate } : {}),
+    ...(filters?.search?.trim() ? { search: filters.search.trim() } : {}),
+    ...(filters?.status && filters.status !== "all" ? { status: filters.status } : {}),
+    page: String(page),
+    pageSize: String(pageSize),
+  };
+  return useQuery({
+    queryKey: [...erpQueryKeys.accounting.journals(), "page", params],
+    queryFn: () =>
+      apiRequest<{ entries: JournalEntryDto[]; items: JournalEntryDto[]; pageInfo: OffsetPageInfo }>(
+        `/api/accounting/journal-entries${toQueryString(params)}`
+      ),
+    placeholderData: keepPreviousData,
     enabled: Boolean(user) && enabled && can("accounting", "view"),
   });
 }

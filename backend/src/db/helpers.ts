@@ -1,6 +1,7 @@
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { auditLogs, documentSequences } from "../../drizzle/schema.ts";
 import type { DbOrTx } from "../auth/permissions.ts";
+import { getRequestContext } from "../logging/logger.ts";
 
 export class AppError extends Error {
   public readonly statusCode: number;
@@ -66,20 +67,21 @@ export async function nextDocNumber(
       return `${prefix}${String(1).padStart(4, "0")}`;
     }
 
-    const retry = await tx
-      .select()
-      .from(documentSequences)
-      .where(and(eq(documentSequences.docType, docType), eq(documentSequences.scopeKey, scopeKey)))
-      .limit(1);
-    if (!retry[0]) {
+    const retryRows = await tx.execute<{
+      id: string;
+      prefix: string;
+      next_number: number;
+      padding: number;
+    }>(sql`
+      SELECT id, prefix, next_number, padding
+      FROM document_sequences
+      WHERE doc_type = ${docType} AND scope_key = ${scopeKey}
+      FOR UPDATE
+    `);
+    if (!retryRows[0]) {
       throw new AppError(500, `Failed to allocate document sequence for ${docType}`);
     }
-    seq = {
-      id: retry[0].id,
-      prefix: retry[0].prefix,
-      next_number: retry[0].nextNumber,
-      padding: retry[0].padding,
-    };
+    seq = retryRows[0];
   }
 
   const assigned = seq.next_number;
@@ -105,6 +107,8 @@ export interface AuditWriteInput {
 }
 
 export async function writeAuditLog(tx: DbOrTx, input: AuditWriteInput): Promise<void> {
+  const ctx = getRequestContext();
+  const details = ctx?.reqId ? { reqId: ctx.reqId, ...(input.details ?? {}) } : (input.details ?? {});
   await tx.insert(auditLogs).values({
     userId: input.userId ?? null,
     userName: input.userName,
@@ -114,7 +118,7 @@ export async function writeAuditLog(tx: DbOrTx, input: AuditWriteInput): Promise
     entityType: input.entityType,
     entityId: input.entityId,
     entityLabel: input.entityLabel ?? null,
-    details: input.details ?? {},
+    details,
     ipAddress: input.ipAddress ?? null,
   });
 }

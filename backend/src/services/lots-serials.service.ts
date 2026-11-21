@@ -1,10 +1,12 @@
 import {
+  buildOffsetPageInfo,
+  offsetPageQuerySchema,
   roundCurrency,
   type PickingStrategyShared,
   type SerialStatusShared,
   type TrackingModeShared,
 } from "@erp/shared";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, ilike, inArray, or, sql } from "drizzle-orm";
 import {
   branches,
   branchLotBalances,
@@ -597,19 +599,45 @@ export async function receiveTransferredTrackedStock(
 export async function listLots(
   db: AppDatabase,
   actor: RequestActor,
-  query: { branchId?: string; productId?: string; includeZero?: string }
+  query: {
+    branchId?: string;
+    productId?: string;
+    includeZero?: string;
+    page?: string | number;
+    pageSize?: string | number;
+  }
 ) {
+  const hasExplicitPaging = query.page !== undefined || query.pageSize !== undefined;
+  const parsed = offsetPageQuerySchema.safeParse({
+    page: query.page ?? 1,
+    pageSize: query.pageSize ?? (hasExplicitPaging ? 50 : 200),
+  });
+  const page = parsed.success ? parsed.data.page : 1;
+  const pageSize = parsed.success ? parsed.data.pageSize : 200;
+
   const conditions = [];
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
     conditions.push(eq(branchLotBalances.branchId, query.branchId));
   } else if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
-    if (actor.branchIds.length === 0) return [];
+    if (actor.branchIds.length === 0) {
+      return { items: [], pageInfo: buildOffsetPageInfo(page, pageSize, 0) };
+    }
     conditions.push(inArray(branchLotBalances.branchId, actor.branchIds));
   }
   if (query.productId) {
     conditions.push(eq(branchLotBalances.productId, query.productId));
   }
+  const includeZero = query.includeZero === "true";
+  if (!includeZero) {
+    conditions.push(gt(branchLotBalances.qtyOnHand, "0.0001"));
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(branchLotBalances)
+    .where(whereClause);
 
   const rows = await db
     .select({
@@ -632,58 +660,96 @@ export async function listLots(
     .innerJoin(stockLots, eq(stockLots.id, branchLotBalances.lotId))
     .innerJoin(products, eq(products.id, branchLotBalances.productId))
     .innerJoin(branches, eq(branches.id, branchLotBalances.branchId))
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(asc(stockLots.expiryDate), asc(stockLots.createdAt));
+    .where(whereClause)
+    .orderBy(asc(stockLots.expiryDate), asc(stockLots.createdAt), asc(branchLotBalances.id))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
 
   const now = Date.now();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-  const includeZero = query.includeZero === "true";
 
-  return rows
-    .filter((r) => includeZero || num(r.qtyOnHand) > 0.0001)
-    .map((r) => {
-      const expMs = r.expiryDate ? r.expiryDate.getTime() : null;
-      let expiryStatus: "valid" | "expiring_soon" | "expired" | "no_expiry" = "no_expiry";
-      if (expMs !== null) {
-        if (expMs < now) expiryStatus = "expired";
-        else if (expMs - now <= thirtyDaysMs) expiryStatus = "expiring_soon";
-        else expiryStatus = "valid";
-      }
-      return {
-        id: r.balanceId,
-        lotId: r.lotId,
-        lotNumber: r.lotNumber,
-        branchId: r.branchId,
-        branchName: r.branchName,
-        productId: r.productId,
-        productName: r.productName,
-        productSku: r.productSku,
-        manufactureDate: r.manufactureDate?.toISOString() ?? null,
-        expiryDate: r.expiryDate?.toISOString() ?? null,
-        expiryStatus,
-        unitCost: num(r.unitCost),
-        qtyOnHand: num(r.qtyOnHand),
-        qtyReserved: num(r.qtyReserved),
-        createdAt: r.createdAt.toISOString(),
-      };
-    });
+  const items = rows.map((r) => {
+    const expMs = r.expiryDate ? r.expiryDate.getTime() : null;
+    let expiryStatus: "valid" | "expiring_soon" | "expired" | "no_expiry" = "no_expiry";
+    if (expMs !== null) {
+      if (expMs < now) expiryStatus = "expired";
+      else if (expMs - now <= thirtyDaysMs) expiryStatus = "expiring_soon";
+      else expiryStatus = "valid";
+    }
+    return {
+      id: r.balanceId,
+      lotId: r.lotId,
+      lotNumber: r.lotNumber,
+      branchId: r.branchId,
+      branchName: r.branchName,
+      productId: r.productId,
+      productName: r.productName,
+      productSku: r.productSku,
+      manufactureDate: r.manufactureDate?.toISOString() ?? null,
+      expiryDate: r.expiryDate?.toISOString() ?? null,
+      expiryStatus,
+      unitCost: num(r.unitCost),
+      qtyOnHand: num(r.qtyOnHand),
+      qtyReserved: num(r.qtyReserved),
+      createdAt: r.createdAt.toISOString(),
+    };
+  });
+
+  return { items, pageInfo: buildOffsetPageInfo(page, pageSize, total) };
 }
 
 export async function listSerials(
   db: AppDatabase,
   actor: RequestActor,
-  query: { branchId?: string; productId?: string; status?: string; search?: string }
+  query: {
+    branchId?: string;
+    productId?: string;
+    status?: string;
+    search?: string;
+    q?: string;
+    page?: string | number;
+    pageSize?: string | number;
+  }
 ) {
+  const hasExplicitPaging = query.page !== undefined || query.pageSize !== undefined;
+  const parsed = offsetPageQuerySchema.safeParse({
+    page: query.page ?? 1,
+    pageSize: query.pageSize ?? (hasExplicitPaging ? 50 : 200),
+  });
+  const page = parsed.success ? parsed.data.page : 1;
+  const pageSize = parsed.success ? parsed.data.pageSize : 200;
+
   const conditions = [];
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
     conditions.push(eq(stockSerials.branchId, query.branchId));
   } else if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
-    if (actor.branchIds.length === 0) return [];
+    if (actor.branchIds.length === 0) {
+      return { items: [], pageInfo: buildOffsetPageInfo(page, pageSize, 0) };
+    }
     conditions.push(inArray(stockSerials.branchId, actor.branchIds));
   }
   if (query.productId) conditions.push(eq(stockSerials.productId, query.productId));
   if (query.status) conditions.push(eq(stockSerials.status, query.status as SerialStatusShared));
+
+  const searchTerm = (query.search ?? query.q)?.trim();
+  if (searchTerm) {
+    const pattern = `%${searchTerm}%`;
+    conditions.push(
+      or(
+        ilike(stockSerials.serialNumber, pattern),
+        ilike(products.sku, pattern),
+        ilike(products.name, pattern)
+      )!
+    );
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(stockSerials)
+    .innerJoin(products, eq(products.id, stockSerials.productId))
+    .where(whereClause);
 
   const rows = await db
     .select({
@@ -706,21 +772,12 @@ export async function listSerials(
     .from(stockSerials)
     .innerJoin(products, eq(products.id, stockSerials.productId))
     .leftJoin(branches, eq(branches.id, stockSerials.branchId))
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(stockSerials.updatedAt))
-    .limit(500);
+    .where(whereClause)
+    .orderBy(desc(stockSerials.updatedAt), desc(stockSerials.id))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
 
-  const search = query.search?.trim().toLowerCase();
-  const filtered = search
-    ? rows.filter(
-        (r) =>
-          r.serialNumber.toLowerCase().includes(search) ||
-          r.productSku.toLowerCase().includes(search) ||
-          r.productName.toLowerCase().includes(search)
-      )
-    : rows;
-
-  return filtered.map((r) => ({
+  const items = rows.map((r) => ({
     id: r.id,
     serialNumber: r.serialNumber,
     productId: r.productId,
@@ -737,6 +794,8 @@ export async function listSerials(
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
   }));
+
+  return { items, pageInfo: buildOffsetPageInfo(page, pageSize, total) };
 }
 
 export async function getSerialTrace(db: AppDatabase, actor: RequestActor, serialId: string) {

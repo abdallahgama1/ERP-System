@@ -1,13 +1,14 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { History, Search, ShieldCheck } from "lucide-react";
+import { History, Loader2, Search, ShieldCheck } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { format } from "date-fns";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { useAuditLogsCursorQuery } from "@/hooks/queries/useAuditLogsCursorQuery";
 import type { AuditModule } from "@/types";
 
 const MODULES: (AuditModule | "all")[] = [
@@ -25,23 +26,20 @@ const MODULES: (AuditModule | "all")[] = [
 
 export default function AuditLog() {
   const { t } = useTranslation();
-  const { entries } = useAuditLog();
   const [q, setQ] = useState("");
   const [module, setModule] = useState<AuditModule | "all">("all");
 
+  const {
+    data,
+    isLoading,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+  } = useAuditLogsCursorQuery({ module, q, limit: 50 });
+
   const filtered = useMemo(
-    () =>
-      entries.filter((e) => {
-        if (module !== "all" && e.module !== module) return false;
-        const s = q.toLowerCase();
-        return (
-          !s ||
-          e.action.toLowerCase().includes(s) ||
-          (e.user || "").toLowerCase().includes(s) ||
-          (e.entity || "").toLowerCase().includes(s)
-        );
-      }),
-    [entries, q, module],
+    () => (data?.pages ?? []).flatMap((p) => p.entries ?? []),
+    [data]
   );
 
   return (
@@ -97,7 +95,13 @@ export default function AuditLog() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.length === 0 ? (
+            {isLoading ? (
+              <TableRow>
+                <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                  {t("common.loading")}
+                </TableCell>
+              </TableRow>
+            ) : filtered.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
                   {t("auditLog.empty", "No audit entries yet")}
@@ -122,6 +126,18 @@ export default function AuditLog() {
             )}
           </TableBody>
         </Table>
+        {hasNextPage && (
+          <div className="flex justify-center pt-4">
+            <Button
+              variant="outline"
+              onClick={() => void fetchNextPage()}
+              disabled={isFetchingNextPage}
+            >
+              {isFetchingNextPage && <Loader2 className="me-2 h-4 w-4 animate-spin" />}
+              {t("common.loadMore", "Load more")}
+            </Button>
+          </div>
+        )}
       </Card>
     </div>
   );

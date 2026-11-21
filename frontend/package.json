@@ -9,7 +9,8 @@
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.app.json --noEmit"
+    "typecheck": "tsc -p tsconfig.app.json --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@erp/shared": "*",
@@ -51,6 +52,7 @@
     "embla-carousel-react": "^8.3.0",
     "i18next": "^25.7.3",
     "i18next-browser-languagedetector": "^8.2.0",
+    "idb": "^8.0.4",
     "input-otp": "^1.2.4",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",
@@ -75,6 +77,9 @@
   "devDependencies": {
     "@eslint/js": "^9.9.0",
     "@tailwindcss/typography": "^0.5.15",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^22.20.5",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.3",
@@ -84,11 +89,15 @@
     "eslint": "^9.9.0",
     "eslint-plugin-react-hooks": "^5.1.0-rc.0",
     "eslint-plugin-react-refresh": "^0.4.9",
+    "fake-indexeddb": "^6.0.0",
     "globals": "^15.9.0",
+    "jsdom": "^26.0.0",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.11",
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.0.1",
-    "vite": "^5.4.1"
+    "vite": "^5.4.1",
+    "vite-plugin-pwa": "^0.21.1",
+    "vitest": "^3.2.4"
   }
 }

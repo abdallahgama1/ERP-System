@@ -62,7 +62,17 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       : {};
 
   app.get("/api/auth/me", async (req) => {
-    return { user: req.authUser ?? null };
+    if (!req.authUser) {
+      return { user: null };
+    }
+    return {
+      user: req.authUser,
+      posSession: {
+        terminalId: req.posTerminalId,
+        isLocked: req.isTerminalLocked,
+        terminalOwnerId: req.terminalSessionOwnerId,
+      },
+    };
   });
 
   app.post("/api/auth/signup", authRateLimit, async (req, reply) => {
@@ -299,9 +309,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       });
 
       const emailRes = await sendPasswordResetEmail(userRow.email, rawToken);
-      if (!emailRes.sent && env.NODE_ENV !== "production") {
-        app.log.info(`[AUTH] Password reset URL for ${userRow.email}: /reset-password?token=${rawToken}`);
-      }
+      req.log.info(
+        { userId: userRow.id, emailSent: emailRes.sent, skippedReason: emailRes.skippedReason ?? null },
+        "auth.password_reset_requested"
+      );
     }
 
     return {

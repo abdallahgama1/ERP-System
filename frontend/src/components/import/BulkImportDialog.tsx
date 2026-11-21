@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import * as XLSX from "xlsx";
+import { exportJsonToExcel, readSpreadsheetRows } from "@/lib/export/excel";
 import {
   Dialog,
   DialogContent,
@@ -108,11 +108,7 @@ export default function BulkImportDialog({
     setValidationError(null);
 
     try {
-      const data = await file.arrayBuffer();
-      const workbook = XLSX.read(data);
-      const sheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[sheetName];
-      const jsonData = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1 });
+      const jsonData = await readSpreadsheetRows(file);
 
       if (jsonData.length < 2) {
         setValidationError(t("bulkImport.noDataFound"));
@@ -218,7 +214,7 @@ export default function BulkImportDialog({
     }
   };
 
-  const downloadTemplate = () => {
+  const downloadTemplate = async () => {
     const headers = columns.map(c => c.label);
     const sampleData = templateData || [
       columns.reduce((acc, col) => {
@@ -231,10 +227,12 @@ export default function BulkImportDialog({
       }, {} as Record<string, unknown>),
     ];
 
-    const worksheet = XLSX.utils.json_to_sheet(sampleData, { header: headers });
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Template");
-    XLSX.writeFile(workbook, templateFileName);
+    await exportJsonToExcel({
+      rows: sampleData,
+      headers,
+      sheetName: "Template",
+      fileName: templateFileName,
+    });
   };
 
   const handleConfirmImport = async () => {

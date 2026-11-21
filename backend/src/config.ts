@@ -27,6 +27,7 @@ export const DEV_COOKIE_SECRET_PLACEHOLDER = "dev-cookie-secret-change-in-produc
 
 export const env = {
   NODE_ENV: process.env.NODE_ENV ?? "development",
+  LOG_LEVEL: (process.env.LOG_LEVEL ?? (process.env.NODE_ENV === "production" ? "info" : "debug")).trim(),
   PORT: parseIntEnv(process.env.PORT, 3001),
   HOST: process.env.HOST ?? "127.0.0.1",
   CORS_ORIGIN: process.env.CORS_ORIGIN ?? "http://localhost:8080",
@@ -46,4 +47,8 @@ export const env = {
   SMTP_USER: (process.env.SMTP_USER ?? "").trim(),
   SMTP_PASS: (process.env.SMTP_PASS ?? "").trim(),
   SMTP_FROM: (process.env.SMTP_FROM ?? "Count It Keep It ERP <no-reply@localhost>").trim(),
+  ETA_CLIENT_ID: (process.env.ETA_CLIENT_ID ?? "").trim(),
+  ETA_CLIENT_SECRET: (process.env.ETA_CLIENT_SECRET ?? "").trim(),
+  ETA_ID_BASE_URL: (process.env.ETA_ID_BASE_URL ?? "https://id.preprod.eta.gov.eg").trim().replace(/\/+$/, ""),
+  ETA_API_BASE_URL: (process.env.ETA_API_BASE_URL ?? "https://api.preprod.eta.gov.eg").trim().replace(/\/+$/, ""),
 };
