@@ -2,6 +2,8 @@
 
 This runbook covers production provisioning, deployment, backup/restore, rollback, and observability for **Count It Keep It ERP** on a single VPS (Docker Compose + Caddy automatic HTTPS) backed by Managed PostgreSQL (Neon or AWS RDS with Point-In-Time Recovery).
 
+> **Looking for the all-in-one handbook?** See **[docs/SETUP_AND_OPERATIONS_GUIDE.md](./SETUP_AND_OPERATIONS_GUIDE.md)** for **Local Development Setup** (native + Docker Compose), **Production VPS Setup**, **Container Control Commands**, **Background Workers**, and **Troubleshooting** in one document.
+
 ---
 
 ## 1. Architecture Overview
