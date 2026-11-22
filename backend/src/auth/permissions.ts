@@ -22,11 +22,29 @@ export type DbOrTx =
   | PostgresJsDatabase<typeof schema>
   | PgTransaction<PostgresJsQueryResultHKT, typeof schema, ExtractTablesWithRelations<typeof schema>>;
 
+let defaultsBackfilledOnce = false;
+
+export function resetSeededDefaultsCache(): void {
+  defaultsBackfilledOnce = false;
+}
+
 /**
  * Ensures initial company settings, default HQ branch, base tax code, document sequences,
  * and default role permission rows exist inside PostgreSQL. Safe to call repeatedly.
  */
 export async function ensureSeededDefaults(tx: DbOrTx): Promise<string> {
+  if (defaultsBackfilledOnce) {
+    const [seeded] = await tx
+      .select({ defaultBranchId: companySettings.defaultBranchId })
+      .from(companySettings)
+      .innerJoin(branches, eq(branches.id, companySettings.defaultBranchId))
+      .where(eq(companySettings.id, 1))
+      .limit(1);
+    if (seeded?.defaultBranchId) {
+      return seeded.defaultBranchId;
+    }
+  }
+
   // Seed any missing role permissions idempotently (safe on existing databases when new modules are added)
   const permRows: Array<typeof rolePermissions.$inferInsert> = [];
   for (const role of ["admin", "manager", "user"] as const) {
@@ -172,6 +190,7 @@ export async function ensureSeededDefaults(tx: DbOrTx): Promise<string> {
   await ensureAccountingDefaults(tx);
   await ensureApprovalDefaults(tx);
 
+  defaultsBackfilledOnce = true;
   return defaultBranchId;
 }
 

@@ -24,12 +24,17 @@ import { Label } from "@/components/ui/label";
 import { Building2, Plus, Search, Edit, Trash2, MapPin, Phone, Eye } from "lucide-react";
 import { Branch } from "@/types";
 import { useInventory } from "@/contexts/InventoryContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 
 const Branches = () => {
   const { t } = useTranslation();
   const { branches, addBranch, updateBranch, deleteBranch } = useInventory();
+  const { can } = usePermissions();
+  const canCreateBranch = can("branches", "create");
+  const canEditBranch = can("branches", "edit");
+  const canDeleteBranch = can("branches", "delete");
   const [searchTerm, setSearchTerm] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
@@ -112,14 +117,23 @@ const Branches = () => {
           </p>
         </div>
         
-        <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
-          <DialogTrigger asChild>
-            <Button onClick={resetForm}>
-              <Plus className="me-2 h-4 w-4" />
-              {t('branches.addBranch')}
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="max-w-md">
+        {(canCreateBranch || canEditBranch) && (
+          <Dialog
+            open={isAddDialogOpen}
+            onOpenChange={(open) => {
+              setIsAddDialogOpen(open);
+              if (!open) resetForm();
+            }}
+          >
+            {canCreateBranch && (
+              <DialogTrigger asChild>
+                <Button onClick={resetForm}>
+                  <Plus className="me-2 h-4 w-4" />
+                  {t('branches.addBranch')}
+                </Button>
+              </DialogTrigger>
+            )}
+            <DialogContent className="max-w-md">
             <DialogHeader>
               <DialogTitle>
                 {editingBranch ? t('branches.editBranch') : t('branches.addNewBranch')}
@@ -174,6 +188,7 @@ const Branches = () => {
             </form>
           </DialogContent>
         </Dialog>
+        )}
       </div>
 
       <Card>
@@ -239,20 +254,24 @@ const Branches = () => {
                           <Eye className="h-4 w-4" />
                         </Link>
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleEdit(branch)}
-                      >
-                        <Edit className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setDeleteBranchId(branch.branchId)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      {canEditBranch && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleEdit(branch)}
+                        >
+                          <Edit className="h-4 w-4" />
+                        </Button>
+                      )}
+                      {canDeleteBranch && !branch.isDefault && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setDeleteBranchId(branch.branchId)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>

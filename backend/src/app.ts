@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { LogController, type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
@@ -78,8 +78,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     trustProxy: env.TRUST_PROXY,
     genReqId: (req) => sanitizeRequestId(req.headers["x-request-id"]),
     requestIdHeader: "x-request-id",
-    requestIdLogLabel: "reqId",
-    disableRequestLogging: true,
+    logController: new LogController({
+      requestIdLogLabel: "reqId",
+      disableRequestLogging: true,
+    }),
     logger: loggerConfig,
   });
 

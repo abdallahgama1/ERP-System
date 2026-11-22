@@ -22,27 +22,40 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
     const query = req.query as { scope?: string };
     const actor = req.authUser!;
     const db = getDb();
-    await ensureSeededDefaults(db);
 
     if (query.scope === "directory") {
-      const list = await db
-        .select({
-          id: branches.id,
-          code: branches.code,
-          name: branches.name,
-          branchType: branches.branchType,
-          location: branches.location,
-          isDefault: branches.isDefault,
-          isActive: branches.isActive,
-        })
-        .from(branches)
-        .where(eq(branches.isActive, true))
-        .orderBy(asc(branches.createdAt));
+      const fetchDirectory = () =>
+        db
+          .select({
+            id: branches.id,
+            code: branches.code,
+            name: branches.name,
+            branchType: branches.branchType,
+            location: branches.location,
+            isDefault: branches.isDefault,
+            isActive: branches.isActive,
+          })
+          .from(branches)
+          .where(eq(branches.isActive, true))
+          .orderBy(asc(branches.createdAt));
+
+      let list = await fetchDirectory();
+      if (list.length === 0) {
+        const anyBranch = await db.select({ id: branches.id }).from(branches).limit(1);
+        if (anyBranch.length === 0) {
+          await ensureSeededDefaults(db);
+          list = await fetchDirectory();
+        }
+      }
       return { branches: list };
     }
 
     if (actor.role === "admin" || actor.branchScopeMode === "all") {
-      const list = await db.select().from(branches).orderBy(asc(branches.createdAt));
+      let list = await db.select().from(branches).orderBy(asc(branches.createdAt));
+      if (list.length === 0) {
+        await ensureSeededDefaults(db);
+        list = await db.select().from(branches).orderBy(asc(branches.createdAt));
+      }
       return { branches: list };
     }
 
