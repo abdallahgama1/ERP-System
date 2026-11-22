@@ -49,9 +49,17 @@ Internet (HTTPS :443 / HTTP :80)
 - Firewall open on `80/tcp`, `443/tcp`, `443/udp` (and SSH `22/tcp`). Do **not** expose port `3001` or `5432` publicly.
 - DNS `A` (and optional `AAAA`) record for `SITE_ADDRESS` (e.g., `erp.example.com`) pointing to the VPS IP.
 
+### Option 1: One-Command Automated Bootstrap (`scripts/vps-setup.sh`)
+On a fresh Ubuntu 22.04/24.04 or Debian 12 VPS (with root/`sudo` access):
+```bash
+curl -fsSLO https://raw.githubusercontent.com/abdallahgama1/ERP-System/main/scripts/vps-setup.sh
+sudo bash vps-setup.sh --app-dir /opt/count-it-keep-it --user deploy
+```
+This idempotently installs Docker Engine + Compose v2, `postgresql-client`, UFW firewall (`22/tcp`, `80/tcp`, `443/tcp`, `443/udp`), clones the repository, copies `.env.prod.example` → `.env` (`chmod 600`), and installs the daily `02:00 UTC` backup cron job + logrotate rule.
+
 ### Initial Provisioning & Boot
-1. Clone the repository on the VPS (e.g., `/opt/count-it-keep-it`).
-2. Create root `.env` (permissions `chmod 600 .env`, never commit to git) with all required production variables:
+1. Clone the repository on the VPS (e.g., `/opt/count-it-keep-it`) if you did not use `scripts/vps-setup.sh`.
+2. Copy `.env.prod.example` to `.env` (`cp .env.prod.example .env && chmod 600 .env`, never commit to git) and populate required production values:
    ```bash
    SITE_ADDRESS=erp.example.com
    DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
@@ -61,9 +69,12 @@ Internet (HTTPS :443 / HTTP :80)
    COOKIE_SECURE=auto
    METRICS_TOKEN=<output of: openssl rand -hex 24>
    ```
-3. Build and start the production stack:
+3. Build or pull images and deploy safely:
    ```bash
-   docker compose -f docker-compose.prod.yml up -d --build
+   # Build locally on VPS (first boot on empty DB can pass --skip-backup)
+   bash ./scripts/deploy.sh --build --skip-backup
+   # Or pull prebuilt GHCR images and deploy with pre-deploy pg_dump + health checks:
+   bash ./scripts/deploy.sh
    ```
 4. Verify container health and endpoints:
    ```bash
@@ -141,25 +152,28 @@ curl -fsS https://erp.example.com/api/health/ready
 
 ## 6. Upgrade & Rollback Procedures
 
-### Standard Upgrade
-1. Take a pre-deploy database snapshot via `scripts/backup-db.sh` (or Neon branch / RDS snapshot).
-2. Pull new code or tagged container images and deploy:
-   ```bash
-   git pull --ff-only origin main
-   docker compose -f docker-compose.prod.yml up -d --build
-   ```
-3. Verify `/api/health/live` and `/api/health/ready` return `200`.
+### Standard Upgrade (Safe Deploy Script)
+`scripts/deploy.sh` validates `.env`, records currently running container image refs, runs a pre-deploy `pg_dump` backup (`PRE_DEPLOY_BACKUP=true`), pulls or builds containers, waits for healthchecks (`--wait`), verifies `/api/health/live`, `/api/health/ready`, and public `https://${SITE_ADDRESS}/api/health/ready`, and **automatically rolls back** to the previous running container images with `RUN_MIGRATIONS=false` if any check fails:
+```bash
+git pull --ff-only origin main
+bash ./scripts/deploy.sh --build          # When building from source on the VPS
+# OR deploy immutable GHCR images built by CI/CD:
+bash ./scripts/deploy.sh \
+  --backend-image ghcr.io/abdallahgama1/erp-system-backend:sha-<short> \
+  --frontend-image ghcr.io/abdallahgama1/erp-system-frontend:sha-<short>
+```
 
-### Rollback
+### Manual Rollback
 - **Application-only rollback** (no backward-incompatible schema changes):
   ```bash
-  git checkout <previous-good-sha>
-  docker compose -f docker-compose.prod.yml up -d --build --no-deps backend frontend
+  bash ./scripts/deploy.sh \
+    --backend-image ghcr.io/abdallahgama1/erp-system-backend:sha-<previous> \
+    --frontend-image ghcr.io/abdallahgama1/erp-system-frontend:sha-<previous>
   ```
 - **Schema-affecting rollback**: Drizzle migrations (`0000`–`0006`) are forward-only SQL files. If a release introduced breaking DDL:
   1. Stop `backend` (`docker compose -f docker-compose.prod.yml stop backend`).
   2. Restore the pre-deploy dump via `scripts/restore-db.sh` (or Neon/RDS PITR to the timestamp immediately before migration).
-  3. Check out the previous application commit and start the stack with `docker compose -f docker-compose.prod.yml up -d --build`.
+  3. Deploy the previous good commit/images via `scripts/deploy.sh`.
 
 ---
 
@@ -197,3 +211,32 @@ curl -fsS https://erp.example.com/api/health/ready
    ```bash
    curl -fsS -H "Authorization: Bearer $METRICS_TOKEN" https://erp.example.com/api/metrics | head -n 20
    ```
+
+---
+
+## 8. Automated CI/CD (GHCR + GitHub Actions Deployment)
+
+`.github/workflows/cd.yml` (**Deploy (CD)**) builds, security-scans, publishes immutable multi-stage Docker images to GitHub Container Registry (`ghcr.io`), and optionally deploys to your VPS over SSH using `scripts/deploy.sh`.
+
+### Triggers
+1. **Release Tags (`v*.*.*`)**: Pushing a semver tag deploys to the `production` GitHub Environment:
+   ```bash
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+2. **Manual Dispatch (`workflow_dispatch`)**: Trigger from **Actions → Deploy (CD) → Run workflow**, choosing `staging` or `production`, whether to execute the SSH deploy (`deploy: true|false`), and whether to skip the pre-deploy backup (`skip_backup`).
+
+### GitHub Environments, Secrets & Variables
+Create `staging` and `production` under **Repository Settings → Environments** (enable required reviewers on `production` if desired).
+
+| Name | Kind | Required | Default | Description |
+|---|---|---|---|---|
+| `VPS_HOST` | Environment Secret | For SSH deploy | — | VPS IP or hostname. If omitted, CD publishes/scans images in GHCR and skips SSH deploy cleanly. |
+| `VPS_USER` | Environment Secret | Optional | `deploy` | SSH username on VPS (member of `docker` group). |
+| `VPS_SSH_KEY` | Environment Secret | When `VPS_HOST` set | — | Private ED25519 SSH key matching `~/.ssh/authorized_keys` on VPS. |
+| `VPS_PORT` | Environment Secret | Optional | `22` | SSH port on VPS. |
+| `VPS_SSH_KNOWN_HOSTS` | Environment Secret | Recommended | `ssh-keyscan` | Pinned host key line (`ssh-keyscan -p <port> <host>`) for strict host key verification. |
+| `VPS_APP_DIR` | Environment Secret | Optional | `/opt/count-it-keep-it` | Directory containing `.env`, `docker-compose.prod.yml`, `Caddyfile`, and `scripts/`. |
+| `GHCR_READ_TOKEN` | Secret | Recommended for private repos | `GITHUB_TOKEN` | Classic PAT / fine-grained token with `read:packages` so the VPS can pull private GHCR images. |
+| `VITE_SENTRY_DSN` | Variable | Optional | `""` | Frontend Sentry DSN baked into Vite production assets during GHCR image build. |
+| `VITE_API_BASE_URL` | Variable | Optional | `""` | Optional API origin override baked into Vite assets (leave empty for same-origin `/api`). |

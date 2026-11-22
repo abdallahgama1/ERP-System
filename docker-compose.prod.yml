@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    image: ${BACKEND_IMAGE:-count-it-keep-it-backend:latest}
+    image: ${BACKEND_IMAGE:-ghcr.io/abdallahgama1/erp-system-backend:latest}
     restart: unless-stopped
     expose:
       - "3001"
@@ -53,10 +53,16 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    image: ${FRONTEND_IMAGE:-count-it-keep-it-frontend:latest}
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-}
+        VITE_SENTRY_ENVIRONMENT: ${VITE_SENTRY_ENVIRONMENT:-production}
+    image: ${FRONTEND_IMAGE:-ghcr.io/abdallahgama1/erp-system-frontend:latest}
     restart: unless-stopped
     expose:
       - "80"
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       backend:
         condition: service_healthy
@@ -79,6 +85,8 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+    security_opt:
+      - no-new-privileges:true
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS to your production domain (e.g. erp.example.com)}
     volumes:

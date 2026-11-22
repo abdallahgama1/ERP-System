@@ -1,0 +1,301 @@
+name: Deploy (CD)
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target deployment environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+      deploy:
+        description: "Deploy to VPS over SSH after publishing images to GHCR"
+        required: true
+        default: true
+        type: boolean
+      skip_backup:
+        description: "Skip pre-deploy pg_dump backup on VPS"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: cd-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify Code, Migrations, Tests & Build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: erp
+          POSTGRES_PASSWORD: erp_ci_password
+          POSTGRES_DB: erp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://erp:erp_ci_password@127.0.0.1:5432/erp_test
+      TEST_DATABASE_URL: postgresql://erp:erp_ci_password@127.0.0.1:5432/erp_test
+      AUTH_COOKIE_SECRET: ci-test-cookie-secret-at-least-32-characters-long
+      DISABLE_RATE_LIMIT: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck all workspaces
+        run: npm run typecheck
+
+      - name: Lint all workspaces
+        run: npm run lint
+
+      - name: Apply Drizzle migrations to test Postgres
+        run: npm run db:migrate
+
+      - name: Run Vitest unit & integration suite
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+
+  publish:
+    name: Build, Scan & Publish Images to GHCR
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      backend_image: ${{ steps.refs.outputs.backend_image }}
+      frontend_image: ${{ steps.refs.outputs.frontend_image }}
+      short_sha: ${{ steps.refs.outputs.short_sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve lowercase GHCR repository names & immutable tags
+        id: refs
+        run: |
+          OWNER_LOWER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          BACKEND_REPO="ghcr.io/${OWNER_LOWER}/erp-system-backend"
+          FRONTEND_REPO="ghcr.io/${OWNER_LOWER}/erp-system-frontend"
+          echo "backend_repo=${BACKEND_REPO}" >> "$GITHUB_OUTPUT"
+          echo "frontend_repo=${FRONTEND_REPO}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "backend_image=${BACKEND_REPO}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${FRONTEND_REPO}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate backend Docker metadata
+        id: meta_backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.refs.outputs.backend_repo }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+
+      - name: Generate frontend Docker metadata
+        id: meta_frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.refs.outputs.frontend_repo }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+
+      - name: Build & push backend image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta_backend.outputs.tags }}
+          labels: ${{ steps.meta_backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push frontend image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta_frontend.outputs.tags }}
+          labels: ${{ steps.meta_frontend.outputs.labels }}
+          build-args: |
+            VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
+            VITE_SENTRY_DSN=${{ vars.VITE_SENTRY_DSN }}
+            VITE_SENTRY_ENVIRONMENT=${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan published backend image (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.refs.outputs.backend_image }}
+          format: table
+          ignore-unfixed: true
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Trivy scan published frontend image (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.refs.outputs.frontend_image }}
+          format: table
+          ignore-unfixed: true
+          severity: CRITICAL
+          exit-code: "1"
+
+  deploy:
+    name: Deploy to VPS
+    needs: publish
+    if: ${{ github.event_name == 'push' || inputs.deploy }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+
+    steps:
+      - name: Checkout deployment files
+        uses: actions/checkout@v4
+
+      - name: Check whether VPS SSH target is configured
+        id: target
+        env:
+          VPS_HOST_SECRET: ${{ secrets.VPS_HOST }}
+        run: |
+          if [ -z "$VPS_HOST_SECRET" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### GHCR Publish Complete — SSH Deploy Skipped"
+              echo ""
+              echo "\`VPS_HOST\` secret is not configured for this environment. Images were built, scanned, and pushed to GHCR:"
+              echo "- Backend: \`${{ needs.publish.outputs.backend_image }}\`"
+              echo "- Frontend: \`${{ needs.publish.outputs.frontend_image }}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure SSH key and known_hosts
+        if: steps.target.outputs.configured == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$VPS_SSH_KEY" ]; then
+            echo "Error: VPS_HOST is set but VPS_SSH_KEY secret is empty." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+          if [ -n "$VPS_SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$VPS_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          else
+            ssh-keyscan -p "$VPS_PORT" -H "$VPS_HOST" > "$HOME/.ssh/known_hosts"
+          fi
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Sync compose/scripts and run safe VPS deploy
+        if: steps.target.outputs.configured == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER || 'deploy' }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_APP_DIR: ${{ secrets.VPS_APP_DIR || '/opt/count-it-keep-it' }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN || secrets.GITHUB_TOKEN }}
+          BACKEND_IMAGE: ${{ needs.publish.outputs.backend_image }}
+          FRONTEND_IMAGE: ${{ needs.publish.outputs.frontend_image }}
+          SKIP_BACKUP: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_backup || false }}
+        run: |
+          SSH_OPTS=(-i "$HOME/.ssh/deploy_key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          ssh "${SSH_OPTS[@]}" -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" "mkdir -p '${VPS_APP_DIR}/scripts'"
+
+          scp "${SSH_OPTS[@]}" -P "$VPS_PORT" \
+            docker-compose.prod.yml \
+            Caddyfile \
+            "${VPS_USER}@${VPS_HOST}:${VPS_APP_DIR}/"
+
+          scp "${SSH_OPTS[@]}" -P "$VPS_PORT" \
+            scripts/deploy.sh \
+            scripts/backup-db.sh \
+            scripts/restore-db.sh \
+            "${VPS_USER}@${VPS_HOST}:${VPS_APP_DIR}/scripts/"
+
+          printf '%s' "$GHCR_TOKEN" | ssh "${SSH_OPTS[@]}" -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" \
+            "docker login ghcr.io -u '${GHCR_USER}' --password-stdin >/dev/null"
+
+          DEPLOY_FLAGS="--backend-image '${BACKEND_IMAGE}' --frontend-image '${FRONTEND_IMAGE}'"
+          if [ "$SKIP_BACKUP" = "true" ]; then
+            DEPLOY_FLAGS="${DEPLOY_FLAGS} --skip-backup"
+          fi
+
+          ssh "${SSH_OPTS[@]}" -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" \
+            "cd '${VPS_APP_DIR}' && chmod +x scripts/*.sh && bash ./scripts/deploy.sh ${DEPLOY_FLAGS}"
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+
+      - name: Write deployment summary
+        if: steps.target.outputs.configured == 'true'
+        run: |
+          TARGET_ENV="${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}"
+          {
+            echo "### VPS Deployment Complete (${TARGET_ENV})"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Environment | \`${TARGET_ENV}\` |"
+            echo "| Commit SHA | \`${{ needs.publish.outputs.short_sha }}\` |"
+            echo "| Backend Image | \`${{ needs.publish.outputs.backend_image }}\` |"
+            echo "| Frontend Image | \`${{ needs.publish.outputs.frontend_image }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

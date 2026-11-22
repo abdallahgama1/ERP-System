@@ -25,6 +25,12 @@ frontend/.env
 backend/.env
 !frontend/.env.example
 !backend/.env.example
+!.env.prod.example
+
+# Database backups
+backups/
+*.dump
+*.dump.sha256
 
 # Editor & OS files
 .vscode/*
