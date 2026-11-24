@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 
 # Copy workspace manifests first for clean Docker layer caching
@@ -17,7 +17,7 @@ COPY backend ./backend
 RUN npm --prefix packages/shared run typecheck \
   && npm --prefix backend run build
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 WORKDIR /app
 
 COPY package.json package-lock.json ./
