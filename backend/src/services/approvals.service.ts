@@ -2,6 +2,7 @@ import type { ApprovalEntityType, upsertApprovalRuleSchema } from "@erp/shared";
 import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
+  DEFAULT_COMPANY_ID,
   approvalRequests,
   approvalRules,
   notifications,
@@ -13,6 +14,7 @@ import {
   stockTransfers,
   stockWriteOffLines,
   stockWriteOffs,
+  userCompanies,
   userRoles,
   users,
 } from "../../drizzle/schema.ts";
@@ -21,7 +23,7 @@ import { AppError, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { sendApprovalRequestEmail } from "./email.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
-import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
 const DEFAULT_RULES: Array<{
   entityType: ApprovalEntityType;
@@ -55,11 +57,23 @@ const DEFAULT_RULES: Array<{
   },
 ];
 
-export async function ensureApprovalDefaults(tx: DbOrTx): Promise<void> {
+function resolveCompanyId(actorOrCompanyId?: RequestActor | string): string {
+  if (typeof actorOrCompanyId === "string") {
+    return actorOrCompanyId || DEFAULT_COMPANY_ID;
+  }
+  return actorCompanyId(actorOrCompanyId);
+}
+
+export async function ensureApprovalDefaults(
+  tx: DbOrTx,
+  companyId: string = DEFAULT_COMPANY_ID
+): Promise<void> {
+  const effectiveCompanyId = companyId || DEFAULT_COMPANY_ID;
   for (const def of DEFAULT_RULES) {
     await tx
       .insert(approvalRules)
       .values({
+        companyId: effectiveCompanyId,
         entityType: def.entityType,
         minAmount: def.minAmount,
         requiredRole: def.requiredRole,
@@ -70,9 +84,14 @@ export async function ensureApprovalDefaults(tx: DbOrTx): Promise<void> {
   }
 }
 
-export async function listApprovalRules(db: AppDatabase) {
-  await ensureApprovalDefaults(db);
-  const rows = await db.select().from(approvalRules).orderBy(asc(approvalRules.entityType));
+export async function listApprovalRules(db: AppDatabase, actorOrCompanyId?: RequestActor | string) {
+  const companyId = resolveCompanyId(actorOrCompanyId);
+  await ensureApprovalDefaults(db, companyId);
+  const rows = await db
+    .select()
+    .from(approvalRules)
+    .where(eq(approvalRules.companyId, companyId))
+    .orderBy(asc(approvalRules.entityType));
   return rows.map((r) => ({
     ...r,
     minAmount: num(r.minAmount),
@@ -87,10 +106,12 @@ export async function upsertApprovalRule(
   data: z.infer<typeof upsertApprovalRuleSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const [row] = await tx
       .insert(approvalRules)
       .values({
+        companyId,
         entityType: data.entityType,
         minAmount: toNumeric(data.minAmount, 4),
         requiredRole: data.requiredRole,
@@ -99,7 +120,7 @@ export async function upsertApprovalRule(
         updatedAt: new Date(),
       })
       .onConflictDoUpdate({
-        target: approvalRules.entityType,
+        target: [approvalRules.companyId, approvalRules.entityType],
         set: {
           minAmount: toNumeric(data.minAmount, 4),
           requiredRole: data.requiredRole,
@@ -111,6 +132,7 @@ export async function upsertApprovalRule(
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -133,12 +155,20 @@ export async function upsertApprovalRule(
 export async function checkApprovalRequired(
   tx: DbOrTx,
   entityType: ApprovalEntityType,
-  amount: number
+  amount: number,
+  companyId: string = DEFAULT_COMPANY_ID
 ) {
+  const effectiveCompanyId = companyId || DEFAULT_COMPANY_ID;
   const [rule] = await tx
     .select()
     .from(approvalRules)
-    .where(and(eq(approvalRules.entityType, entityType), eq(approvalRules.isActive, true)))
+    .where(
+      and(
+        eq(approvalRules.companyId, effectiveCompanyId),
+        eq(approvalRules.entityType, entityType),
+        eq(approvalRules.isActive, true)
+      )
+    )
     .limit(1);
 
   if (!rule) return null;
@@ -160,9 +190,11 @@ export async function createApprovalRequest(
     ipAddress?: string;
   }
 ) {
+  const companyId = actorCompanyId(input.actor);
   const [reqRow] = await tx
     .insert(approvalRequests)
     .values({
+      companyId,
       entityType: input.entityType,
       entityId: input.entityId,
       entityNumber: input.entityNumber,
@@ -175,6 +207,7 @@ export async function createApprovalRequest(
     .returning();
 
   await tx.insert(notifications).values({
+    companyId,
     type: "approval_required",
     title: `Approval Required: ${input.entityNumber}`,
     message: `${input.actor.name} submitted ${input.entityType.replace(/_/g, " ")} ${input.entityNumber} (${input.amount.toFixed(2)}) for approval.`,
@@ -184,6 +217,7 @@ export async function createApprovalRequest(
   });
 
   await writeAuditLog(tx, {
+    companyId,
     userId: input.actor.id,
     userName: input.actor.name,
     userRole: input.actor.role,
@@ -196,11 +230,26 @@ export async function createApprovalRequest(
     ipAddress: input.ipAddress,
   });
 
-  const approverEmails = await tx
+  let approverEmails = await tx
     .select({ email: users.email })
-    .from(userRoles)
-    .innerJoin(users, eq(users.id, userRoles.userId))
-    .where(and(inArray(userRoles.role, ["admin", "manager"]), eq(users.isActive, true)));
+    .from(userCompanies)
+    .innerJoin(users, eq(users.id, userCompanies.userId))
+    .where(
+      and(
+        eq(userCompanies.companyId, companyId),
+        eq(userCompanies.isActive, true),
+        inArray(userCompanies.role, ["admin", "manager"]),
+        eq(users.isActive, true)
+      )
+    );
+
+  if (approverEmails.length === 0 && companyId === DEFAULT_COMPANY_ID) {
+    approverEmails = await tx
+      .select({ email: users.email })
+      .from(userRoles)
+      .innerJoin(users, eq(users.id, userRoles.userId))
+      .where(and(inArray(userRoles.role, ["admin", "manager"]), eq(users.isActive, true)));
+  }
 
   const recipients = approverEmails.map((u) => u.email).filter(Boolean);
   if (recipients.length > 0) {
@@ -216,9 +265,10 @@ export async function createApprovalRequest(
 }
 
 export async function listApprovalRequests(db: AppDatabase, actor: RequestActor) {
-  await ensureApprovalDefaults(db);
+  const companyId = actorCompanyId(actor);
+  await ensureApprovalDefaults(db, companyId);
 
-  const cond =
+  const scopeCond =
     actor.role === "admin" || actor.branchScopeMode === "all"
       ? undefined
       : actor.branchIds.length > 0
@@ -228,10 +278,14 @@ export async function listApprovalRequests(db: AppDatabase, actor: RequestActor)
           )
         : eq(approvalRequests.requestedBy, actor.id);
 
+  const whereCond = scopeCond
+    ? and(eq(approvalRequests.companyId, companyId), scopeCond)
+    : eq(approvalRequests.companyId, companyId);
+
   const rows = await db
     .select()
     .from(approvalRequests)
-    .where(cond)
+    .where(whereCond)
     .orderBy(desc(approvalRequests.requestedAt))
     .limit(200);
 
@@ -251,6 +305,7 @@ export async function reviewApprovalRequest(
   comment = "",
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const reqRows = await tx.execute<{
       id: string;
@@ -265,7 +320,7 @@ export async function reviewApprovalRequest(
     }>(sql`
       SELECT id, entity_type, entity_id, entity_number, branch_id, amount, status, requested_by, requested_by_name
       FROM approval_requests
-      WHERE id = ${requestId}
+      WHERE id = ${requestId} AND company_id = ${companyId}
       FOR UPDATE
     `);
 
@@ -278,7 +333,7 @@ export async function reviewApprovalRequest(
     const [rule] = await tx
       .select()
       .from(approvalRules)
-      .where(eq(approvalRules.entityType, req.entity_type))
+      .where(and(eq(approvalRules.companyId, companyId), eq(approvalRules.entityType, req.entity_type)))
       .limit(1);
 
     const requiredRole = rule?.requiredRole ?? "manager";
@@ -288,17 +343,31 @@ export async function reviewApprovalRequest(
 
     let selfApprovedSingleAdmin = false;
     if (req.requested_by && req.requested_by === actor.id) {
-      const eligibleRoles = requiredRole === "admin" ? ["admin"] : ["admin", "manager"];
-      const [{ approverCount }] = await tx
-        .select({ approverCount: sql<number>`count(distinct ${users.id})::int` })
+      const eligibleRoles = (requiredRole === "admin" ? ["admin"] : ["admin", "manager"]) as Array<
+        "admin" | "manager" | "user"
+      >;
+      const [{ companyApproverCount }] = await tx
+        .select({ companyApproverCount: sql<number>`count(distinct ${users.id})::int` })
         .from(users)
-        .innerJoin(userRoles, eq(userRoles.userId, users.id))
+        .innerJoin(userCompanies, eq(userCompanies.userId, users.id))
         .where(
           and(
+            eq(userCompanies.companyId, companyId),
+            eq(userCompanies.isActive, true),
             eq(users.isActive, true),
-            inArray(userRoles.role, eligibleRoles as Array<"admin" | "manager" | "user">)
+            inArray(userCompanies.role, eligibleRoles)
           )
         );
+
+      let approverCount = companyApproverCount;
+      if (approverCount === 0 && companyId === DEFAULT_COMPANY_ID) {
+        const [{ fallbackCount }] = await tx
+          .select({ fallbackCount: sql<number>`count(distinct ${users.id})::int` })
+          .from(users)
+          .innerJoin(userRoles, eq(userRoles.userId, users.id))
+          .where(and(eq(users.isActive, true), inArray(userRoles.role, eligibleRoles)));
+        approverCount = fallbackCount;
+      }
 
       if (approverCount > 1 || actor.role !== "admin") {
         throw new AppError(
@@ -321,16 +390,17 @@ export async function reviewApprovalRequest(
         selfApprovedSingleAdmin,
         reviewedAt: now,
       })
-      .where(eq(approvalRequests.id, requestId))
+      .where(and(eq(approvalRequests.id, requestId), eq(approvalRequests.companyId, companyId)))
       .returning();
 
     if (decision === "approved") {
-      await executeApprovedDocument(tx, req.entity_type, req.entity_id, actor);
+      await executeApprovedDocument(tx, req.entity_type, req.entity_id, actor, companyId);
     } else {
-      await markRejectedDocument(tx, req.entity_type, req.entity_id);
+      await markRejectedDocument(tx, req.entity_type, req.entity_id, companyId);
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -361,18 +431,23 @@ async function executeApprovedDocument(
   tx: DbOrTx,
   entityType: ApprovalEntityType,
   entityId: string,
-  actor: RequestActor
+  actor: RequestActor,
+  companyId: string
 ): Promise<void> {
   if (entityType === "purchase_order") {
     await tx
       .update(purchaseOrders)
       .set({ status: "Issued", approvalStatus: "approved", approvedBy: actor.id, updatedAt: new Date() })
-      .where(eq(purchaseOrders.id, entityId));
+      .where(and(eq(purchaseOrders.id, entityId), eq(purchaseOrders.companyId, companyId)));
     return;
   }
 
   if (entityType === "stock_transfer") {
-    const [tr] = await tx.select().from(stockTransfers).where(eq(stockTransfers.id, entityId)).limit(1);
+    const [tr] = await tx
+      .select()
+      .from(stockTransfers)
+      .where(and(eq(stockTransfers.id, entityId), eq(stockTransfers.companyId, companyId)))
+      .limit(1);
     if (!tr || tr.status !== "Draft") return;
 
     const lines = await tx
@@ -385,6 +460,7 @@ async function executeApprovedDocument(
     for (const line of lines) {
       const qtySent = num(line.qtySent);
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: tr.fromBranchId,
         productId: line.productId,
         qtyDelta: -qtySent,
@@ -405,6 +481,7 @@ async function executeApprovedDocument(
 
     if (totalDispatchedVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: tr.fromBranchId,
         sourceType: "stock_transfer",
         sourceId: tr.id,
@@ -427,12 +504,16 @@ async function executeApprovedDocument(
         shippedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(stockTransfers.id, entityId));
+      .where(and(eq(stockTransfers.id, entityId), eq(stockTransfers.companyId, companyId)));
     return;
   }
 
   if (entityType === "stock_adjustment") {
-    const [adj] = await tx.select().from(stockAdjustments).where(eq(stockAdjustments.id, entityId)).limit(1);
+    const [adj] = await tx
+      .select()
+      .from(stockAdjustments)
+      .where(and(eq(stockAdjustments.id, entityId), eq(stockAdjustments.companyId, companyId)))
+      .limit(1);
     if (!adj || adj.status !== "Pending Approval") return;
 
     const lines = await tx
@@ -446,12 +527,17 @@ async function executeApprovedDocument(
     for (const line of lines) {
       const delta = num(line.qtyDelta);
       if (delta === 0) continue;
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+        .limit(1);
       const fallback = num(prod?.costPrice ?? line.unitCost);
-      const locked = await lockBranchProduct(tx, adj.branchId, line.productId, fallback);
+      const locked = await lockBranchProduct(tx, adj.branchId, line.productId, fallback, companyId);
       const unitCost = locked.avgCost > 0 ? locked.avgCost : fallback;
 
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: adj.branchId,
         productId: line.productId,
         qtyDelta: delta,
@@ -483,6 +569,7 @@ async function executeApprovedDocument(
     if (Math.abs(netInvDelta) > 0.0001) {
       const absVal = Math.abs(netInvDelta);
       await postMappedJournal(tx, {
+        companyId,
         branchId: adj.branchId,
         sourceType: "stock_adjustment",
         sourceId: adj.id,
@@ -505,12 +592,16 @@ async function executeApprovedDocument(
     await tx
       .update(stockAdjustments)
       .set({ status: "Posted", approvalStatus: "approved", approvedBy: actor.id })
-      .where(eq(stockAdjustments.id, entityId));
+      .where(and(eq(stockAdjustments.id, entityId), eq(stockAdjustments.companyId, companyId)));
     return;
   }
 
   if (entityType === "stock_write_off") {
-    const [wo] = await tx.select().from(stockWriteOffs).where(eq(stockWriteOffs.id, entityId)).limit(1);
+    const [wo] = await tx
+      .select()
+      .from(stockWriteOffs)
+      .where(and(eq(stockWriteOffs.id, entityId), eq(stockWriteOffs.companyId, companyId)))
+      .limit(1);
     if (!wo || wo.status !== "Pending Approval") return;
 
     const lines = await tx
@@ -523,6 +614,7 @@ async function executeApprovedDocument(
     for (const line of lines) {
       const qty = num(line.quantity);
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: wo.branchId,
         productId: line.productId,
         qtyDelta: -qty,
@@ -545,6 +637,7 @@ async function executeApprovedDocument(
 
     if (totalWriteOffVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: wo.branchId,
         sourceType: "write_off",
         sourceId: wo.id,
@@ -561,34 +654,35 @@ async function executeApprovedDocument(
     await tx
       .update(stockWriteOffs)
       .set({ status: "Posted", approvalStatus: "approved", approvedBy: actor.id })
-      .where(eq(stockWriteOffs.id, entityId));
+      .where(and(eq(stockWriteOffs.id, entityId), eq(stockWriteOffs.companyId, companyId)));
   }
 }
 
 async function markRejectedDocument(
   tx: DbOrTx,
   entityType: ApprovalEntityType,
-  entityId: string
+  entityId: string,
+  companyId: string
 ): Promise<void> {
   if (entityType === "purchase_order") {
     await tx
       .update(purchaseOrders)
       .set({ status: "Draft", approvalStatus: "rejected", updatedAt: new Date() })
-      .where(eq(purchaseOrders.id, entityId));
+      .where(and(eq(purchaseOrders.id, entityId), eq(purchaseOrders.companyId, companyId)));
   } else if (entityType === "stock_transfer") {
     await tx
       .update(stockTransfers)
       .set({ status: "Draft", approvalStatus: "rejected", updatedAt: new Date() })
-      .where(eq(stockTransfers.id, entityId));
+      .where(and(eq(stockTransfers.id, entityId), eq(stockTransfers.companyId, companyId)));
   } else if (entityType === "stock_adjustment") {
     await tx
       .update(stockAdjustments)
       .set({ status: "Rejected", approvalStatus: "rejected" })
-      .where(eq(stockAdjustments.id, entityId));
+      .where(and(eq(stockAdjustments.id, entityId), eq(stockAdjustments.companyId, companyId)));
   } else if (entityType === "stock_write_off") {
     await tx
       .update(stockWriteOffs)
       .set({ status: "Rejected", approvalStatus: "rejected" })
-      .where(eq(stockWriteOffs.id, entityId));
+      .where(and(eq(stockWriteOffs.id, entityId), eq(stockWriteOffs.companyId, companyId)));
   }
 }

@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Receipt, Plus, AlertTriangle, Trash2, Ban, Search } from "lucide-react";
-import { TablePagination } from "@/components/TablePagination";
+import { Receipt, Plus, AlertTriangle, Trash2, Ban, Mail } from "lucide-react";
 import { useVendorBillsPageQuery } from "@/hooks/queries/usePurchasingQueries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,10 +12,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { EnterpriseDataTable, type EnterpriseColumn } from "@/components/EnterpriseDataTable";
+import { AttachmentsPanel } from "@/components/AttachmentsPanel";
+import { EmailDocumentDialog } from "@/components/EmailDocumentDialog";
 import { useBranch } from "@/contexts/BranchContext";
-import { useInventory } from "@/contexts/InventoryContext";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
@@ -58,11 +61,15 @@ interface DraftLine {
 export default function VendorBills() {
   const { t } = useTranslation();
   const { activeBranchId } = useBranch();
-  const { products } = useInventory();
-  const { bills, receives, purchaseOrders, vendors, createBill, deleteBill, voidBill, billBalance } = usePurchases();
+  const { products } = useInventoryScope({ products: true });
+  const { bills, receives, purchaseOrders, vendors, createBill, deleteBill, voidBill, billBalance } = usePurchasingScope({ bills: true, receives: true, purchaseOrders: true, vendors: true, products: true });
   const { user } = useAuth();
+  const { can } = usePermissions();
   const { settings, taxCodes } = useSettings();
   const { toast } = useToast();
+  const canCreate = can("purchases", "create");
+  const canDelete = can("purchases", "delete");
+  const [emailTarget, setEmailTarget] = useState<VendorBill | null>(null);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [receiveId, setReceiveId] = useState<string>("");
@@ -276,10 +283,12 @@ export default function VendorBills() {
             {t("pages.purchases.bills.description", "Vendor invoices matched against purchase orders and goods receipts.")}
           </p>
         </div>
-        <Button onClick={() => setDialogOpen(true)} disabled={vendors.length === 0}>
-          <Plus className="me-2 h-4 w-4" />
-          New Bill
-        </Button>
+        {canCreate && (
+          <Button onClick={() => setDialogOpen(true)} disabled={vendors.length === 0}>
+            <Plus className="me-2 h-4 w-4" />
+            New Bill
+          </Button>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -307,93 +316,127 @@ export default function VendorBills() {
 
       <Card>
         <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <CardTitle>All Bills ({billsPage?.pageInfo?.total ?? bills.length})</CardTitle>
-            <div className="relative w-72">
-              <Search className="absolute start-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                className="ps-9"
-                placeholder={t("common.search", "Search bills...")}
-                value={searchTerm}
-                onChange={(e) => {
-                  setSearchTerm(e.target.value);
-                  setPage(1);
-                }}
-              />
-            </div>
-          </div>
+          <CardTitle>All Bills ({billsPage?.pageInfo?.total ?? bills.length})</CardTitle>
         </CardHeader>
         <CardContent>
-          {paginatedBills.length === 0 ? (
-            <div className="py-10 text-center text-muted-foreground">
-              No bills yet. Create one from a goods receipt to start tracking payables.
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Bill #</TableHead>
-                  <TableHead>Vendor</TableHead>
-                  <TableHead>Bill Date</TableHead>
-                  <TableHead>Due Date</TableHead>
-                  <TableHead>Match</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-end">Amount</TableHead>
-                  <TableHead className="text-end">Balance</TableHead>
-                  <TableHead className="w-20" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {paginatedBills.map((bill) => (
-                  <TableRow key={bill.id} className="cursor-pointer" onClick={() => setDetailBill(bill)}>
-                    <TableCell className="font-medium">{bill.billNumber}</TableCell>
-                    <TableCell>{bill.vendorName}</TableCell>
-                    <TableCell>{bill.billDate}</TableCell>
-                    <TableCell>{bill.dueDate}</TableCell>
-                    <TableCell>
-                      <Badge variant={bill.matchStatus === "matched" ? "secondary" : "destructive"}>
-                        {matchLabel[bill.matchStatus]}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={statusVariant[bill.status]}>{bill.status}</Badge>
-                    </TableCell>
-                    <TableCell className="text-end">{formatMoney(bill.grandTotal, settings.currency)}</TableCell>
-                    <TableCell className="text-end font-medium">{formatMoney(billBalance(bill), settings.currency)}</TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      <div className="flex justify-end gap-1">
-                        {bill.status === "Draft" && bill.amountPaid === 0 && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={`Delete ${bill.billNumber}`}
-                            onClick={() => setPendingDelete(bill)}
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        )}
-                        {bill.status !== "Draft" && bill.status !== "Cancelled" && bill.amountPaid === 0 && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={`Void ${bill.billNumber}`}
-                            title={t("common.void", "Void")}
-                            onClick={() => {
-                              setPendingVoid(bill);
-                              setVoidReason("");
-                            }}
-                          >
-                            <Ban className="h-4 w-4 text-destructive" />
-                          </Button>
-                        )}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-          <TablePagination pageInfo={billsPage?.pageInfo} onPageChange={setPage} />
+          <EnterpriseDataTable
+            data={paginatedBills}
+            columns={
+              [
+                {
+                  id: "billNumber",
+                  header: "Bill #",
+                  hideable: false,
+                  sortable: true,
+                  cell: (bill) => <span className="font-medium">{bill.billNumber}</span>,
+                },
+                {
+                  id: "vendorName",
+                  header: "Vendor",
+                  sortable: true,
+                  accessorKey: "vendorName",
+                },
+                {
+                  id: "billDate",
+                  header: "Bill Date",
+                  sortable: true,
+                  accessorKey: "billDate",
+                },
+                {
+                  id: "dueDate",
+                  header: "Due Date",
+                  sortable: true,
+                  accessorKey: "dueDate",
+                },
+                {
+                  id: "matchStatus",
+                  header: "Match",
+                  cell: (bill) => (
+                    <Badge variant={bill.matchStatus === "matched" ? "secondary" : "destructive"}>
+                      {matchLabel[bill.matchStatus]}
+                    </Badge>
+                  ),
+                },
+                {
+                  id: "status",
+                  header: "Status",
+                  cell: (bill) => <Badge variant={statusVariant[bill.status]}>{bill.status}</Badge>,
+                },
+                {
+                  id: "grandTotal",
+                  header: "Amount",
+                  align: "end",
+                  sortable: true,
+                  cell: (bill) => formatMoney(bill.grandTotal, settings.currency),
+                },
+                {
+                  id: "balance",
+                  header: "Balance",
+                  align: "end",
+                  cell: (bill) => (
+                    <span className="font-medium">{formatMoney(billBalance(bill), settings.currency)}</span>
+                  ),
+                },
+                {
+                  id: "actions",
+                  header: "",
+                  hideable: false,
+                  align: "end",
+                  cell: (bill) => (
+                    <div className="flex justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`Email ${bill.billNumber}`}
+                        onClick={() => setEmailTarget(bill)}
+                      >
+                        <Mail className="h-4 w-4" />
+                      </Button>
+                      {canDelete && bill.status === "Draft" && bill.amountPaid === 0 && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Delete ${bill.billNumber}`}
+                          onClick={() => setPendingDelete(bill)}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      )}
+                      {canDelete && bill.status !== "Draft" && bill.status !== "Cancelled" && bill.amountPaid === 0 && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Void ${bill.billNumber}`}
+                          title={t("common.void", "Void")}
+                          onClick={() => {
+                            setPendingVoid(bill);
+                            setVoidReason("");
+                          }}
+                        >
+                          <Ban className="h-4 w-4 text-destructive" />
+                        </Button>
+                      )}
+                    </div>
+                  ),
+                },
+              ] satisfies EnterpriseColumn<VendorBill>[]
+            }
+            getRowId={(bill) => bill.id}
+            emptyMessage="No bills yet. Create one from a goods receipt to start tracking payables."
+            searchValue={searchTerm}
+            onSearchChange={(val) => {
+              setSearchTerm(val);
+              setPage(1);
+            }}
+            searchPlaceholder={t("common.search", "Search bills...")}
+            selectable
+            savedViewsResource="vendor-bills"
+            exportResource="vendor-bills"
+            pageInfo={billsPage?.pageInfo}
+            onPageChange={setPage}
+            onRowClick={(bill) => setDetailBill(bill)}
+            testId="vendor-bills-table"
+          />
         </CardContent>
       </Card>
 
@@ -646,10 +689,33 @@ export default function VendorBills() {
                 <p className="text-sm text-destructive">Void reason: {detailBill.voidReason}</p>
               )}
               {detailBill.notes && <p className="text-sm text-muted-foreground">{detailBill.notes}</p>}
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEmailTarget(detailBill)}
+                >
+                  <Mail className="h-4 w-4 me-1.5" />
+                  {t("emailDialog.sendEmail", "Email Bill")}
+                </Button>
+              </div>
+              <AttachmentsPanel entityType="vendor_bill" entityId={detailBill.id} />
             </>
           )}
         </DialogContent>
       </Dialog>
+
+      {emailTarget && (
+        <EmailDocumentDialog
+          open={emailTarget !== null}
+          onOpenChange={(open) => !open && setEmailTarget(null)}
+          documentType="vendor_bill"
+          documentId={emailTarget.id}
+          documentNumber={emailTarget.billNumber}
+          defaultRecipient={vendors.find((v) => v.id === emailTarget.vendorId)?.email ?? ""}
+        />
+      )}
 
       <ConfirmDeleteDialog
         open={!!pendingDelete}

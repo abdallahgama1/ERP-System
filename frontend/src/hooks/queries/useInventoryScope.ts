@@ -1,7 +1,8 @@
-import React, { createContext, useCallback, useContext, useMemo, ReactNode } from "react";
+import { useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
-import { erpQueryKeys } from "@/hooks/queries/queryKeys";
+import { useBranch } from "@/contexts/BranchContext";
+import { erpQueryKeys } from "./queryKeys";
 import {
   useAdjustmentsQuery,
   useBranchesDirectoryQuery,
@@ -11,8 +12,7 @@ import {
   useWriteOffsQuery,
   type ApiBranchRow,
   type ApiProductRow,
-} from "@/hooks/queries/useInventoryQueries";
-import { useBranch } from "./BranchContext";
+} from "./useInventoryQueries";
 import type {
   Adjustment,
   AdjustmentReason,
@@ -26,157 +26,49 @@ import type {
   WriteOffReason,
 } from "@/types";
 
-interface InventoryContextType {
-  products: Product[];
-  addProduct: (data: Omit<Product, "productId">) => Promise<{ ok: true; product: Product } | { ok: false; error: string }>;
-  updateProduct: (productId: string, data: Omit<Product, "productId">) => Promise<{ ok: true } | { ok: false; error: string }>;
-  deleteProduct: (productId: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  branchProducts: BranchProduct[];
-
-  branches: Branch[];
-  addBranch: (data: Omit<Branch, "branchId">) => Promise<{ ok: true; branch: Branch } | { ok: false; error: string }>;
-  updateBranch: (branchId: string, data: Omit<Branch, "branchId">) => Promise<{ ok: true } | { ok: false; error: string }>;
-  deleteBranch: (branchId: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  getAvailableQuantity: (productId: string) => number;
-  getAssignedQuantity: (productId: string) => number;
-
-  assignToBranch: (
-    productId: string,
-    branchId: string,
-    quantity: number,
-    sellingPrice: number,
-    costPrice: number
-  ) => Promise<boolean>;
-  updateBranchProduct: (
-    productId: string,
-    branchId: string,
-    newQuantity: number,
-    sellingPrice: number,
-    costPrice: number
-  ) => Promise<boolean>;
-  removeFromBranch: (productId: string, branchId: string) => Promise<void>;
-
-  receiveGoodsToBranch: (
-    productId: string,
-    branchId: string,
-    quantity: number,
-    costPrice: number,
-    sellingPrice?: number,
-    reference?: string,
-    createdBy?: string
-  ) => Promise<void>;
-  returnToVendor: (input: {
-    productId: string;
-    branchId: string;
-    quantity: number;
-    reference?: string;
-    notes?: string;
-    createdBy?: string;
-  }) => Promise<{ ok: true } | { ok: false; error: string }>;
-  shipGoodsFromBranch: (input: {
-    productId: string;
-    branchId: string;
-    quantity: number;
-    reference?: string;
-    notes?: string;
-    createdBy?: string;
-  }) => Promise<{ ok: true } | { ok: false; error: string }>;
-  restockCustomerReturn: (input: {
-    productId: string;
-    branchId: string;
-    quantity: number;
-    reference?: string;
-    notes?: string;
-    createdBy?: string;
-  }) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  movements: StockMovement[];
-
-  adjustments: Adjustment[];
-  createAdjustment: (input: {
-    productId: string;
-    branchId: string;
-    newQty: number;
-    reason: AdjustmentReason;
-    note?: string;
-    approver?: string;
-    createdBy?: string;
-  }) => Promise<{ ok: true; adjustment: Adjustment } | { ok: false; error: string }>;
-
-  writeOffs: WriteOff[];
-  createWriteOff: (input: {
-    productId: string;
-    branchId: string;
-    quantity: number;
-    reason: WriteOffReason;
-    note?: string;
-    createdBy?: string;
-    lotAllocations?: Array<{ lotId?: string; lotNumber?: string; quantity: number }>;
-    serialNumbers?: string[];
-  }) => Promise<{ ok: true; writeOff: WriteOff } | { ok: false; error: string }>;
-
-  transfers: Transfer[];
-  getInTransitQty: (productId: string) => number;
-  createTransfer: (input: {
-    sourceBranchId: string;
-    destBranchId: string;
-    items: Array<{
-      productId: string;
-      quantity: number;
-      lotAllocations?: Array<{ lotId?: string; lotNumber?: string; quantity: number }>;
-      serialNumbers?: string[];
-    }>;
-    notes?: string;
-    createdBy?: string;
-  }) => Promise<{ ok: true; transfer: Transfer } | { ok: false; error: string }>;
-  dispatchTransfer: (transferId: string, actor?: string) => Promise<{ ok: boolean; error?: string }>;
-  receiveTransfer: (
-    transferId: string,
-    receivedMap: Record<string, number>,
-    shortageResolution?: TransferShortageResolution,
-    actor?: string
-  ) => Promise<{ ok: boolean; error?: string }>;
-  cancelTransfer: (transferId: string, actor?: string) => Promise<{ ok: boolean; error?: string }>;
-
-  refreshInventory: () => Promise<void>;
+export interface InventoryScopeOptions {
+  products?: boolean;
+  movements?: boolean;
+  adjustments?: boolean;
+  writeOffs?: boolean;
+  transfers?: boolean;
+  directoryBranches?: boolean;
 }
 
-const InventoryContext = createContext<InventoryContextType | undefined>(undefined);
-
-export function InventoryProvider({ children }: { children: ReactNode }) {
+export function useInventoryScope(options: InventoryScopeOptions = {}) {
   const queryClient = useQueryClient();
-  const { activeBranchId, refreshBranches } = useBranch();
+  const { branches: shellBranches, activeBranchId, refreshBranches } = useBranch();
 
-  const branchesQuery = useBranchesDirectoryQuery();
-  const productsQuery = useProductsQuery();
-  const movementsQuery = useMovementsQuery();
-  const adjustmentsQuery = useAdjustmentsQuery();
-  const writeOffsQuery = useWriteOffsQuery();
-  const transfersQuery = useTransfersQuery();
+  const branchesDirQuery = useBranchesDirectoryQuery(Boolean(options.directoryBranches));
+  const productsQuery = useProductsQuery(Boolean(options.products));
+  const movementsQuery = useMovementsQuery(undefined, undefined, Boolean(options.movements));
+  const adjustmentsQuery = useAdjustmentsQuery(Boolean(options.adjustments));
+  const writeOffsQuery = useWriteOffsQuery(Boolean(options.writeOffs));
+  const transfersQuery = useTransfersQuery(Boolean(options.transfers));
 
-  const loadAll = useCallback(async () => {
+  const refreshInventory = useCallback(async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: erpQueryKeys.branches }),
       queryClient.invalidateQueries({ queryKey: erpQueryKeys.inventory.all }),
     ]);
   }, [queryClient]);
 
-  const branches = useMemo<Branch[]>(
-    () =>
-      (branchesQuery.data?.branches ?? []).map((b) => ({
-        branchId: b.id,
-        branch_name: b.name,
-        branch_location: b.location || "",
-        contact_number: b.phone || "",
-        code: b.code,
-        branchType: b.branchType,
-        isDefault: b.isDefault,
-        isActive: b.isActive,
-      })),
-    [branchesQuery.data]
-  );
+  const branches = useMemo<Branch[]>(() => {
+    const source =
+      options.directoryBranches && branchesDirQuery.data?.branches
+        ? branchesDirQuery.data.branches
+        : shellBranches;
+    return source.map((b) => ({
+      branchId: b.id,
+      branch_name: b.name,
+      branch_location: b.location || "",
+      contact_number: b.phone || "",
+      code: b.code,
+      branchType: b.branchType,
+      isDefault: b.isDefault,
+      isActive: b.isActive,
+    }));
+  }, [options.directoryBranches, branchesDirQuery.data, shellBranches]);
 
   const branchMap = useMemo(() => new Map(branches.map((b) => [b.branchId, b])), [branches]);
 
@@ -337,8 +229,10 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
     [transfersQuery.data, branchMap, productMap]
   );
 
-  const addProduct = useCallback<InventoryContextType["addProduct"]>(
-    async (data) => {
+  const addProduct = useCallback(
+    async (
+      data: Omit<Product, "productId">
+    ): Promise<{ ok: true; product: Product } | { ok: false; error: string }> => {
       try {
         const targetBranchId =
           activeBranchId !== "all"
@@ -370,7 +264,7 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             initialStock,
           },
         });
-        await loadAll();
+        await refreshInventory();
         return {
           ok: true,
           product: {
@@ -389,11 +283,14 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to add product" };
       }
     },
-    [activeBranchId, branches, loadAll]
+    [activeBranchId, branches, refreshInventory]
   );
 
-  const updateProduct = useCallback<InventoryContextType["updateProduct"]>(
-    async (productId, data) => {
+  const updateProduct = useCallback(
+    async (
+      productId: string,
+      data: Omit<Product, "productId">
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/products/${productId}`, {
           method: "PUT",
@@ -414,30 +311,32 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             pickingStrategy: data.pickingStrategy ?? "FEFO",
           },
         });
-        await loadAll();
+        await refreshInventory();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to update product" };
       }
     },
-    [loadAll]
+    [refreshInventory]
   );
 
-  const deleteProduct = useCallback<InventoryContextType["deleteProduct"]>(
-    async (productId) => {
+  const deleteProduct = useCallback(
+    async (productId: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/products/${productId}`, { method: "DELETE" });
-        await loadAll();
+        await refreshInventory();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to delete product" };
       }
     },
-    [loadAll]
+    [refreshInventory]
   );
 
-  const addBranch = useCallback<InventoryContextType["addBranch"]>(
-    async (data) => {
+  const addBranch = useCallback(
+    async (
+      data: Omit<Branch, "branchId">
+    ): Promise<{ ok: true; branch: Branch } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ branch: ApiBranchRow }>("/api/branches", {
           method: "POST",
@@ -449,7 +348,7 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             code: data.code,
           },
         });
-        await Promise.all([loadAll(), refreshBranches()]);
+        await Promise.all([refreshInventory(), refreshBranches()]);
         return {
           ok: true,
           branch: {
@@ -467,11 +366,14 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to add branch" };
       }
     },
-    [loadAll, refreshBranches]
+    [refreshInventory, refreshBranches]
   );
 
-  const updateBranch = useCallback<InventoryContextType["updateBranch"]>(
-    async (branchId, data) => {
+  const updateBranch = useCallback(
+    async (
+      branchId: string,
+      data: Omit<Branch, "branchId">
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/branches/${branchId}`, {
           method: "PUT",
@@ -482,26 +384,26 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             branchType: data.branchType,
           },
         });
-        await Promise.all([loadAll(), refreshBranches()]);
+        await Promise.all([refreshInventory(), refreshBranches()]);
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to update branch" };
       }
     },
-    [loadAll, refreshBranches]
+    [refreshInventory, refreshBranches]
   );
 
-  const deleteBranch = useCallback<InventoryContextType["deleteBranch"]>(
-    async (branchId) => {
+  const deleteBranch = useCallback(
+    async (branchId: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/branches/${branchId}`, { method: "DELETE" });
-        await Promise.all([loadAll(), refreshBranches()]);
+        await Promise.all([refreshInventory(), refreshBranches()]);
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to delete branch" };
       }
     },
-    [loadAll, refreshBranches]
+    [refreshInventory, refreshBranches]
   );
 
   const getAssignedQuantity = useCallback(
@@ -520,8 +422,14 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
     [products, getAssignedQuantity]
   );
 
-  const assignToBranch = useCallback<InventoryContextType["assignToBranch"]>(
-    async (productId, branchId, quantity, sellingPrice, costPrice) => {
+  const assignToBranch = useCallback(
+    async (
+      productId: string,
+      branchId: string,
+      quantity: number,
+      sellingPrice: number,
+      costPrice: number
+    ): Promise<boolean> => {
       try {
         await apiRequest("/api/branch-products/adjust-level", {
           method: "POST",
@@ -534,24 +442,28 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             notes: "Assigned stock level to branch",
           },
         });
-        await loadAll();
+        await refreshInventory();
         return true;
       } catch {
         return false;
       }
     },
-    [loadAll]
+    [refreshInventory]
   );
 
-  const updateBranchProduct = useCallback<InventoryContextType["updateBranchProduct"]>(
-    async (productId, branchId, newQuantity, sellingPrice, costPrice) => {
-      return assignToBranch(productId, branchId, newQuantity, sellingPrice, costPrice);
-    },
+  const updateBranchProduct = useCallback(
+    async (
+      productId: string,
+      branchId: string,
+      newQuantity: number,
+      sellingPrice: number,
+      costPrice: number
+    ): Promise<boolean> => assignToBranch(productId, branchId, newQuantity, sellingPrice, costPrice),
     [assignToBranch]
   );
 
-  const removeFromBranch = useCallback<InventoryContextType["removeFromBranch"]>(
-    async (productId, branchId) => {
+  const removeFromBranch = useCallback(
+    async (productId: string, branchId: string): Promise<void> => {
       const bp = branchProducts.find((x) => x.productId === productId && x.branchId === branchId);
       await apiRequest("/api/branch-products/adjust-level", {
         method: "POST",
@@ -563,44 +475,21 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
           notes: "Cleared branch stock",
         },
       });
-      await loadAll();
+      await refreshInventory();
     },
-    [branchProducts, loadAll]
+    [branchProducts, refreshInventory]
   );
 
-  const receiveGoodsToBranch = useCallback<InventoryContextType["receiveGoodsToBranch"]>(
-    async () => {
-      await loadAll();
-    },
-    [loadAll]
-  );
-
-  const returnToVendor = useCallback<InventoryContextType["returnToVendor"]>(
-    async () => {
-      await loadAll();
-      return { ok: true };
-    },
-    [loadAll]
-  );
-
-  const shipGoodsFromBranch = useCallback<InventoryContextType["shipGoodsFromBranch"]>(
-    async () => {
-      await loadAll();
-      return { ok: true };
-    },
-    [loadAll]
-  );
-
-  const restockCustomerReturn = useCallback<InventoryContextType["restockCustomerReturn"]>(
-    async () => {
-      await loadAll();
-      return { ok: true };
-    },
-    [loadAll]
-  );
-
-  const createAdjustment = useCallback<InventoryContextType["createAdjustment"]>(
-    async (input) => {
+  const createAdjustment = useCallback(
+    async (input: {
+      productId: string;
+      branchId: string;
+      newQty: number;
+      reason: AdjustmentReason;
+      note?: string;
+      approver?: string;
+      createdBy?: string;
+    }): Promise<{ ok: true; adjustment: Adjustment } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ adjustment: { id: string; adjustmentNumber: string; createdAt: string } }>(
           "/api/adjustments",
@@ -614,7 +503,7 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshInventory();
         const prod = products.find((p) => p.productId === input.productId);
         const br = branches.find((b) => b.branchId === input.branchId);
         const beforeQty =
@@ -640,11 +529,20 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create adjustment" };
       }
     },
-    [products, branches, branchProducts, loadAll]
+    [products, branches, branchProducts, refreshInventory]
   );
 
-  const createWriteOff = useCallback<InventoryContextType["createWriteOff"]>(
-    async (input) => {
+  const createWriteOff = useCallback(
+    async (input: {
+      productId: string;
+      branchId: string;
+      quantity: number;
+      reason: WriteOffReason;
+      note?: string;
+      createdBy?: string;
+      lotAllocations?: Array<{ lotId?: string; lotNumber?: string; quantity: number }>;
+      serialNumbers?: string[];
+    }): Promise<{ ok: true; writeOff: WriteOff } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ writeOff: { id: string; writeOffNumber: string; createdAt: string } }>(
           "/api/write-offs",
@@ -670,7 +568,7 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshInventory();
         const prod = products.find((p) => p.productId === input.productId);
         const br = branches.find((b) => b.branchId === input.branchId);
         const created: WriteOff = {
@@ -693,7 +591,7 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create write-off" };
       }
     },
-    [products, branches, loadAll]
+    [products, branches, refreshInventory]
   );
 
   const getInTransitQty = useCallback(
@@ -711,8 +609,19 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
     [transfers]
   );
 
-  const createTransfer = useCallback<InventoryContextType["createTransfer"]>(
-    async (input) => {
+  const createTransfer = useCallback(
+    async (input: {
+      sourceBranchId: string;
+      destBranchId: string;
+      items: Array<{
+        productId: string;
+        quantity: number;
+        lotAllocations?: Array<{ lotId?: string; lotNumber?: string; quantity: number }>;
+        serialNumbers?: string[];
+      }>;
+      notes?: string;
+      createdBy?: string;
+    }): Promise<{ ok: true; transfer: Transfer } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ transfer: { id: string; transferNumber: string; createdAt: string } }>(
           "/api/transfers",
@@ -727,7 +636,7 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshInventory();
         const src = branches.find((b) => b.branchId === input.sourceBranchId);
         const dst = branches.find((b) => b.branchId === input.destBranchId);
         const created: Transfer = {
@@ -757,24 +666,29 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create transfer" };
       }
     },
-    [branches, products, loadAll]
+    [branches, products, refreshInventory]
   );
 
-  const dispatchTransfer = useCallback<InventoryContextType["dispatchTransfer"]>(
-    async (transferId) => {
+  const dispatchTransfer = useCallback(
+    async (transferId: string, _actor?: string): Promise<{ ok: boolean; error?: string }> => {
       try {
         await apiRequest(`/api/transfers/${transferId}/dispatch`, { method: "POST" });
-        await loadAll();
+        await refreshInventory();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to dispatch transfer" };
       }
     },
-    [loadAll]
+    [refreshInventory]
   );
 
-  const receiveTransfer = useCallback<InventoryContextType["receiveTransfer"]>(
-    async (transferId, receivedMap, shortageResolution) => {
+  const receiveTransfer = useCallback(
+    async (
+      transferId: string,
+      receivedMap: Record<string, number>,
+      shortageResolution?: TransferShortageResolution,
+      _actor?: string
+    ): Promise<{ ok: boolean; error?: string }> => {
       const tr = transfers.find((t) => t.id === transferId);
       if (!tr) return { ok: false, error: "Transfer not found" };
 
@@ -791,102 +705,60 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
             shortageResolution: shortageResolution ?? "none",
           },
         });
-        await loadAll();
+        await refreshInventory();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to receive transfer" };
       }
     },
-    [transfers, loadAll]
+    [transfers, refreshInventory]
   );
 
-  const cancelTransfer = useCallback<InventoryContextType["cancelTransfer"]>(
-    async (transferId) => {
+  const cancelTransfer = useCallback(
+    async (transferId: string, _actor?: string): Promise<{ ok: boolean; error?: string }> => {
       try {
         await apiRequest(`/api/transfers/${transferId}/cancel`, { method: "POST" });
-        await loadAll();
+        await refreshInventory();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to cancel transfer" };
       }
     },
-    [loadAll]
+    [refreshInventory]
   );
 
-  const value = useMemo<InventoryContextType>(
-    () => ({
-      products,
-      addProduct,
-      updateProduct,
-      deleteProduct,
-      branchProducts,
-      branches,
-      addBranch,
-      updateBranch,
-      deleteBranch,
-      getAvailableQuantity,
-      getAssignedQuantity,
-      assignToBranch,
-      updateBranchProduct,
-      removeFromBranch,
-      receiveGoodsToBranch,
-      returnToVendor,
-      shipGoodsFromBranch,
-      restockCustomerReturn,
-      movements,
-      adjustments,
-      createAdjustment,
-      writeOffs,
-      createWriteOff,
-      transfers,
-      getInTransitQty,
-      createTransfer,
-      dispatchTransfer,
-      receiveTransfer,
-      cancelTransfer,
-      refreshInventory: loadAll,
-    }),
-    [
-      products,
-      addProduct,
-      updateProduct,
-      deleteProduct,
-      branchProducts,
-      branches,
-      addBranch,
-      updateBranch,
-      deleteBranch,
-      getAvailableQuantity,
-      getAssignedQuantity,
-      assignToBranch,
-      updateBranchProduct,
-      removeFromBranch,
-      receiveGoodsToBranch,
-      returnToVendor,
-      shipGoodsFromBranch,
-      restockCustomerReturn,
-      movements,
-      adjustments,
-      createAdjustment,
-      writeOffs,
-      createWriteOff,
-      transfers,
-      getInTransitQty,
-      createTransfer,
-      dispatchTransfer,
-      receiveTransfer,
-      cancelTransfer,
-      loadAll,
-    ]
-  );
-
-  return <InventoryContext.Provider value={value}>{children}</InventoryContext.Provider>;
-}
-
-export function useInventory() {
-  const context = useContext(InventoryContext);
-  if (context === undefined) {
-    throw new Error("useInventory must be used within an InventoryProvider");
-  }
-  return context;
+  return {
+    products,
+    addProduct,
+    updateProduct,
+    deleteProduct,
+    branchProducts,
+    branches,
+    addBranch,
+    updateBranch,
+    deleteBranch,
+    getAvailableQuantity,
+    getAssignedQuantity,
+    assignToBranch,
+    updateBranchProduct,
+    removeFromBranch,
+    movements,
+    adjustments,
+    createAdjustment,
+    writeOffs,
+    createWriteOff,
+    transfers,
+    getInTransitQty,
+    createTransfer,
+    dispatchTransfer,
+    receiveTransfer,
+    cancelTransfer,
+    refreshInventory,
+    isLoading:
+      productsQuery.isLoading ||
+      movementsQuery.isLoading ||
+      adjustmentsQuery.isLoading ||
+      writeOffsQuery.isLoading ||
+      transfersQuery.isLoading,
+  };
 }

@@ -18,9 +18,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
 import { format } from "date-fns";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useAuth } from "@/contexts/AuthContext";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
+import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
 import type { TransferShortageResolution, TransferStatus } from "@/types";
 
 const statusVariant: Record<TransferStatus, "default" | "secondary" | "destructive" | "outline"> = {
@@ -34,9 +35,10 @@ export default function TransferDetail() {
   const { t } = useTranslation();
   const { transferId } = useParams();
   const navigate = useNavigate();
-  const { transfers, dispatchTransfer, receiveTransfer, cancelTransfer } = useInventory();
+  const { transfers, dispatchTransfer, receiveTransfer, cancelTransfer } = useInventoryScope({ transfers: true, products: true, directoryBranches: true });
   const { user } = useAuth();
-  const { record } = useAuditLog();
+  const { can } = usePermissions();
+  const { record } = useAuditRecorder();
 
   const transfer = transfers.find((x) => x.id === transferId);
   const [receivedMap, setReceivedMap] = useState<Record<string, number>>({});
@@ -148,19 +150,19 @@ export default function TransferDetail() {
           </Badge>
         </div>
         <div className="flex gap-2">
-          {transfer.status === "Draft" && (
+          {transfer.status === "Draft" && can("inventory", "edit") && (
             <Button onClick={onDispatch}>
               <Send className="h-4 w-4 me-2" />
               {t("transfers.dispatch", "Dispatch")}
             </Button>
           )}
-          {transfer.status === "In Transit" && (
+          {transfer.status === "In Transit" && can("inventory", "edit") && (
             <Button onClick={onReceive}>
               <PackageCheck className="h-4 w-4 me-2" />
               {t("transfers.receive", "Receive")}
             </Button>
           )}
-          {(transfer.status === "Draft" || transfer.status === "In Transit") && (
+          {(transfer.status === "Draft" || transfer.status === "In Transit") && can("inventory", "delete") && (
             <Button variant="destructive" onClick={() => setCancelOpen(true)}>
               <Ban className="h-4 w-4 me-2" />
               {t("transfers.cancel", "Cancel")}

@@ -1,3 +1,5 @@
+import type { UserCompanySummaryDto } from "@erp/shared";
+
 export interface ModulePermissionFlags {
   view: boolean;
   create: boolean;
@@ -15,6 +17,11 @@ export interface User {
   branchScopeMode?: 'all' | 'selected';
   branchIds?: string[];
   defaultBranchId?: string | null;
+  activeCompanyId?: string;
+  companies?: UserCompanySummaryDto[];
+  customRoleId?: string | null;
+  customRoleName?: string | null;
+  mfaEnabled?: boolean;
   permissions?: Record<string, ModulePermissionFlags>;
 }
 

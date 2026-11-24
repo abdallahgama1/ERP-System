@@ -35,7 +35,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import type { Vendor } from "@/types";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
+import { usePermissions } from "@/contexts/PermissionsContext";
 
 // Zod validation schema
 const vendorSchema = z.object({
@@ -72,7 +73,11 @@ const termsFromDays = (days: number): "NET15" | "NET30" | "COD" =>
 const Vendors = () => {
   const { t } = useTranslation();
   const { toast } = useToast();
-  const { vendors, addVendor, updateVendor, deleteVendor, vendorPayables } = usePurchases();
+  const { can } = usePermissions();
+  const canCreate = can("purchases", "create");
+  const canEdit = can("purchases", "edit");
+  const canDelete = can("purchases", "delete");
+  const { vendors, addVendor, updateVendor, deleteVendor, vendorPayables } = usePurchasingScope({ vendors: true, bills: true });
   const [searchTerm, setSearchTerm] = useState("");
   const [page, setPage] = useState(1);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -260,10 +265,12 @@ const Vendors = () => {
           <h1 className="text-3xl font-bold tracking-tight">{t("vendors.title")}</h1>
           <p className="text-muted-foreground">{t("vendors.description")}</p>
         </div>
-        <Button onClick={() => handleOpenDialog()}>
-          <Plus className="me-2 h-4 w-4" />
-          {t("vendors.addVendor")}
-        </Button>
+        {canCreate && (
+          <Button onClick={() => handleOpenDialog()}>
+            <Plus className="me-2 h-4 w-4" />
+            {t("vendors.addVendor")}
+          </Button>
+        )}
       </div>
 
       {vendors.length === 0 && (vendorsPage?.pageInfo?.total ?? 0) === 0 && !searchTerm.trim() ? (
@@ -276,10 +283,12 @@ const Vendors = () => {
           <p className="mt-2 text-center text-muted-foreground max-w-sm">
             {t("vendors.noVendorsDescription")}
           </p>
-          <Button className="mt-6" onClick={() => handleOpenDialog()}>
-            <Plus className="me-2 h-4 w-4" />
-            {t("vendors.createFirstVendor")}
-          </Button>
+          {canCreate && (
+            <Button className="mt-6" onClick={() => handleOpenDialog()}>
+              <Plus className="me-2 h-4 w-4" />
+              {t("vendors.createFirstVendor")}
+            </Button>
+          )}
         </Card>
       ) : (
         <Card>
@@ -351,22 +360,26 @@ const Vendors = () => {
                           >
                             <History className="h-4 w-4" />
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleOpenDialog(vendor)}
-                            title={t("common.edit")}
-                          >
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDeleteClick(vendor.id)}
-                            title={t("common.delete")}
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
+                          {canEdit && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleOpenDialog(vendor)}
+                              title={t("common.edit")}
+                            >
+                              <Edit className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {canDelete && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleDeleteClick(vendor.id)}
+                              title={t("common.delete")}
+                            >
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>

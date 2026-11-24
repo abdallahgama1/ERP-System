@@ -19,7 +19,13 @@ import { checkApprovalRequired, createApprovalRequest } from "./approvals.servic
 import { postMappedJournal } from "./gl.service.ts";
 import { consumeTrackedStock, linkConsumedAllocations, receiveTrackedStock } from "./lots-serials.service.ts";
 import { buildKeysetCondition, groupByKey, listBranchScoped, parseCursorOrThrow } from "./query-helpers.ts";
-import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  applyBranchStockMovement,
+  assertBranchInCompany,
+  lockBranchProduct,
+  type RequestActor,
+} from "./stock-locks.ts";
 
 export async function listMovements(
   db: AppDatabase,
@@ -36,6 +42,7 @@ export async function listMovements(
     sortDir?: string;
   }
 ) {
+  const companyId = actorCompanyId(actor);
   const hasExplicitPagination = Boolean(query.cursor || query.limit);
   const limit = hasExplicitPagination
     ? Math.min(500, Math.max(1, Number.parseInt(query.limit ?? "50", 10) || 50))
@@ -43,7 +50,7 @@ export async function listMovements(
   const sortDir: SortDirection = query.sortDir === "asc" ? "asc" : "desc";
   const cursor = parseCursorOrThrow(query.cursor);
 
-  const conditions: SQL[] = [];
+  const conditions: SQL[] = [eq(stockMovements.companyId, companyId)];
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
     conditions.push(eq(stockMovements.branchId, query.branchId));
@@ -73,7 +80,7 @@ export async function listMovements(
   const rawRows = await db
     .select()
     .from(stockMovements)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .where(and(...conditions))
     .orderBy(orderDir(stockMovements.createdAt), orderDir(stockMovements.id))
     .limit(limit + 1);
 
@@ -149,14 +156,19 @@ export async function createAdjustment(
   data: z.infer<typeof adjustmentSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const [branch] = await tx.select().from(branches).where(eq(branches.id, data.branchId)).limit(1);
+    const [branch] = await tx
+      .select()
+      .from(branches)
+      .where(and(eq(branches.id, data.branchId), eq(branches.companyId, companyId)))
+      .limit(1);
     if (!branch) throw new AppError(404, "Branch not found", "NOT_FOUND");
 
     const sortedLines = [...data.lines].sort((a, b) => a.productId.localeCompare(b.productId));
-    const adjNumber = await nextDocNumber(tx, "ADJ", "ADJ-");
+    const adjNumber = await nextDocNumber(tx, "ADJ", "ADJ-", null, companyId);
 
     const prepared: Array<{
       productId: string;
@@ -174,10 +186,14 @@ export async function createAdjustment(
     let totalAbsImpact = 0;
 
     for (const line of sortedLines) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+        .limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
       const prodFallback = num(prod.costPrice);
-      const locked = await lockBranchProduct(tx, data.branchId, line.productId, prodFallback);
+      const locked = await lockBranchProduct(tx, data.branchId, line.productId, prodFallback, companyId);
       const delta = line.newQty !== undefined ? line.newQty - locked.qtyOnHand : (line.qtyDelta ?? 0);
       if (delta === 0) continue;
       const unitCost = locked.avgCost > 0 ? locked.avgCost : prodFallback;
@@ -197,11 +213,12 @@ export async function createAdjustment(
       });
     }
 
-    const needsApproval = Boolean(await checkApprovalRequired(tx, "stock_adjustment", totalAbsImpact));
+    const needsApproval = Boolean(await checkApprovalRequired(tx, "stock_adjustment", totalAbsImpact, companyId));
 
     const [adj] = await tx
       .insert(stockAdjustments)
       .values({
+        companyId,
         adjustmentNumber: adjNumber,
         branchId: data.branchId,
         reason: data.reason,
@@ -233,6 +250,7 @@ export async function createAdjustment(
       const consumed =
         item.delta < 0
           ? await consumeTrackedStock(tx, {
+              companyId,
               product: item.prod,
               branchId: data.branchId,
               quantity: Math.abs(item.delta),
@@ -244,6 +262,7 @@ export async function createAdjustment(
           : null;
 
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: data.branchId,
         productId: item.productId,
         qtyDelta: item.delta,
@@ -261,6 +280,7 @@ export async function createAdjustment(
 
       if (item.delta > 0) {
         await receiveTrackedStock(tx, {
+          companyId,
           product: item.prod,
           branchId: data.branchId,
           quantity: item.delta,
@@ -307,6 +327,7 @@ export async function createAdjustment(
       if (Math.abs(netInvDelta) > 0.0001) {
         const absVal = Math.abs(netInvDelta);
         await postMappedJournal(tx, {
+          companyId,
           branchId: data.branchId,
           sourceType: "stock_adjustment",
           sourceId: adj.id,
@@ -328,6 +349,7 @@ export async function createAdjustment(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -386,11 +408,13 @@ export async function createWriteOff(
   data: z.infer<typeof writeOffSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
+    await assertBranchInCompany(tx, data.branchId, companyId);
     const sortedLines = [...data.lines].sort((a, b) => a.productId.localeCompare(b.productId));
-    const woNumber = await nextDocNumber(tx, "WO", "WO-");
+    const woNumber = await nextDocNumber(tx, "WO", "WO-", null, companyId);
 
     const prepared: Array<{
       productId: string;
@@ -403,9 +427,13 @@ export async function createWriteOff(
     }> = [];
     let estimatedTotal = 0;
     for (const line of sortedLines) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+        .limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
-      const locked = await lockBranchProduct(tx, data.branchId, line.productId, num(prod.costPrice));
+      const locked = await lockBranchProduct(tx, data.branchId, line.productId, num(prod.costPrice), companyId);
       const unitCost = locked.avgCost > 0 ? locked.avgCost : num(prod.costPrice);
       estimatedTotal += line.quantity * unitCost;
       prepared.push({
@@ -419,11 +447,12 @@ export async function createWriteOff(
       });
     }
 
-    const needsApproval = Boolean(await checkApprovalRequired(tx, "stock_write_off", estimatedTotal));
+    const needsApproval = Boolean(await checkApprovalRequired(tx, "stock_write_off", estimatedTotal, companyId));
 
     const [wo] = await tx
       .insert(stockWriteOffs)
       .values({
+        companyId,
         writeOffNumber: woNumber,
         branchId: data.branchId,
         reason: data.reason,
@@ -451,6 +480,7 @@ export async function createWriteOff(
       }
 
       const tracked = await consumeTrackedStock(tx, {
+        companyId,
         product: item.prod,
         branchId: data.branchId,
         quantity: item.quantity,
@@ -461,6 +491,7 @@ export async function createWriteOff(
       });
 
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: data.branchId,
         productId: item.productId,
         qtyDelta: -item.quantity,
@@ -504,6 +535,7 @@ export async function createWriteOff(
       });
     } else if (totalWriteOffVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: data.branchId,
         sourceType: "write_off",
         sourceId: wo.id,
@@ -518,6 +550,7 @@ export async function createWriteOff(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

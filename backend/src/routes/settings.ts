@@ -1,9 +1,11 @@
 import type { FastifyInstance } from "fastify";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import {
+  DEFAULT_COMPANY_ID,
   branches,
   branchProducts,
+  companies,
   companySettings,
   customers,
   products,
@@ -22,7 +24,7 @@ import { loadAuthUserById } from "../auth/sessions.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
-import { assertBranchAccess, requireAuth, requireRole } from "../middleware/auth.ts";
+import { assertBranchAccess, requireAuth, requirePermission, requireRole } from "../middleware/auth.ts";
 
 const updateCompanySchema = z.object({
   companyName: z.string().trim().min(1).max(160).optional(),
@@ -43,91 +45,183 @@ const updatePreferencesSchema = z.object({
   preferencesJson: z.record(z.unknown()).optional(),
 });
 
-export async function settingsRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/api/settings/company", { preHandler: requireAuth }, async () => {
-    const db = getDb();
-    let [company] = await db.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
-    if (!company) {
-      await ensureSeededDefaults(db);
-      [company] = await db.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
-    }
-    const taxes = await db.select().from(taxCodes).where(eq(taxCodes.isActive, true));
+function mapCompanyToSettingsDto(comp: typeof companies.$inferSelect) {
+  return {
+    id: comp.id === DEFAULT_COMPANY_ID ? 1 : comp.id,
+    companyId: comp.id,
+    code: comp.code,
+    companyName: comp.name,
+    legalName: comp.legalName,
+    taxRegistrationNumber: comp.taxRegistrationNumber,
+    baseCurrency: comp.baseCurrency,
+    einvoicingMode: comp.einvoicingMode,
+    defaultBranchId: comp.defaultBranchId,
+    address: comp.address,
+    phone: comp.phone,
+    email: comp.email,
+    settingsJson: comp.settingsJson,
+    updatedAt: comp.updatedAt,
+  };
+}
 
+export async function settingsRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/api/settings/company", { preHandler: requireAuth }, async (req) => {
+    const db = getDb();
+    const companyId = req.authUser!.activeCompanyId;
+
+    let [comp] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
+    if (!comp && companyId === DEFAULT_COMPANY_ID) {
+      await ensureSeededDefaults(db);
+      [comp] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
+    }
+
+    const taxes = await db
+      .select()
+      .from(taxCodes)
+      .where(and(eq(taxCodes.companyId, companyId), eq(taxCodes.isActive, true)));
+
+    const companyDto = comp ? mapCompanyToSettingsDto(comp) : null;
     return {
-      company: company ?? null,
+      company: companyDto,
+      settings: companyDto,
       taxCodes: taxes,
     };
   });
 
-  app.put("/api/settings/company", { preHandler: requireRole("admin") }, async (req) => {
+  app.put("/api/settings/company", { preHandler: requirePermission("settings", "edit") }, async (req) => {
     const parsed = updateCompanySchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid company settings", "VALIDATION_ERROR");
     }
 
     const actor = req.authUser!;
+    const companyId = actor.activeCompanyId;
     const db = getDb();
 
     const updated = await db.transaction(async (tx) => {
-      let [current] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
-      if (!current) {
+      if (companyId === DEFAULT_COMPANY_ID) {
         await ensureSeededDefaults(tx);
-        [current] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
+      }
+
+      const [current] = await tx
+        .select()
+        .from(companies)
+        .where(eq(companies.id, companyId))
+        .limit(1);
+      if (!current) {
+        throw new AppError(404, "Active company not found", "COMPANY_NOT_FOUND");
       }
 
       if (parsed.data.defaultBranchId) {
         const [branchRow] = await tx
           .select({ id: branches.id })
           .from(branches)
-          .where(eq(branches.id, parsed.data.defaultBranchId))
+          .where(and(eq(branches.id, parsed.data.defaultBranchId), eq(branches.companyId, companyId)))
           .limit(1);
         if (!branchRow) {
-          throw new AppError(400, "Selected default branch does not exist", "INVALID_BRANCH");
+          throw new AppError(400, "Selected default branch does not exist in active company", "INVALID_BRANCH");
         }
       }
 
       const mergedJson = {
-        ...(current?.settingsJson ?? {}),
+        ...(current.settingsJson ?? {}),
         ...(parsed.data.settingsJson ?? {}),
       };
 
+      const now = new Date();
+      const nextName = parsed.data.companyName ?? current.name;
+      const nextLegalName = parsed.data.legalName ?? current.legalName;
+      const nextTaxReg = parsed.data.taxRegistrationNumber ?? current.taxRegistrationNumber;
+      const nextBaseCurrency = parsed.data.baseCurrency
+        ? parsed.data.baseCurrency.toUpperCase()
+        : current.baseCurrency;
+      const nextEinvoicingMode = parsed.data.einvoicingMode ?? current.einvoicingMode;
+      const nextDefaultBranchId =
+        parsed.data.defaultBranchId !== undefined
+          ? parsed.data.defaultBranchId
+          : (current.defaultBranchId ?? null);
+      const nextAddress = parsed.data.address ?? current.address;
+      const nextPhone = parsed.data.phone ?? current.phone;
+      const nextEmail = parsed.data.email ?? current.email;
+
       const [row] = await tx
-        .update(companySettings)
+        .update(companies)
         .set({
-          companyName: parsed.data.companyName ?? current?.companyName ?? "Count It Keep It",
-          legalName: parsed.data.legalName ?? current?.legalName ?? "",
-          taxRegistrationNumber: parsed.data.taxRegistrationNumber ?? current?.taxRegistrationNumber ?? "",
-          baseCurrency: parsed.data.baseCurrency ?? current?.baseCurrency ?? "USD",
-          einvoicingMode: parsed.data.einvoicingMode ?? current?.einvoicingMode ?? "none",
-          defaultBranchId:
-            parsed.data.defaultBranchId !== undefined
-              ? parsed.data.defaultBranchId
-              : (current?.defaultBranchId ?? null),
-          address: parsed.data.address ?? current?.address ?? "",
-          phone: parsed.data.phone ?? current?.phone ?? "",
-          email: parsed.data.email ?? current?.email ?? "",
+          name: nextName,
+          legalName: nextLegalName,
+          taxRegistrationNumber: nextTaxReg,
+          baseCurrency: nextBaseCurrency,
+          einvoicingMode: nextEinvoicingMode,
+          defaultBranchId: nextDefaultBranchId,
+          address: nextAddress,
+          phone: nextPhone,
+          email: nextEmail,
           settingsJson: mergedJson,
-          updatedAt: new Date(),
+          updatedAt: now,
         })
-        .where(eq(companySettings.id, 1))
+        .where(eq(companies.id, companyId))
         .returning();
 
+      if (companyId === DEFAULT_COMPANY_ID) {
+        await tx
+          .update(companySettings)
+          .set({
+            companyName: row.name,
+            legalName: row.legalName,
+            taxRegistrationNumber: row.taxRegistrationNumber,
+            baseCurrency: row.baseCurrency,
+            einvoicingMode: row.einvoicingMode,
+            defaultBranchId: row.defaultBranchId,
+            address: row.address,
+            phone: row.phone,
+            email: row.email,
+            settingsJson: row.settingsJson,
+            updatedAt: now,
+          })
+          .where(eq(companySettings.id, 1));
+      }
+
       await writeAuditLog(tx, {
+        companyId,
         userId: actor.id,
         userName: actor.name,
         userRole: actor.role,
         action: "settings.company_updated",
         entityType: "company_settings",
-        entityId: "1",
+        entityId: companyId === DEFAULT_COMPANY_ID ? "1" : companyId,
         details: { updatedFields: Object.keys(parsed.data) },
+        before: {
+          companyName: current.name,
+          legalName: current.legalName,
+          taxRegistrationNumber: current.taxRegistrationNumber,
+          baseCurrency: current.baseCurrency,
+          einvoicingMode: current.einvoicingMode,
+          defaultBranchId: current.defaultBranchId,
+          address: current.address,
+          phone: current.phone,
+          email: current.email,
+          settingsJson: current.settingsJson,
+        },
+        after: {
+          companyName: row.name,
+          legalName: row.legalName,
+          taxRegistrationNumber: row.taxRegistrationNumber,
+          baseCurrency: row.baseCurrency,
+          einvoicingMode: row.einvoicingMode,
+          defaultBranchId: row.defaultBranchId,
+          address: row.address,
+          phone: row.phone,
+          email: row.email,
+          settingsJson: row.settingsJson,
+        },
         ipAddress: req.ip,
       });
 
-      return row;
+      return mapCompanyToSettingsDto(row);
     });
 
-    eventBroadcaster.broadcast("settings_updated");
-    return { company: updated };
+    eventBroadcaster.broadcast("settings_updated", { companyId });
+    return { company: updated, settings: updated };
   });
 
   app.get("/api/settings/preferences", { preHandler: requireAuth }, async (req) => {
@@ -209,6 +303,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/admin/export-backup", { preHandler: requireRole("admin") }, async (req) => {
     const db = getDb();
     const actor = req.authUser!;
+    const companyId = actor.activeCompanyId;
 
     const [
       companyRow,
@@ -224,34 +319,35 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       transferList,
       movementList,
     ] = await Promise.all([
-      db.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1),
-      db.select().from(branches),
-      db.select().from(products),
-      db.select().from(branchProducts),
-      db.select().from(customers),
-      db.select().from(vendors),
-      db.select().from(taxonomyItems),
-      db.select().from(stockSessions),
-      db.select().from(stockAdjustments),
-      db.select().from(stockWriteOffs),
-      db.select().from(stockTransfers),
-      db.select().from(stockMovements),
+      db.select().from(companies).where(eq(companies.id, companyId)).limit(1),
+      db.select().from(branches).where(eq(branches.companyId, companyId)),
+      db.select().from(products).where(eq(products.companyId, companyId)),
+      db.select().from(branchProducts).where(eq(branchProducts.companyId, companyId)),
+      db.select().from(customers).where(eq(customers.companyId, companyId)),
+      db.select().from(vendors).where(eq(vendors.companyId, companyId)),
+      db.select().from(taxonomyItems).where(eq(taxonomyItems.companyId, companyId)),
+      db.select().from(stockSessions).where(eq(stockSessions.companyId, companyId)),
+      db.select().from(stockAdjustments).where(eq(stockAdjustments.companyId, companyId)),
+      db.select().from(stockWriteOffs).where(eq(stockWriteOffs.companyId, companyId)),
+      db.select().from(stockTransfers).where(eq(stockTransfers.companyId, companyId)),
+      db.select().from(stockMovements).where(eq(stockMovements.companyId, companyId)),
     ]);
 
     await writeAuditLog(db, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
       action: "admin.export_backup",
       entityType: "workspace",
-      entityId: "backup",
+      entityId: companyId,
       ipAddress: req.ip,
     });
 
     return {
       exportedAt: new Date().toISOString(),
       version: 2,
-      company: companyRow[0] ?? null,
+      company: companyRow[0] ? mapCompanyToSettingsDto(companyRow[0]) : null,
       branches: branchList,
       products: productList,
       branchProducts: branchProductList,

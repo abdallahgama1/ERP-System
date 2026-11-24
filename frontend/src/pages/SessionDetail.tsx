@@ -47,8 +47,9 @@ import {
 } from "lucide-react";
 import { SessionItem, Product } from "@/types";
 import { useToast } from "@/hooks/use-toast";
-import { useInventory } from "@/contexts/InventoryContext";
-import { useSessions } from "@/contexts/SessionsContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { useSessionsScope } from "@/hooks/queries/useSessionsScope";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
@@ -59,16 +60,17 @@ import { useIsMobile } from "@/hooks/use-mobile";
 const SessionDetail = () => {
   const { t } = useTranslation();
   const { settings } = useSettings();
+  const { can } = usePermissions();
   const { sessionId } = useParams();
   const resolvedSessionId = sessionId ?? "";
-  const { products, branchProducts, branches } = useInventory();
+  const { products, branchProducts, branches } = useInventoryScope({ products: true });
   const {
     getSession,
     getSessionItems,
     upsertSessionItemCount,
     removeSessionItem,
     completeSession,
-  } = useSessions();
+  } = useSessionsScope({ includeProducts: true });
   const isMobile = useIsMobile();
   const { toast } = useToast();
 
@@ -266,7 +268,7 @@ const SessionDetail = () => {
           </div>
         </div>
 
-        {!isLocked && (
+        {!isLocked && (can("sessions", "approve") || can("sessions", "edit")) && (
           <Button onClick={() => setConfirmCompleteOpen(true)}>
             <CheckCircle2 className="h-4 w-4 me-2" />
             {t("sessions.completeAndReconcile", "Complete & Reconcile Stock")}

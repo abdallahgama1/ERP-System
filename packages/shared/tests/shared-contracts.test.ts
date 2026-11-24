@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  ATTACHMENT_ALLOWED_MIME_TYPES,
+  ATTACHMENT_MAX_BYTES,
+  AUDIT_SENSITIVE_FIELDS,
+  DEFAULT_COMPANY_CODE,
+  DEFAULT_COMPANY_ID,
   DEFAULT_PERMISSION_MATRIX,
   DEFAULT_POS_MAX_CASHIER_DISCOUNT_PCT,
   EINVOICE_DOCUMENT_TYPES,
@@ -7,16 +12,35 @@ import {
   EINVOICE_SUBMISSION_STATUSES,
   ETA_RECEIPT_STATUSES,
   ETA_RECEIPT_TYPES,
+  PERMISSION_ACTIONS,
   PERMISSION_MODULES,
+  SYSTEM_ROLE_PRESETS,
+  approvalDecisionSchema,
+  attachmentFileMetaSchema,
+  attachmentListQuerySchema,
+  buildEmptyPermissionRecord,
   buildOffsetPageInfo,
   calculateDocumentTotals,
   calculateLineAmounts,
+  createCompanySchema,
+  createCustomRoleSchema,
+  createPrintTemplateSchema,
+  createSavedViewSchema,
   cursorPageQuerySchema,
   customersListQuerySchema,
   decodeCursor,
   einvoiceQueueQuerySchema,
   einvoiceRetrySchema,
+  emailDocumentSchema,
   encodeCursor,
+  exportParamsSchema,
+  exportQuerySchema,
+  globalSearchQuerySchema,
+  mfaDisableSchema,
+  mfaRegenerateRecoveryCodesSchema,
+  mfaVerifyEnrollSchema,
+  mfaVerifyLoginSchema,
+  normalizeRolePermissionsMap,
   offsetPageQuerySchema,
   parseBackwardCompatibleOffsetQuery,
   posCheckoutSchema,
@@ -29,6 +53,10 @@ import {
   resolveSearchTerm,
   salesOrdersListQuerySchema,
   setCashierPinSchema,
+  switchCompanySchema,
+  updateCustomRoleSchema,
+  updatePrintTemplateSchema,
+  upsertApprovalRuleSchema,
   vendorBillsListQuerySchema,
   vendorsListQuerySchema,
 } from "../src/index.ts";
@@ -303,5 +331,242 @@ describe("@erp/shared contracts (pricing, pagination, permissions & POS)", () =>
     });
     expect(salesOrdersListQuerySchema.safeParse({ branchId: "bad-uuid" }).success).toBe(false);
     expect(productsListQuerySchema.safeParse({ sortBy: "invalidCol" }).success).toBe(false);
+  });
+
+  it("exposes 18 permission modules, 8 complete system role presets, and permission helpers", () => {
+    expect(PERMISSION_MODULES).toHaveLength(18);
+    for (const mod of ["manufacturing", "approvals", "einvoicing", "audit", "companies", "roles"] as const) {
+      expect(PERMISSION_MODULES).toContain(mod);
+      expect(DEFAULT_PERMISSION_MATRIX.admin[mod]).toEqual({
+        view: true,
+        create: true,
+        edit: true,
+        delete: true,
+        approve: true,
+      });
+    }
+
+    expect(SYSTEM_ROLE_PRESETS).toHaveLength(8);
+    expect(SYSTEM_ROLE_PRESETS.map((p) => p.name)).toEqual([
+      "Admin",
+      "Finance Manager",
+      "Accountant",
+      "Warehouse Manager",
+      "Purchasing Officer",
+      "Sales Manager",
+      "Branch Manager",
+      "Cashier",
+    ]);
+
+    for (const preset of SYSTEM_ROLE_PRESETS) {
+      for (const mod of PERMISSION_MODULES) {
+        expect(preset.permissions[mod]).toBeDefined();
+        for (const action of PERMISSION_ACTIONS) {
+          expect(typeof preset.permissions[mod][action]).toBe("boolean");
+        }
+      }
+    }
+
+    const empty = buildEmptyPermissionRecord();
+    for (const mod of PERMISSION_MODULES) {
+      expect(empty[mod]).toEqual({ view: false, create: false, edit: false, delete: false, approve: false });
+    }
+
+    const normalized = normalizeRolePermissionsMap({
+      sales: { view: true, create: true },
+    });
+    expect(normalized.sales).toEqual({ view: true, create: true, edit: false, delete: false, approve: false });
+    expect(normalized.accounting).toEqual({ view: false, create: false, edit: false, delete: false, approve: false });
+
+    const coerced = normalizeRolePermissionsMap({
+      companies: {
+        view: "false" as unknown as boolean,
+        create: 1 as unknown as boolean,
+        edit: true,
+        delete: "0" as unknown as boolean,
+        approve: "true" as unknown as boolean,
+      },
+    });
+    expect(coerced.companies).toEqual({
+      view: false,
+      create: false,
+      edit: true,
+      delete: false,
+      approve: false,
+    });
+    expect(normalizeRolePermissionsMap(["sales"] as unknown as null)).toEqual(empty);
+  });
+
+  it("validates Wave 1 enterprise contracts (multi-company, custom roles, MFA, search, views, exports, attachments, print, email)", () => {
+    expect(DEFAULT_COMPANY_ID).toBe("00000000-0000-4000-8000-000000000001");
+    expect(DEFAULT_COMPANY_CODE).toBe("COMP-01");
+    expect(AUDIT_SENSITIVE_FIELDS).toContain("passwordHash");
+    expect(AUDIT_SENSITIVE_FIELDS).toContain("totpSecretEncrypted");
+
+    // Preserved D1 approval schemas
+    expect(upsertApprovalRuleSchema.parse({ entityType: "purchase_order", minAmount: 1000 })).toMatchObject({
+      entityType: "purchase_order",
+      minAmount: 1000,
+      requiredRole: "manager",
+      isActive: false,
+    });
+    expect(approvalDecisionSchema.parse({ decision: "approved" })).toEqual({ decision: "approved", comment: "" });
+
+    // Multi-company
+    const company = createCompanySchema.parse({ code: "comp-02", name: "Branch Entity Ltd" });
+    expect(company.code).toBe("COMP-02");
+    expect(createCompanySchema.safeParse({ code: "bad code!", name: "X" }).success).toBe(false);
+    expect(switchCompanySchema.safeParse({ companyId: DEFAULT_COMPANY_ID }).success).toBe(true);
+    expect(switchCompanySchema.safeParse({ companyId: "bad" }).success).toBe(false);
+
+    // Custom roles (strict complete 18-module coverage)
+    const customRole = createCustomRoleSchema.parse({
+      name: "Regional Auditor",
+      baseRole: "user",
+      permissions: normalizeRolePermissionsMap({ audit: { view: true } }),
+    });
+    expect(customRole.name).toBe("Regional Auditor");
+    expect(customRole.permissions.audit.view).toBe(true);
+    expect(createCustomRoleSchema.safeParse({ name: "Incomplete Role", permissions: {} }).success).toBe(false);
+    expect(
+      createCustomRoleSchema.safeParse({
+        name: "Partial Role",
+        permissions: { sales: { view: true, create: false, edit: false, delete: false, approve: false } },
+      }).success
+    ).toBe(false);
+    expect(
+      createCustomRoleSchema.safeParse({
+        name: "Unknown Module Role",
+        permissions: {
+          ...normalizeRolePermissionsMap(),
+          nonexistent_module: { view: true, create: false, edit: false, delete: false, approve: false },
+        },
+      }).success
+    ).toBe(false);
+    expect(updateCustomRoleSchema.parse({ name: "Renamed Role" })).toEqual({ name: "Renamed Role" });
+    expect(updateCustomRoleSchema.safeParse({ permissions: {} }).success).toBe(false);
+
+    // TOTP MFA
+    expect(mfaVerifyEnrollSchema.safeParse({ code: "123456" }).success).toBe(true);
+    expect(mfaVerifyEnrollSchema.safeParse({ code: "12ab56" }).success).toBe(false);
+    expect(mfaVerifyLoginSchema.safeParse({ mfaChallengeToken: "token-123456789", code: "123456" }).success).toBe(true);
+    expect(mfaDisableSchema.safeParse({ password: "secret" }).success).toBe(true);
+    expect(mfaRegenerateRecoveryCodesSchema.safeParse({}).success).toBe(false);
+    expect(mfaRegenerateRecoveryCodesSchema.safeParse({ password: "secret" }).success).toBe(true);
+    expect(mfaRegenerateRecoveryCodesSchema.safeParse({ code: "123456" }).success).toBe(true);
+
+    // Search, Saved Views, Exports
+    expect(globalSearchQuerySchema.parse({ q: "  INV-001 " })).toEqual({ q: "INV-001", limit: 20 });
+    expect(globalSearchQuerySchema.safeParse({ q: "   " }).success).toBe(false);
+    expect(createSavedViewSchema.parse({ resource: "invoices", name: "Overdue Only" })).toMatchObject({
+      resource: "invoices",
+      name: "Overdue Only",
+      isDefault: false,
+    });
+    expect(exportParamsSchema.safeParse({ resource: "invoices" }).success).toBe(true);
+    expect(exportParamsSchema.safeParse({ resource: "unknown" }).success).toBe(false);
+    expect(exportQuerySchema.parse({})).toEqual({ format: "csv" });
+    expect(exportQuerySchema.parse({ format: "xlsx" }).format).toBe("xlsx");
+
+    // Attachments (10MB + strict MIME allowlist)
+    expect(ATTACHMENT_MAX_BYTES).toBe(10 * 1024 * 1024);
+    expect(ATTACHMENT_ALLOWED_MIME_TYPES).toContain("application/pdf");
+    expect(ATTACHMENT_ALLOWED_MIME_TYPES).not.toContain("application/x-msdownload");
+    expect(attachmentListQuerySchema.safeParse({ entityType: "invoice", entityId: DEFAULT_COMPANY_ID }).success).toBe(
+      true
+    );
+    expect(
+      attachmentFileMetaSchema.parse({
+        fileName: "  invoice.pdf  ",
+        mimeType: "application/pdf",
+        sizeBytes: ATTACHMENT_MAX_BYTES,
+      })
+    ).toEqual({
+      fileName: "invoice.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: ATTACHMENT_MAX_BYTES,
+    });
+    expect(attachmentFileMetaSchema.safeParse({ mimeType: "image/png", sizeBytes: 1 }).success).toBe(true);
+    expect(attachmentFileMetaSchema.safeParse({ mimeType: "application/pdf", sizeBytes: 0 }).success).toBe(false);
+    expect(attachmentFileMetaSchema.safeParse({ mimeType: "application/pdf", sizeBytes: -1 }).success).toBe(false);
+    expect(
+      attachmentFileMetaSchema.safeParse({ mimeType: "application/pdf", sizeBytes: ATTACHMENT_MAX_BYTES + 1 }).success
+    ).toBe(false);
+    expect(attachmentFileMetaSchema.safeParse({ mimeType: "text/html", sizeBytes: 100 }).success).toBe(false);
+    expect(attachmentFileMetaSchema.safeParse({ mimeType: "application/javascript", sizeBytes: 100 }).success).toBe(
+      false
+    );
+    expect(attachmentFileMetaSchema.safeParse({ mimeType: "image/svg+xml", sizeBytes: 100 }).success).toBe(false);
+
+    // Print templates & Document emailing
+    expect(createPrintTemplateSchema.parse({ documentType: "invoice", name: "Modern A4" })).toMatchObject({
+      documentType: "invoice",
+      name: "Modern A4",
+      accentColor: "#0f172a",
+      logoUrl: "",
+    });
+    expect(
+      createPrintTemplateSchema.safeParse({
+        documentType: "invoice",
+        name: "Relative Logo",
+        logoUrl: "/assets/logo.png",
+      }).success
+    ).toBe(true);
+    expect(
+      createPrintTemplateSchema.safeParse({
+        documentType: "invoice",
+        name: "HTTPS Logo",
+        logoUrl: "https://cdn.example.com/logo.png",
+      }).success
+    ).toBe(true);
+    expect(
+      createPrintTemplateSchema.safeParse({
+        documentType: "invoice",
+        name: "XSS Logo",
+        logoUrl: "javascript:alert(1)",
+      }).success
+    ).toBe(false);
+    expect(
+      createPrintTemplateSchema.safeParse({
+        documentType: "invoice",
+        name: "Protocol Relative Logo",
+        logoUrl: "//evil.example.com/logo.png",
+      }).success
+    ).toBe(false);
+    expect(
+      createPrintTemplateSchema.safeParse({
+        documentType: "invoice",
+        name: "Data HTML Logo",
+        logoUrl: "data:text/html,<script>alert(1)</script>",
+      }).success
+    ).toBe(false);
+    expect(updatePrintTemplateSchema.parse({ name: "Renamed Template" })).toEqual({ name: "Renamed Template" });
+    expect(updatePrintTemplateSchema.safeParse({ logoUrl: "javascript:alert(1)" }).success).toBe(false);
+    expect(
+      createPrintTemplateSchema.safeParse({ documentType: "invoice", name: "Bad", accentColor: "red" }).success
+    ).toBe(false);
+    expect(
+      emailDocumentSchema.parse({
+        to: "customer@example.com",
+        subject: "Invoice INV-0001",
+      })
+    ).toMatchObject({
+      to: "customer@example.com",
+      subject: "Invoice INV-0001",
+      attachStoredFiles: false,
+    });
+    expect(emailDocumentSchema.safeParse({ to: "not-an-email", subject: "Hi" }).success).toBe(false);
+    expect(
+      emailDocumentSchema.safeParse({
+        to: "customer@example.com",
+        subject: "Invoice\r\nBcc: attacker@evil.com",
+      }).success
+    ).toBe(false);
+    expect(
+      emailDocumentSchema.safeParse({
+        to: "customer@example.com",
+        subject: "Invoice\nX-Injected: true",
+      }).success
+    ).toBe(false);
   });
 });

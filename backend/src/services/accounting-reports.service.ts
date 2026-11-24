@@ -1,11 +1,11 @@
 import { encodeCursor, roundCurrency, type CursorPageInfo } from "@erp/shared";
 import { and, asc, eq, gte, inArray, lte, sql, type SQL } from "drizzle-orm";
 import { chartOfAccounts, journalEntries, journalLines } from "../../drizzle/schema.ts";
-import { num } from "../db/helpers.ts";
+import { AppError, num } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { ensureAccountingDefaults } from "./gl.service.ts";
 import { buildKeysetCondition, parseCursorOrThrow } from "./query-helpers.ts";
-import type { RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, type RequestActor } from "./stock-locks.ts";
 
 export interface ReportFilter {
   fromDate?: string;
@@ -17,12 +17,18 @@ export interface ReportFilter {
 }
 
 function buildEntryConditions(actor: RequestActor, filter: ReportFilter): SQL[] {
-  const conds: SQL[] = [eq(journalEntries.status, "posted")];
+  const companyId = actorCompanyId(actor);
+  const conds: SQL[] = [
+    eq(journalEntries.companyId, companyId),
+    eq(journalEntries.status, "posted"),
+  ];
   if (filter.branchId) {
     conds.push(eq(journalEntries.branchId, filter.branchId));
   } else if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
     if (actor.branchIds.length > 0) {
       conds.push(inArray(journalEntries.branchId, actor.branchIds));
+    } else {
+      conds.push(sql`1 = 0`);
     }
   }
   if (filter.fromDate) conds.push(gte(journalEntries.entryDate, new Date(filter.fromDate)));
@@ -35,8 +41,13 @@ function buildEntryConditions(actor: RequestActor, filter: ReportFilter): SQL[] 
  * Single-pass PostgreSQL GROUP BY aggregation for Trial Balance.
  */
 export async function getTrialBalance(db: AppDatabase, actor: RequestActor, filter: ReportFilter) {
-  await ensureAccountingDefaults(db);
-  const accounts = await db.select().from(chartOfAccounts).orderBy(asc(chartOfAccounts.code));
+  const companyId = actorCompanyId(actor);
+  await ensureAccountingDefaults(db, companyId);
+  const accounts = await db
+    .select()
+    .from(chartOfAccounts)
+    .where(eq(chartOfAccounts.companyId, companyId))
+    .orderBy(asc(chartOfAccounts.code));
   const conds = buildEntryConditions(actor, filter);
 
   const grouped = await db
@@ -176,6 +187,16 @@ export async function getAccountLedger(
   accountId: string,
   filter: ReportFilter
 ) {
+  const companyId = actorCompanyId(actor);
+  const [acct] = await db
+    .select({ id: chartOfAccounts.id })
+    .from(chartOfAccounts)
+    .where(and(eq(chartOfAccounts.id, accountId), eq(chartOfAccounts.companyId, companyId)))
+    .limit(1);
+  if (!acct) {
+    throw new AppError(404, "Account not found", "NOT_FOUND");
+  }
+
   const conds: SQL[] = [eq(journalLines.accountId, accountId), ...buildEntryConditions(actor, filter)];
   const cursor = parseCursorOrThrow(filter.cursor);
   if (cursor) {

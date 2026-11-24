@@ -10,8 +10,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useSales } from "@/contexts/SalesContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
@@ -31,8 +32,9 @@ export default function ReceivedPayments() {
     voidReceivedPayment,
     invoiceBalance,
     customerCredit,
-  } = useSales();
+  } = useSalesScope({ customers: true, invoices: true, receivedPayments: true });
   const { user } = useAuth();
+  const { can } = usePermissions();
   const { toast } = useToast();
 
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -141,10 +143,12 @@ export default function ReceivedPayments() {
             {t("sales.receivedPayments.description", "Record customer payments and allocate them across open invoices.")}
           </p>
         </div>
-        <Button onClick={() => setDialogOpen(true)} disabled={customersWithInvoices.length === 0}>
-          <Plus className="me-2 h-4 w-4" />
-          {t("sales.receivedPayments.record", "Record Payment")}
-        </Button>
+        {can("sales", "create") && (
+          <Button onClick={() => setDialogOpen(true)} disabled={customersWithInvoices.length === 0}>
+            <Plus className="me-2 h-4 w-4" />
+            {t("sales.receivedPayments.record", "Record Payment")}
+          </Button>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-4">
@@ -234,7 +238,7 @@ export default function ReceivedPayments() {
                       </TableCell>
                       <TableCell className="text-end font-medium">{formatMoney(p.amount, settings.currency)}</TableCell>
                       <TableCell>
-                        {!isVoided && (
+                        {!isVoided && can("sales", "delete") && (
                           <Button
                             variant="ghost"
                             size="icon"

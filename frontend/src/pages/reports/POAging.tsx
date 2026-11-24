@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import { useSettings } from "@/contexts/SettingsContext";
 import { downloadCsv, csvTimestamp } from "@/lib/export/csv";
 
@@ -30,7 +30,7 @@ function daysSince(iso: string): number {
 export default function POAging() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { purchaseOrders } = usePurchases();
+  const { purchaseOrders } = usePurchasingScope({ purchaseOrders: true, vendors: true });
   const { settings } = useSettings();
   const [search, setSearch] = useState("");
   const [bucketFilter, setBucketFilter] = useState<string>("all");

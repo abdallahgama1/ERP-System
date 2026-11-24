@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Receipt, Plus, Send, Ban, Trash2, Wallet, Download, QrCode, Search } from "lucide-react";
+import { Receipt, Plus, Send, Ban, Trash2, Wallet, Download, QrCode, Mail } from "lucide-react";
 import { downloadInvoicePdf } from "@/lib/pdf/invoicePdf";
-import { TablePagination } from "@/components/TablePagination";
 import { useSalesInvoicesPageQuery } from "@/hooks/queries/useSalesQueries";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -16,10 +15,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { ProductSelector } from "@/components/purchases/ProductSelector";
 import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
+import { EnterpriseDataTable, type EnterpriseColumn } from "@/components/EnterpriseDataTable";
+import { AttachmentsPanel } from "@/components/AttachmentsPanel";
+import { EmailDocumentDialog } from "@/components/EmailDocumentDialog";
 import { useBranch } from "@/contexts/BranchContext";
-import { useSales } from "@/contexts/SalesContext";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
@@ -54,12 +57,17 @@ interface DraftLine {
 
 export default function Invoices() {
   const { t } = useTranslation();
-  const { invoices, customers, salesOrders, createInvoice, sendInvoice, cancelInvoice, deleteInvoice, recordInvoicePayment, invoiceBalance } = useSales();
-  const { products, branches } = useInventory();
+  const { invoices, customers, salesOrders, createInvoice, sendInvoice, cancelInvoice, deleteInvoice, recordInvoicePayment, invoiceBalance } = useSalesScope({ invoices: true, customers: true, salesOrders: true, products: true });
+  const { products, branches } = useInventoryScope({ products: true });
   const { activeBranchId } = useBranch();
   const { user } = useAuth();
+  const { can } = usePermissions();
   const { settings, taxCodes } = useSettings();
   const { toast } = useToast();
+  const canCreate = can("sales", "create");
+  const canEdit = can("sales", "edit");
+  const canDelete = can("sales", "delete");
+  const [emailTarget, setEmailTarget] = useState<Invoice | null>(null);
   const productMap = useMemo(() => new Map(products.map((p) => [p.productId, p])), [products]);
   const effectiveBranchId = useMemo(
     () =>
@@ -272,10 +280,12 @@ export default function Invoices() {
             {t("invoices.description", "Customer invoices, receivables and payment status.")}
           </p>
         </div>
-        <Button onClick={() => setDialogOpen(true)} disabled={customers.length === 0}>
-          <Plus className="me-2 h-4 w-4" />
-          {t("invoices.new", "New Invoice")}
-        </Button>
+        {canCreate && (
+          <Button onClick={() => setDialogOpen(true)} disabled={customers.length === 0}>
+            <Plus className="me-2 h-4 w-4" />
+            {t("invoices.new", "New Invoice")}
+          </Button>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -292,23 +302,149 @@ export default function Invoices() {
 
       <Card>
         <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <CardTitle>
-              {t("nav.sales.invoices")} ({invoicesPage?.pageInfo?.total ?? invoices.length})
-            </CardTitle>
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative w-56">
-                <Search className="absolute start-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  className="ps-9"
-                  value={searchQuery}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value);
-                    setPage(1);
-                  }}
-                  placeholder={t("common.search")}
-                />
-              </div>
+          <CardTitle>
+            {t("nav.sales.invoices")} ({invoicesPage?.pageInfo?.total ?? invoices.length})
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <EnterpriseDataTable
+            data={paginatedInvoices}
+            columns={
+              [
+                {
+                  id: "invoiceNumber",
+                  header: t("invoices.number", "Invoice #"),
+                  hideable: false,
+                  sortable: true,
+                  cell: (inv) => <span className="font-medium">{inv.invoiceNumber}</span>,
+                },
+                {
+                  id: "customerName",
+                  header: t("invoices.customer", "Customer"),
+                  sortable: true,
+                  accessorKey: "customerName",
+                },
+                {
+                  id: "invoiceDate",
+                  header: t("invoices.invoiceDate", "Invoice Date"),
+                  sortable: true,
+                  cell: (inv) => new Date(inv.invoiceDate).toLocaleDateString(),
+                },
+                {
+                  id: "dueDate",
+                  header: t("invoices.dueDate", "Due Date"),
+                  sortable: true,
+                  cell: (inv) => new Date(inv.dueDate).toLocaleDateString(),
+                },
+                {
+                  id: "soNumber",
+                  header: t("salesOrders.soNumber"),
+                  cell: (inv) => inv.soNumber || "-",
+                },
+                {
+                  id: "status",
+                  header: t("common.status"),
+                  cell: (inv) => <Badge variant={statusVariant[inv.status]}>{inv.status}</Badge>,
+                },
+                {
+                  id: "grandTotal",
+                  header: t("invoices.amount", "Amount"),
+                  align: "end",
+                  sortable: true,
+                  cell: (inv) => formatMoney(inv.grandTotal, settings.currency),
+                },
+                {
+                  id: "balance",
+                  header: t("invoices.balance", "Balance"),
+                  align: "end",
+                  cell: (inv) => (
+                    <span className="font-medium">{formatMoney(invoiceBalance(inv), settings.currency)}</span>
+                  ),
+                },
+                {
+                  id: "actions",
+                  header: "",
+                  hideable: false,
+                  align: "end",
+                  cell: (inv) => (
+                    <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`Download ${inv.invoiceNumber} PDF`}
+                        onClick={() => void downloadInvoicePdf(inv, settings.currency)}
+                      >
+                        <Download className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`Email ${inv.invoiceNumber}`}
+                        onClick={() => setEmailTarget(inv)}
+                      >
+                        <Mail className="h-4 w-4" />
+                      </Button>
+                      {canEdit && inv.status === "Draft" && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Send ${inv.invoiceNumber}`}
+                          onClick={() => act(sendInvoice(inv.id), `${inv.invoiceNumber} sent`)}
+                        >
+                          <Send className="h-4 w-4" />
+                        </Button>
+                      )}
+                      {canEdit && inv.status !== "Draft" && inv.status !== "Paid" && inv.status !== "Cancelled" && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Record payment for ${inv.invoiceNumber}`}
+                          onClick={() => {
+                            setPayFor(inv);
+                            setPayAmount(invoiceBalance(inv).toFixed(2));
+                          }}
+                        >
+                          <Wallet className="h-4 w-4" />
+                        </Button>
+                      )}
+                      {canEdit && inv.status !== "Cancelled" && inv.amountPaid === 0 && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Cancel ${inv.invoiceNumber}`}
+                          onClick={() => act(cancelInvoice(inv.id), `${inv.invoiceNumber} cancelled`)}
+                        >
+                          <Ban className="h-4 w-4" />
+                        </Button>
+                      )}
+                      {canDelete && inv.status === "Draft" && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Delete ${inv.invoiceNumber}`}
+                          onClick={() => setPendingDelete(inv)}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      )}
+                    </div>
+                  ),
+                },
+              ] satisfies EnterpriseColumn<Invoice>[]
+            }
+            getRowId={(inv) => inv.id}
+            isLoading={isInvoicesLoading}
+            emptyMessage={t(
+              "invoices.empty",
+              "No invoices yet. Raise one from a confirmed sales order to start tracking receivables."
+            )}
+            searchValue={searchQuery}
+            onSearchChange={(val) => {
+              setSearchQuery(val);
+              setPage(1);
+            }}
+            searchPlaceholder={t("common.search")}
+            toolbarExtra={
               <Select
                 value={statusFilter}
                 onValueChange={(v) => {
@@ -316,7 +452,7 @@ export default function Invoices() {
                   setPage(1);
                 }}
               >
-                <SelectTrigger className="w-40">
+                <SelectTrigger className="w-40 h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -329,86 +465,15 @@ export default function Invoices() {
                   <SelectItem value="Cancelled">Cancelled</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {isInvoicesLoading ? (
-            <p className="py-12 text-center text-muted-foreground">{t("common.loading")}</p>
-          ) : paginatedInvoices.length === 0 ? (
-            <div className="py-12 text-center space-y-3">
-              <Receipt className="h-10 w-10 mx-auto text-muted-foreground" />
-              <p className="text-muted-foreground">
-                {t("invoices.empty", "No invoices yet. Raise one from a confirmed sales order to start tracking receivables.")}
-              </p>
-              <Button onClick={() => setDialogOpen(true)} disabled={customers.length === 0}>
-                <Plus className="me-2 h-4 w-4" />{t("invoices.new", "New Invoice")}
-              </Button>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("invoices.number", "Invoice #")}</TableHead>
-                  <TableHead>{t("invoices.customer", "Customer")}</TableHead>
-                  <TableHead>{t("invoices.invoiceDate", "Invoice Date")}</TableHead>
-                  <TableHead>{t("invoices.dueDate", "Due Date")}</TableHead>
-                  <TableHead>{t("salesOrders.soNumber")}</TableHead>
-                  <TableHead>{t("common.status")}</TableHead>
-                  <TableHead className="text-end">{t("invoices.amount", "Amount")}</TableHead>
-                  <TableHead className="text-end">{t("invoices.balance", "Balance")}</TableHead>
-                  <TableHead className="w-32" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {paginatedInvoices.map(inv => (
-                  <TableRow key={inv.id} className="cursor-pointer" onClick={() => setDetail(inv)}>
-                    <TableCell className="font-medium">{inv.invoiceNumber}</TableCell>
-                    <TableCell>{inv.customerName}</TableCell>
-                    <TableCell>{new Date(inv.invoiceDate).toLocaleDateString()}</TableCell>
-                    <TableCell>{new Date(inv.dueDate).toLocaleDateString()}</TableCell>
-                    <TableCell>{inv.soNumber || "-"}</TableCell>
-                    <TableCell><Badge variant={statusVariant[inv.status]}>{inv.status}</Badge></TableCell>
-                    <TableCell className="text-end">{formatMoney(inv.grandTotal, settings.currency)}</TableCell>
-                    <TableCell className="text-end font-medium">{formatMoney(invoiceBalance(inv), settings.currency)}</TableCell>
-                    <TableCell onClick={e => e.stopPropagation()}>
-                      <div className="flex items-center justify-end gap-1">
-                        <Button variant="ghost" size="icon" aria-label={`Download ${inv.invoiceNumber} PDF`}
-                          onClick={() => void downloadInvoicePdf(inv, settings.currency)}>
-                          <Download className="h-4 w-4" />
-                        </Button>
-                        {inv.status === "Draft" && (
-                          <Button variant="ghost" size="icon" aria-label={`Send ${inv.invoiceNumber}`}
-                            onClick={() => act(sendInvoice(inv.id), `${inv.invoiceNumber} sent`)}>
-                            <Send className="h-4 w-4" />
-                          </Button>
-                        )}
-                        {inv.status !== "Draft" && inv.status !== "Paid" && inv.status !== "Cancelled" && (
-                          <Button variant="ghost" size="icon" aria-label={`Record payment for ${inv.invoiceNumber}`}
-                            onClick={() => { setPayFor(inv); setPayAmount(invoiceBalance(inv).toFixed(2)); }}>
-                            <Wallet className="h-4 w-4" />
-                          </Button>
-                        )}
-                        {inv.status !== "Cancelled" && inv.amountPaid === 0 && (
-                          <Button variant="ghost" size="icon" aria-label={`Cancel ${inv.invoiceNumber}`}
-                            onClick={() => act(cancelInvoice(inv.id), `${inv.invoiceNumber} cancelled`)}>
-                            <Ban className="h-4 w-4" />
-                          </Button>
-                        )}
-                        {inv.status === "Draft" && (
-                          <Button variant="ghost" size="icon" aria-label={`Delete ${inv.invoiceNumber}`}
-                            onClick={() => setPendingDelete(inv)}>
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        )}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-          <TablePagination pageInfo={invoicesPage?.pageInfo} onPageChange={setPage} />
+            }
+            selectable
+            savedViewsResource="invoices"
+            exportResource="invoices"
+            pageInfo={invoicesPage?.pageInfo}
+            onPageChange={setPage}
+            onRowClick={(inv) => setDetail(inv)}
+            testId="invoices-data-table"
+          />
         </CardContent>
       </Card>
 
@@ -611,6 +676,27 @@ export default function Invoices() {
                 <div className="flex justify-between font-semibold"><span>{t("invoices.balance", "Balance")}</span><span>{formatMoney(invoiceBalance(detail), settings.currency)}</span></div>
               </div>
               {detail.notes && <p className="text-sm whitespace-pre-line text-muted-foreground">{detail.notes}</p>}
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void downloadInvoicePdf(detail, settings.currency)}
+                >
+                  <Download className="h-4 w-4 me-1.5" />
+                  {t("common.downloadPdf", "Download PDF")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEmailTarget(detail)}
+                >
+                  <Mail className="h-4 w-4 me-1.5" />
+                  {t("emailDialog.sendEmail", "Email Invoice")}
+                </Button>
+              </div>
+              <AttachmentsPanel entityType="invoice" entityId={detail.id} />
               {detail.qrTlv && (
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-4 rounded-md border p-3 bg-muted/30">
                   <div className="space-y-1 text-xs">
@@ -687,6 +773,17 @@ export default function Invoices() {
           setPendingDelete(null);
         }}
       />
+
+      {emailTarget && (
+        <EmailDocumentDialog
+          open={emailTarget !== null}
+          onOpenChange={(open) => !open && setEmailTarget(null)}
+          documentType="invoice"
+          documentId={emailTarget.id}
+          documentNumber={emailTarget.invoiceNumber}
+          defaultRecipient={customers.find((c) => c.id === emailTarget.customerId)?.email ?? ""}
+        />
+      )}
     </div>
   );
 }

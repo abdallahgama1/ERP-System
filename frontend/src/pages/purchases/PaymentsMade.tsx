@@ -10,8 +10,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
@@ -23,7 +24,8 @@ const today = () => new Date().toISOString().split("T")[0];
 export default function PaymentsMade() {
   const { t } = useTranslation();
   const { settings } = useSettings();
-  const { bills, payments, vendors, createPayment, voidPayment, billBalance } = usePurchases();
+  const { can } = usePermissions();
+  const { bills, payments, vendors, createPayment, voidPayment, billBalance } = usePurchasingScope({ bills: true, payments: true, vendors: true });
   const { user } = useAuth();
   const { toast } = useToast();
 
@@ -123,10 +125,12 @@ export default function PaymentsMade() {
             {t("pages.purchases.paymentsMade.description", "Record vendor payments and allocate them across open bills.")}
           </p>
         </div>
-        <Button onClick={() => setDialogOpen(true)} disabled={vendorsWithBills.length === 0}>
-          <Plus className="me-2 h-4 w-4" />
-          Record Payment
-        </Button>
+        {can("purchases", "create") && (
+          <Button onClick={() => setDialogOpen(true)} disabled={vendorsWithBills.length === 0}>
+            <Plus className="me-2 h-4 w-4" />
+            Record Payment
+          </Button>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -194,7 +198,7 @@ export default function PaymentsMade() {
                       </TableCell>
                       <TableCell className="text-end font-medium">{formatMoney(p.amount, settings.currency)}</TableCell>
                       <TableCell>
-                        {!isVoided && (
+                        {!isVoided && can("purchases", "delete") && (
                           <Button
                             variant="ghost"
                             size="icon"

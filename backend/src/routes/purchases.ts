@@ -14,6 +14,7 @@ import {
   createPaymentMade,
   createPurchaseReturn,
   createVendorBill,
+  getVendorBillById,
   listPaymentsMade,
   listPurchaseReturns,
   listVendorBills,
@@ -35,18 +36,18 @@ import {
   updateVendor,
 } from "../services/purchasing.service.ts";
 import { normalizeVoidReason } from "../services/query-helpers.ts";
-import { parseOrThrow } from "../services/stock-locks.ts";
+import { actorCompanyId, parseOrThrow } from "../services/stock-locks.ts";
 
 export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
   // ---------------- Vendors ----------------
   app.get("/api/vendors", { preHandler: requirePermission("purchases", "view") }, async (req) => {
-    return listVendors(getDb(), req.query as Record<string, unknown>);
+    return listVendors(getDb(), req.authUser!, req.query as Record<string, unknown>);
   });
 
   app.post("/api/vendors", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {
     const data = parseOrThrow(vendorSchema, req.body, "Invalid vendor payload");
     const vendor = await createVendor(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { vendorId: vendor.id });
+    eventBroadcaster.broadcast("purchases_updated", { vendorId: vendor.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ vendor });
   });
 
@@ -54,14 +55,14 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
     const id = (req.params as { id: string }).id;
     const data = parseOrThrow(vendorSchema.partial(), req.body, "Invalid vendor update");
     const vendor = await updateVendor(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { vendorId: id });
+    eventBroadcaster.broadcast("purchases_updated", { vendorId: id }, actorCompanyId(req.authUser!));
     return { vendor };
   });
 
   app.delete("/api/vendors/:id", { preHandler: requirePermission("purchases", "delete") }, async (req) => {
     const id = (req.params as { id: string }).id;
     await deleteVendor(getDb(), req.authUser!, id, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { vendorId: id });
+    eventBroadcaster.broadcast("purchases_updated", { vendorId: id }, actorCompanyId(req.authUser!));
     return { ok: true };
   });
 
@@ -73,7 +74,7 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/purchase-orders", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {
     const data = parseOrThrow(poSchema, req.body, "Invalid PO payload");
     const purchaseOrder = await createPurchaseOrder(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { poId: purchaseOrder.id });
+    eventBroadcaster.broadcast("purchases_updated", { poId: purchaseOrder.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ purchaseOrder });
   });
 
@@ -81,28 +82,28 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
     const id = (req.params as { id: string }).id;
     const data = parseOrThrow(poSchema, req.body, "Invalid PO update");
     const purchaseOrder = await updatePurchaseOrder(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { poId: id });
+    eventBroadcaster.broadcast("purchases_updated", { poId: id }, actorCompanyId(req.authUser!));
     return { purchaseOrder };
   });
 
   app.post("/api/purchase-orders/:id/issue", { preHandler: requirePermission("purchases", "edit") }, async (req) => {
     const id = (req.params as { id: string }).id;
     const purchaseOrder = await issuePurchaseOrder(getDb(), req.authUser!, id, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { poId: id });
+    eventBroadcaster.broadcast("purchases_updated", { poId: id }, actorCompanyId(req.authUser!));
     return { purchaseOrder };
   });
 
   app.post("/api/purchase-orders/:id/cancel", { preHandler: requirePermission("purchases", "edit") }, async (req) => {
     const id = (req.params as { id: string }).id;
     const purchaseOrder = await cancelPurchaseOrder(getDb(), req.authUser!, id, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { poId: id });
+    eventBroadcaster.broadcast("purchases_updated", { poId: id }, actorCompanyId(req.authUser!));
     return { purchaseOrder };
   });
 
   app.delete("/api/purchase-orders/:id", { preHandler: requirePermission("purchases", "delete") }, async (req) => {
     const id = (req.params as { id: string }).id;
     await deletePurchaseOrder(getDb(), req.authUser!, id);
-    eventBroadcaster.broadcast("purchases_updated", { poId: id });
+    eventBroadcaster.broadcast("purchases_updated", { poId: id }, actorCompanyId(req.authUser!));
     return { ok: true };
   });
 
@@ -114,8 +115,9 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/purchase-receives", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {
     const data = parseOrThrow(receiveSchema, req.body, "Invalid receive payload");
     const receive = await createPurchaseReceive(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { receiveId: receive.id });
-    eventBroadcaster.broadcast("inventory_updated", { receiveId: receive.id });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("purchases_updated", { receiveId: receive.id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { receiveId: receive.id }, companyId);
     return reply.status(201).send({ receive });
   });
 
@@ -124,17 +126,23 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
     return listVendorBills(getDb(), req.authUser!, req.query as Record<string, unknown>);
   });
 
+  app.get("/api/vendor-bills/:id", { preHandler: requirePermission("purchases", "view") }, async (req) => {
+    const id = (req.params as { id: string }).id;
+    const bill = await getVendorBillById(getDb(), req.authUser!, id);
+    return { bill };
+  });
+
   app.post("/api/vendor-bills", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {
     const data = parseOrThrow(billSchema, req.body, "Invalid bill payload");
     const bill = await createVendorBill(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { billId: bill.id });
+    eventBroadcaster.broadcast("purchases_updated", { billId: bill.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ bill });
   });
 
   app.post("/api/vendor-bills/:id/void", { preHandler: requirePermission("purchases", "approve") }, async (req) => {
     const id = (req.params as { id: string }).id;
     const bill = await voidVendorBill(getDb(), req.authUser!, id, normalizeVoidReason(req.body), req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { billId: id });
+    eventBroadcaster.broadcast("purchases_updated", { billId: id }, actorCompanyId(req.authUser!));
     return { bill };
   });
 
@@ -146,14 +154,14 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/payments-made", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {
     const data = parseOrThrow(paymentMadeSchema, req.body, "Invalid payment payload");
     const payment = await createPaymentMade(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { paymentId: payment.id });
+    eventBroadcaster.broadcast("purchases_updated", { paymentId: payment.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ payment });
   });
 
   app.post("/api/payments-made/:id/void", { preHandler: requirePermission("purchases", "approve") }, async (req) => {
     const id = (req.params as { id: string }).id;
     const payment = await voidPaymentMade(getDb(), req.authUser!, id, normalizeVoidReason(req.body), req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { paymentId: id });
+    eventBroadcaster.broadcast("purchases_updated", { paymentId: id }, actorCompanyId(req.authUser!));
     return { payment };
   });
 
@@ -165,8 +173,9 @@ export async function purchaseRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/purchase-returns", { preHandler: requirePermission("purchases", "create") }, async (req, reply) => {
     const data = parseOrThrow(purchaseReturnSchema, req.body, "Invalid purchase return");
     const purchaseReturn = await createPurchaseReturn(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("purchases_updated", { returnId: purchaseReturn.id });
-    eventBroadcaster.broadcast("inventory_updated", { returnId: purchaseReturn.id });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("purchases_updated", { returnId: purchaseReturn.id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { returnId: purchaseReturn.id }, companyId);
     return reply.status(201).send({ purchaseReturn });
   });
 }

@@ -13,7 +13,7 @@ import { loadAuthUserById, type AuthUser } from "../auth/sessions.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
-import type { RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, type RequestActor } from "./stock-locks.ts";
 
 const MAX_PIN_ATTEMPTS = 5;
 const PIN_LOCKOUT_MS = 15 * 60 * 1000;
@@ -25,6 +25,7 @@ export async function setUserPosPin(
   pin: string,
   ipAddress?: string
 ): Promise<{ userId: string; updatedAt: string }> {
+  const companyId = actorCompanyId(actor);
   if (actor.id !== targetUserId && actor.role !== "admin" && actor.role !== "manager") {
     throw new AppError(403, "Only admins, managers, or the user themselves can update a POS PIN", "FORBIDDEN");
   }
@@ -63,6 +64,7 @@ export async function setUserPosPin(
       });
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -84,10 +86,17 @@ export async function bindSessionToTerminal(
   terminalId: string,
   ipAddress?: string
 ): Promise<{ terminalId: string; branchId: string; code: string; name: string }> {
+  const companyId = actorCompanyId(actor);
   const [terminal] = await db
     .select()
     .from(posTerminals)
-    .where(and(eq(posTerminals.id, terminalId), eq(posTerminals.isActive, true)))
+    .where(
+      and(
+        eq(posTerminals.id, terminalId),
+        eq(posTerminals.companyId, companyId),
+        eq(posTerminals.isActive, true)
+      )
+    )
     .limit(1);
 
   if (!terminal) {
@@ -108,6 +117,7 @@ export async function bindSessionToTerminal(
       .where(eq(userSessions.id, sessionId));
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -135,6 +145,7 @@ export async function lockTerminalSession(
   terminalId: string | null,
   ipAddress?: string
 ): Promise<{ isLocked: true }> {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
     await tx
       .update(userSessions)
@@ -145,6 +156,7 @@ export async function lockTerminalSession(
       .where(eq(userSessions.id, sessionId));
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -163,6 +175,7 @@ export async function switchCashierByPin(
   params: {
     sessionId: string;
     terminalId: string | null;
+    companyId?: string;
     pin: string;
     cashierId?: string;
     ipAddress?: string;
@@ -170,17 +183,29 @@ export async function switchCashierByPin(
 ): Promise<{ user: AuthUser; terminalId: string | null; isLocked: false }> {
   const now = new Date();
   let terminalBranchId: string | null = null;
+  let terminalCompanyId: string | null = null;
   if (params.terminalId) {
     const [terminal] = await db
-      .select({ id: posTerminals.id, branchId: posTerminals.branchId, isActive: posTerminals.isActive })
+      .select({
+        id: posTerminals.id,
+        companyId: posTerminals.companyId,
+        branchId: posTerminals.branchId,
+        isActive: posTerminals.isActive,
+      })
       .from(posTerminals)
-      .where(eq(posTerminals.id, params.terminalId))
+      .where(
+        params.companyId
+          ? and(eq(posTerminals.id, params.terminalId), eq(posTerminals.companyId, params.companyId))
+          : eq(posTerminals.id, params.terminalId)
+      )
       .limit(1);
     if (!terminal || !terminal.isActive) {
       throw new AppError(404, "POS terminal not found or inactive", "TERMINAL_NOT_FOUND");
     }
     terminalBranchId = terminal.branchId;
+    terminalCompanyId = terminal.companyId;
   }
+  const effectiveCompanyId = terminalCompanyId ?? params.companyId;
 
   const candidateRows = params.cashierId
     ? await db
@@ -243,9 +268,12 @@ export async function switchCashierByPin(
     throw new AppError(401, "Invalid cashier PIN", "INVALID_PIN");
   }
 
-  const cashierUser = await loadAuthUserById(db, matchedUserId);
+  const cashierUser = await loadAuthUserById(db, matchedUserId, effectiveCompanyId);
   if (!cashierUser) {
     throw new AppError(403, "Cashier account is inactive", "ACCOUNT_DISABLED");
+  }
+  if (effectiveCompanyId && cashierUser.activeCompanyId !== effectiveCompanyId) {
+    throw new AppError(403, "Cashier does not belong to this terminal's company", "COMPANY_FORBIDDEN");
   }
   if (cashierUser.role !== "admin" && !cashierUser.permissions.pos?.view) {
     throw new AppError(403, "Cashier does not have POS register access", "FORBIDDEN");
@@ -270,6 +298,7 @@ export async function switchCashierByPin(
       .where(eq(userSessions.id, params.sessionId));
 
     await writeAuditLog(tx, {
+      companyId: effectiveCompanyId ?? cashierUser.activeCompanyId,
       userId: cashierUser.id,
       userName: cashierUser.name,
       userRole: cashierUser.role,
@@ -295,6 +324,7 @@ export async function verifyManagerPinOverride(
     pin: string;
     managerUserId?: string;
     terminalId?: string;
+    companyId?: string;
     action?: PosOverrideAction;
     reason?: string;
     requestedByUserId: string;
@@ -318,11 +348,21 @@ export async function verifyManagerPinOverride(
 
   const now = new Date();
   let terminalBranchId: string | null = null;
+  let terminalCompanyId: string | null = null;
   if (input.terminalId) {
     const [terminal] = await db
-      .select({ id: posTerminals.id, branchId: posTerminals.branchId, isActive: posTerminals.isActive })
+      .select({
+        id: posTerminals.id,
+        companyId: posTerminals.companyId,
+        branchId: posTerminals.branchId,
+        isActive: posTerminals.isActive,
+      })
       .from(posTerminals)
-      .where(eq(posTerminals.id, input.terminalId))
+      .where(
+        input.companyId
+          ? and(eq(posTerminals.id, input.terminalId), eq(posTerminals.companyId, input.companyId))
+          : eq(posTerminals.id, input.terminalId)
+      )
       .limit(1);
     if (!terminal || !terminal.isActive) {
       throw new AppError(404, "POS terminal not found or inactive", "TERMINAL_NOT_FOUND");
@@ -331,7 +371,9 @@ export async function verifyManagerPinOverride(
       throw new AppError(403, "Forbidden: you do not have access to this branch", "BRANCH_FORBIDDEN");
     }
     terminalBranchId = terminal.branchId;
+    terminalCompanyId = terminal.companyId;
   }
+  const effectiveCompanyId = terminalCompanyId ?? input.companyId;
 
   const rawCandidates = input.managerUserId
     ? await db
@@ -427,9 +469,12 @@ export async function verifyManagerPinOverride(
     throw new AppError(401, "Invalid manager PIN", "INVALID_PIN");
   }
 
-  const approver = await loadAuthUserById(db, matchedUserId);
+  const approver = await loadAuthUserById(db, matchedUserId, effectiveCompanyId);
   if (!approver || !approver.isActive) {
     throw new AppError(403, "Approver account is inactive", "ACCOUNT_DISABLED");
+  }
+  if (effectiveCompanyId && approver.activeCompanyId !== effectiveCompanyId) {
+    throw new AppError(403, "Approver does not belong to this company", "COMPANY_FORBIDDEN");
   }
 
   const hasApprovePrivilege =
@@ -455,6 +500,7 @@ export async function verifyManagerPinOverride(
     .where(eq(userPosPins.userId, matchedUserId));
 
   await writeAuditLog(db, {
+    companyId: effectiveCompanyId ?? approver.activeCompanyId,
     userId: input.requestedByUserId,
     userName: input.requestedByName ?? approver.name,
     userRole: input.requestedByRole ?? approver.role,

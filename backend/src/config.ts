@@ -1,4 +1,5 @@
 import { config as loadDotenv } from "dotenv";
+import { hkdfSync } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,11 +29,22 @@ const rawCookieSecure = (process.env.COOKIE_SECURE ?? "auto").trim().toLowerCase
 const cookieSecureMode: "auto" | "true" | "false" =
   rawCookieSecure === "true" || rawCookieSecure === "false" ? rawCookieSecure : "auto";
 
+const rawStorageDriver = (process.env.STORAGE_DRIVER?.trim() || "local").toLowerCase();
+if (rawStorageDriver !== "local" && rawStorageDriver !== "s3") {
+  throw new Error(`Invalid STORAGE_DRIVER "${rawStorageDriver}". Expected "local" or "s3".`);
+}
+const storageDriver: "local" | "s3" = rawStorageDriver;
+
+const nodeEnv = process.env.NODE_ENV ?? "development";
+const defaultStorageLocalDir =
+  nodeEnv === "production" ? "/app/uploads" : path.resolve(currentDir, "../uploads");
+const rawStorageLocalDir = (process.env.STORAGE_LOCAL_DIR ?? "").trim();
+
 export const DEV_COOKIE_SECRET_PLACEHOLDER = "dev-cookie-secret-change-in-production";
 
 export const env = {
-  NODE_ENV: process.env.NODE_ENV ?? "development",
-  LOG_LEVEL: (process.env.LOG_LEVEL ?? (process.env.NODE_ENV === "production" ? "info" : "debug")).trim(),
+  NODE_ENV: nodeEnv,
+  LOG_LEVEL: (process.env.LOG_LEVEL ?? (nodeEnv === "production" ? "info" : "debug")).trim(),
   PORT: parseIntEnv(process.env.PORT, 3001),
   HOST: process.env.HOST ?? "127.0.0.1",
   CORS_ORIGIN: process.env.CORS_ORIGIN ?? "http://localhost:8080",
@@ -45,7 +57,16 @@ export const env = {
   SESSION_COOKIE_NAME: (process.env.SESSION_COOKIE_NAME ?? "erp_session").trim() || "erp_session",
   SESSION_TTL_DAYS: parseIntEnv(process.env.SESSION_TTL_DAYS, 30),
   AUTH_COOKIE_SECRET: (process.env.AUTH_COOKIE_SECRET ?? DEV_COOKIE_SECRET_PLACEHOLDER).trim(),
+  MFA_ENCRYPTION_KEY: (process.env.MFA_ENCRYPTION_KEY ?? "").trim(),
   COOKIE_SECURE: cookieSecureMode,
+  STORAGE_DRIVER: storageDriver,
+  STORAGE_LOCAL_DIR: rawStorageLocalDir ? path.resolve(rawStorageLocalDir) : defaultStorageLocalDir,
+  S3_BUCKET: (process.env.S3_BUCKET ?? "").trim(),
+  S3_REGION: (process.env.S3_REGION ?? "us-east-1").trim() || "us-east-1",
+  S3_ENDPOINT: (process.env.S3_ENDPOINT ?? "").trim().replace(/\/+$/, ""),
+  S3_ACCESS_KEY_ID: (process.env.S3_ACCESS_KEY_ID ?? "").trim(),
+  S3_SECRET_ACCESS_KEY: (process.env.S3_SECRET_ACCESS_KEY ?? "").trim(),
+  S3_FORCE_PATH_STYLE: parseBoolEnv(process.env.S3_FORCE_PATH_STYLE, false),
   SMTP_HOST: (process.env.SMTP_HOST ?? "").trim(),
   SMTP_PORT: parseIntEnv(process.env.SMTP_PORT, 587),
   SMTP_SECURE: parseBoolEnv(process.env.SMTP_SECURE, false),
@@ -64,6 +85,36 @@ export const env = {
     .replace(/\/+$/, ""),
   METRICS_TOKEN: (process.env.METRICS_TOKEN ?? "").trim(),
   SENTRY_DSN: (process.env.SENTRY_DSN ?? "").trim(),
-  SENTRY_ENVIRONMENT: (process.env.SENTRY_ENVIRONMENT ?? "").trim() || (process.env.NODE_ENV ?? "development"),
+  SENTRY_ENVIRONMENT: (process.env.SENTRY_ENVIRONMENT ?? "").trim() || nodeEnv,
   SENTRY_TRACES_SAMPLE_RATE: parseRateEnv(process.env.SENTRY_TRACES_SAMPLE_RATE, 0),
 };
+
+export function resolveMfaEncryptionKey(): Buffer {
+  const configured = env.MFA_ENCRYPTION_KEY;
+  if (configured) {
+    if (/^[0-9a-fA-F]{64}$/.test(configured)) {
+      return Buffer.from(configured, "hex");
+    }
+    if (/^[A-Za-z0-9+/]{43}=$/.test(configured)) {
+      const decoded = Buffer.from(configured, "base64");
+      if (decoded.length === 32 && decoded.toString("base64") === configured) {
+        return decoded;
+      }
+    }
+    throw new Error("MFA_ENCRYPTION_KEY must be a 64-character hex string or base64-encoded 32-byte key.");
+  }
+
+  if (env.NODE_ENV === "production") {
+    throw new Error("MFA_ENCRYPTION_KEY must be a 32-byte hex or base64 key when NODE_ENV=production.");
+  }
+
+  return Buffer.from(
+    hkdfSync(
+      "sha256",
+      Buffer.from(env.AUTH_COOKIE_SECRET, "utf8"),
+      Buffer.from("count-it-keep-it-mfa-v1", "utf8"),
+      Buffer.from("totp-aes-256-gcm", "utf8"),
+      32
+    )
+  );
+}

@@ -4,8 +4,8 @@ import { Bar, BarChart, CartesianGrid, Legend, Line, ComposedChart, ResponsiveCo
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useSales } from "@/contexts/SalesContext";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import { useSettings } from "@/contexts/SettingsContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useProfitLossQuery } from "@/hooks/queries/useAccountingQueries";
@@ -15,8 +15,8 @@ import { downloadCsv, csvTimestamp } from "@/lib/export/csv";
 type Row = { month: string; sales: number; purchases: number; margin: number; marginPct: number };
 
 export default function SalesVsPurchases() {
-  const { invoices } = useSales();
-  const { bills } = usePurchases();
+  const { invoices } = useSalesScope({ invoices: true });
+  const { bills } = usePurchasingScope({ bills: true });
   const { settings } = useSettings();
   const { can } = usePermissions();
   const { data: pnl } = useProfitLossQuery({}, can("accounting", "view"));

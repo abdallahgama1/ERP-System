@@ -23,14 +23,14 @@ import {
 import { Label } from "@/components/ui/label";
 import { Building2, Plus, Search, Edit, Trash2, MapPin, Phone, Eye } from "lucide-react";
 import { Branch } from "@/types";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 
 const Branches = () => {
   const { t } = useTranslation();
-  const { branches, addBranch, updateBranch, deleteBranch } = useInventory();
+  const { branches, addBranch, updateBranch, deleteBranch } = useInventoryScope();
   const { can } = usePermissions();
   const canCreateBranch = can("branches", "create");
   const canEditBranch = can("branches", "edit");

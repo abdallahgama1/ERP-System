@@ -3,6 +3,7 @@ import type { ServerResponse } from "node:http";
 interface SseClient {
   id: string;
   userId: string;
+  companyId: string | null;
   res: ServerResponse;
 }
 
@@ -28,8 +29,8 @@ class EventBroadcaster {
     this.heartbeatTimer.unref?.();
   }
 
-  addClient(id: string, userId: string, res: ServerResponse): () => void {
-    const client: SseClient = { id, userId, res };
+  addClient(id: string, userId: string, res: ServerResponse, companyId: string | null = null): () => void {
+    const client: SseClient = { id, userId, companyId, res };
     this.clients.add(client);
     this.ensureHeartbeat();
 
@@ -40,11 +41,20 @@ class EventBroadcaster {
     };
   }
 
-  broadcast(type: string, payload: Record<string, unknown> = {}): void {
+  broadcast(type: string, payload: Record<string, unknown> = {}, companyId?: string | null): void {
     if (this.clients.size === 0) return;
+    const targetCompanyId =
+      companyId !== undefined
+        ? companyId
+        : typeof payload.companyId === "string" && payload.companyId
+          ? payload.companyId
+          : null;
     const data = JSON.stringify({ type, payload, ts: Date.now() });
     const message = `event: erp_update\ndata: ${data}\n\n`;
     for (const client of this.clients) {
+      if (targetCompanyId && client.companyId && client.companyId !== targetCompanyId) {
+        continue;
+      }
       try {
         client.res.write(message);
       } catch {

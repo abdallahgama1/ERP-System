@@ -1,11 +1,12 @@
 import { and, eq } from "drizzle-orm";
 import type { z } from "zod";
 import type { posSyncBatchSchema } from "@erp/shared";
-import { idempotencyKeys, salesInvoices } from "../../drizzle/schema.ts";
+import { idempotencyKeys, posTerminals, salesInvoices } from "../../drizzle/schema.ts";
+import { AppError } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { createModuleLogger } from "../logging/logger.ts";
 import { executePosCheckoutTx, type PosReceiptDto } from "./pos.service.ts";
-import type { RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, type RequestActor } from "./stock-locks.ts";
 
 const log = createModuleLogger("pos-sync");
 
@@ -22,6 +23,7 @@ export async function syncOfflinePosBatch(
   data: z.infer<typeof posSyncBatchSchema>,
   ipAddress?: string
 ): Promise<{ results: PosSyncItemResult[] }> {
+  const companyId = actorCompanyId(actor);
   const ordered = [...data.sales].sort((a, b) => {
     const ta = a.offlineCreatedAt ? new Date(a.offlineCreatedAt).getTime() : 0;
     const tb = b.offlineCreatedAt ? new Date(b.offlineCreatedAt).getTime() : 0;
@@ -37,6 +39,16 @@ export async function syncOfflinePosBatch(
 
     try {
       const outcome = await db.transaction(async (tx) => {
+        // 0. Ensure terminal belongs to active company before reading idempotency cache
+        const [terminal] = await tx
+          .select({ id: posTerminals.id })
+          .from(posTerminals)
+          .where(and(eq(posTerminals.id, txInput.terminalId), eq(posTerminals.companyId, companyId)))
+          .limit(1);
+        if (!terminal) {
+          throw new AppError(404, "POS terminal not found", "TERMINAL_NOT_FOUND");
+        }
+
         // 1. Check idempotency key store first
         const [existingKey] = await tx
           .select()
@@ -64,6 +76,7 @@ export async function syncOfflinePosBatch(
           .from(salesInvoices)
           .where(
             and(
+              eq(salesInvoices.companyId, companyId),
               eq(salesInvoices.posTerminalId, txInput.terminalId),
               eq(salesInvoices.offlineClientTxId, clientTxId)
             )

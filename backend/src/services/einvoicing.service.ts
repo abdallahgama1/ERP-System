@@ -15,7 +15,9 @@ import {
 } from "@erp/shared";
 import { and, asc, desc, eq, gte, ilike, inArray, isNotNull, lte, or, sql, type SQL } from "drizzle-orm";
 import {
+  DEFAULT_COMPANY_ID,
   branches,
+  companies,
   companySettings,
   customers,
   einvoiceSubmissions,
@@ -37,9 +39,73 @@ import {
   isEtaConfigured,
   submitEtaReceipts,
 } from "./eta-client.service.ts";
-import { parseOrThrow, type RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, parseOrThrow, type RequestActor } from "./stock-locks.ts";
 
 const log = createModuleLogger("einvoicing");
+
+function companyEinvoiceLockKey(companyId: string): number {
+  return createHash("sha256").update(companyId).digest().readInt32BE(0);
+}
+
+interface CompanyEinvoiceConfig {
+  companyName: string;
+  legalName: string;
+  taxRegistrationNumber: string;
+  baseCurrency: string;
+  einvoicingMode: "none" | "zatca_qr" | "zatca_phase2" | "eta_egypt";
+  address: string;
+}
+
+async function loadCompanyEinvoiceConfig(
+  tx: DbOrTx,
+  companyId: string
+): Promise<CompanyEinvoiceConfig | null> {
+  const [comp] = await tx
+    .select()
+    .from(companies)
+    .where(eq(companies.id, companyId))
+    .limit(1);
+
+  if (companyId === DEFAULT_COMPANY_ID) {
+    const [legacy] = await tx
+      .select()
+      .from(companySettings)
+      .where(eq(companySettings.id, 1))
+      .limit(1);
+
+    if (!comp && legacy) {
+      return {
+        companyName: legacy.companyName,
+        legalName: legacy.legalName,
+        taxRegistrationNumber: legacy.taxRegistrationNumber,
+        baseCurrency: legacy.baseCurrency,
+        einvoicingMode: legacy.einvoicingMode,
+        address: legacy.address,
+      };
+    }
+
+    if (comp && legacy && comp.einvoicingMode === "none" && legacy.einvoicingMode !== "none") {
+      return {
+        companyName: legacy.companyName || comp.name,
+        legalName: legacy.legalName || comp.legalName,
+        taxRegistrationNumber: legacy.taxRegistrationNumber || comp.taxRegistrationNumber,
+        baseCurrency: legacy.baseCurrency || comp.baseCurrency,
+        einvoicingMode: legacy.einvoicingMode,
+        address: legacy.address || comp.address,
+      };
+    }
+  }
+
+  if (!comp) return null;
+  return {
+    companyName: comp.name,
+    legalName: comp.legalName,
+    taxRegistrationNumber: comp.taxRegistrationNumber,
+    baseCurrency: comp.baseCurrency,
+    einvoicingMode: comp.einvoicingMode,
+    address: comp.address,
+  };
+}
 
 export interface ZatcaQrInput {
   sellerName: string;
@@ -263,11 +329,12 @@ export function buildEtaEgyptReceiptPayload(input: EtaReceiptBuildInput): {
 
 /**
  * Computes ICV sequence, chained SHA-256 hash, ZATCA TLV QR or ETA Egypt e-Receipt v1.2 payload
- * & submission queue entry whenever companySettings.einvoicingMode !== 'none'.
+ * & submission queue entry whenever company einvoicingMode !== 'none'.
  */
 export async function applyInvoiceEInvoiceMetadata(
   tx: DbOrTx,
-  invoiceId: string
+  invoiceId: string,
+  companyId?: string
 ): Promise<{
   eInvoiceStatus: string;
   icv: number | null;
@@ -277,20 +344,15 @@ export async function applyInvoiceEInvoiceMetadata(
   etaDocumentUuid: string | null;
   etaReceiptStatus: string;
 }> {
-  const [company] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
-  if (!company || company.einvoicingMode === "none") {
-    return {
-      eInvoiceStatus: "not_applicable",
-      icv: null,
-      invoiceHash: null,
-      prevInvoiceHash: null,
-      qrTlv: null,
-      etaDocumentUuid: null,
-      etaReceiptStatus: "not_applicable",
-    };
-  }
-
-  const [inv] = await tx.select().from(salesInvoices).where(eq(salesInvoices.id, invoiceId)).limit(1);
+  const [inv] = await tx
+    .select()
+    .from(salesInvoices)
+    .where(
+      companyId
+        ? and(eq(salesInvoices.id, invoiceId), eq(salesInvoices.companyId, companyId))
+        : eq(salesInvoices.id, invoiceId)
+    )
+    .limit(1);
   if (!inv) {
     return {
       eInvoiceStatus: "not_applicable",
@@ -303,19 +365,36 @@ export async function applyInvoiceEInvoiceMetadata(
     };
   }
 
-  // Serialize ICV + prevInvoiceHash allocation across concurrent ERP/POS checkouts
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(882411)`);
+  const effectiveCompanyId = companyId || inv.companyId || DEFAULT_COMPANY_ID;
+  const company = await loadCompanyEinvoiceConfig(tx, effectiveCompanyId);
+  if (!company || company.einvoicingMode === "none") {
+    return {
+      eInvoiceStatus: "not_applicable",
+      icv: null,
+      invoiceHash: null,
+      prevInvoiceHash: null,
+      qrTlv: null,
+      etaDocumentUuid: null,
+      etaReceiptStatus: "not_applicable",
+    };
+  }
+
+  // Serialize ICV + prevInvoiceHash allocation per company across concurrent ERP/POS checkouts
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(882411, ${companyEinvoiceLockKey(effectiveCompanyId)})`
+  );
 
   const [{ maxIcv }] = await tx
     .select({ maxIcv: sql<number>`coalesce(max(${salesInvoices.icv}), 0)::int` })
-    .from(salesInvoices);
+    .from(salesInvoices)
+    .where(eq(salesInvoices.companyId, effectiveCompanyId));
   const lastHashed = await tx
     .select({
       invoiceHash: salesInvoices.invoiceHash,
       etaDocumentUuid: salesInvoices.etaDocumentUuid,
     })
     .from(salesInvoices)
-    .where(isNotNull(salesInvoices.invoiceHash))
+    .where(and(eq(salesInvoices.companyId, effectiveCompanyId), isNotNull(salesInvoices.invoiceHash)))
     .orderBy(desc(salesInvoices.icv))
     .limit(1);
 
@@ -337,10 +416,22 @@ export async function applyInvoiceEInvoiceMetadata(
   const taxNumber = company.taxRegistrationNumber || "000000000000000";
 
   if (company.einvoicingMode === "eta_egypt") {
-    const [branchRow] = await tx.select().from(branches).where(eq(branches.id, inv.branchId)).limit(1);
-    const [custRow] = await tx.select().from(customers).where(eq(customers.id, inv.customerId)).limit(1);
+    const [branchRow] = await tx
+      .select()
+      .from(branches)
+      .where(and(eq(branches.id, inv.branchId), eq(branches.companyId, effectiveCompanyId)))
+      .limit(1);
+    const [custRow] = await tx
+      .select()
+      .from(customers)
+      .where(and(eq(customers.id, inv.customerId), eq(customers.companyId, effectiveCompanyId)))
+      .limit(1);
     const [termRow] = inv.posTerminalId
-      ? await tx.select().from(posTerminals).where(eq(posTerminals.id, inv.posTerminalId)).limit(1)
+      ? await tx
+          .select()
+          .from(posTerminals)
+          .where(and(eq(posTerminals.id, inv.posTerminalId), eq(posTerminals.companyId, effectiveCompanyId)))
+          .limit(1)
       : [undefined];
     const lines = await tx.select().from(salesInvoiceLines).where(eq(salesInvoiceLines.invoiceId, inv.id));
     const tenders =
@@ -388,11 +479,12 @@ export async function applyInvoiceEInvoiceMetadata(
         eInvoiceStatus: "pending_submission",
         eInvoicePayloadJson: payload,
       })
-      .where(eq(salesInvoices.id, invoiceId));
+      .where(and(eq(salesInvoices.id, invoiceId), eq(salesInvoices.companyId, effectiveCompanyId)));
 
     await tx
       .insert(einvoiceSubmissions)
       .values({
+        companyId: effectiveCompanyId,
         invoiceId: inv.id,
         provider: "eta_egypt",
         documentType: inv.sourceChannel === "pos" ? "receipt" : "invoice",
@@ -439,7 +531,7 @@ export async function applyInvoiceEInvoiceMetadata(
         vatTotal: vatStr,
       },
     })
-    .where(eq(salesInvoices.id, invoiceId));
+    .where(and(eq(salesInvoices.id, invoiceId), eq(salesInvoices.companyId, effectiveCompanyId)));
 
   return {
     eInvoiceStatus: "generated",
@@ -454,24 +546,23 @@ export async function applyInvoiceEInvoiceMetadata(
 
 export async function applyPosReturnEInvoiceMetadata(
   tx: DbOrTx,
-  posReturnId: string
+  posReturnId: string,
+  companyId?: string
 ): Promise<{
   etaDocumentUuid: string | null;
   etaReceiptStatus: string;
   qrTlv: string | null;
   eInvoicePayloadJson: Record<string, unknown> | null;
 }> {
-  const [company] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
-  if (!company || company.einvoicingMode !== "eta_egypt") {
-    return {
-      etaDocumentUuid: null,
-      etaReceiptStatus: "not_applicable",
-      qrTlv: null,
-      eInvoicePayloadJson: null,
-    };
-  }
-
-  const [posRet] = await tx.select().from(posReturns).where(eq(posReturns.id, posReturnId)).limit(1);
+  const [posRet] = await tx
+    .select()
+    .from(posReturns)
+    .where(
+      companyId
+        ? and(eq(posReturns.id, posReturnId), eq(posReturns.companyId, companyId))
+        : eq(posReturns.id, posReturnId)
+    )
+    .limit(1);
   if (!posRet) {
     return {
       etaDocumentUuid: null,
@@ -481,29 +572,55 @@ export async function applyPosReturnEInvoiceMetadata(
     };
   }
 
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(882411)`);
+  const effectiveCompanyId = companyId || posRet.companyId || DEFAULT_COMPANY_ID;
+  const company = await loadCompanyEinvoiceConfig(tx, effectiveCompanyId);
+  if (!company || company.einvoicingMode !== "eta_egypt") {
+    return {
+      etaDocumentUuid: null,
+      etaReceiptStatus: "not_applicable",
+      qrTlv: null,
+      eInvoicePayloadJson: null,
+    };
+  }
+
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(882411, ${companyEinvoiceLockKey(effectiveCompanyId)})`
+  );
 
   const [origInv] = await tx
     .select()
     .from(salesInvoices)
-    .where(eq(salesInvoices.id, posRet.originalInvoiceId))
+    .where(and(eq(salesInvoices.id, posRet.originalInvoiceId), eq(salesInvoices.companyId, effectiveCompanyId)))
     .limit(1);
 
   const lastSub = await tx
     .select({ documentUuid: einvoiceSubmissions.documentUuid })
     .from(einvoiceSubmissions)
-    .where(eq(einvoiceSubmissions.provider, "eta_egypt"))
+    .where(
+      and(
+        eq(einvoiceSubmissions.companyId, effectiveCompanyId),
+        eq(einvoiceSubmissions.provider, "eta_egypt")
+      )
+    )
     .orderBy(desc(einvoiceSubmissions.createdAt), desc(einvoiceSubmissions.id))
     .limit(1);
 
-  const [branchRow] = await tx.select().from(branches).where(eq(branches.id, posRet.branchId)).limit(1);
+  const [branchRow] = await tx
+    .select()
+    .from(branches)
+    .where(and(eq(branches.id, posRet.branchId), eq(branches.companyId, effectiveCompanyId)))
+    .limit(1);
   const [custRow] = origInv?.customerId
-    ? await tx.select().from(customers).where(eq(customers.id, origInv.customerId)).limit(1)
+    ? await tx
+        .select()
+        .from(customers)
+        .where(and(eq(customers.id, origInv.customerId), eq(customers.companyId, effectiveCompanyId)))
+        .limit(1)
     : [undefined];
   const [termRow] = await tx
     .select()
     .from(posTerminals)
-    .where(eq(posTerminals.id, posRet.terminalId))
+    .where(and(eq(posTerminals.id, posRet.terminalId), eq(posTerminals.companyId, effectiveCompanyId)))
     .limit(1);
   const retLines = await tx
     .select({
@@ -554,11 +671,12 @@ export async function applyPosReturnEInvoiceMetadata(
       etaReceiptStatus: "pending_submission",
       eInvoicePayloadJson: payload,
     })
-    .where(eq(posReturns.id, posRet.id));
+    .where(and(eq(posReturns.id, posRet.id), eq(posReturns.companyId, effectiveCompanyId)));
 
   await tx
     .insert(einvoiceSubmissions)
     .values({
+      companyId: effectiveCompanyId,
       invoiceId: null,
       posReturnId: posRet.id,
       provider: "eta_egypt",
@@ -727,6 +845,7 @@ export async function getEinvoiceQueueSummary(
   opts?: { branchId?: string; provider?: EinvoiceProvider; db?: AppDatabase }
 ): Promise<EinvoiceQueueSummaryDto> {
   const db = opts?.db ?? getDb();
+  const companyId = actorCompanyId(actor);
   const etaConfigured = isEtaConfigured();
   const scopeCond = buildSubmissionBranchScopeSql(actor, opts?.branchId);
   if (scopeCond === "EMPTY") {
@@ -741,7 +860,7 @@ export async function getEinvoiceQueueSummary(
     };
   }
 
-  const conditions: SQL[] = [];
+  const conditions: SQL[] = [eq(einvoiceSubmissions.companyId, companyId)];
   if (scopeCond) conditions.push(scopeCond);
   if (opts?.provider) conditions.push(eq(einvoiceSubmissions.provider, opts.provider));
 
@@ -789,6 +908,7 @@ export async function listEinvoiceSubmissions(
   summary: EinvoiceQueueSummaryDto;
   pageInfo: OffsetPageInfo;
 }> {
+  const companyId = actorCompanyId(actor);
   const query = parseOrThrow(einvoiceQueueQuerySchema, rawQuery ?? {}, "Invalid E-Invoice queue query");
   const page = query.page ?? 1;
   const pageSize = query.pageSize ?? 50;
@@ -809,7 +929,7 @@ export async function listEinvoiceSubmissions(
     };
   }
 
-  const conditions: SQL[] = [];
+  const conditions: SQL[] = [eq(einvoiceSubmissions.companyId, companyId)];
   if (scopeCond) conditions.push(scopeCond);
   if (query.status) conditions.push(eq(einvoiceSubmissions.status, query.status));
   if (query.provider) conditions.push(eq(einvoiceSubmissions.provider, query.provider));
@@ -905,6 +1025,7 @@ export async function getEinvoiceSubmissionDetail(
   if (!UUID_REGEX.test(submissionId)) {
     throw new AppError(404, "E-Invoice submission not found", "NOT_FOUND");
   }
+  const companyId = actorCompanyId(actor);
 
   const rows = await db
     .select({
@@ -924,7 +1045,7 @@ export async function getEinvoiceSubmissionDetail(
     .leftJoin(salesInvoices, eq(salesInvoices.id, einvoiceSubmissions.invoiceId))
     .leftJoin(posReturns, eq(posReturns.id, einvoiceSubmissions.posReturnId))
     .leftJoin(branches, sql`${branches.id} = coalesce(${salesInvoices.branchId}, ${posReturns.branchId})`)
-    .where(eq(einvoiceSubmissions.id, submissionId))
+    .where(and(eq(einvoiceSubmissions.id, submissionId), eq(einvoiceSubmissions.companyId, companyId)))
     .limit(1);
 
   const row = rows[0];
@@ -956,6 +1077,7 @@ export async function retryEinvoiceSubmissions(
   etaConfigured: boolean;
   message: string;
 }> {
+  const companyId = actorCompanyId(actor);
   const input = parseOrThrow(einvoiceRetrySchema, rawInput ?? {}, "Invalid E-Invoice retry payload");
   const targetIds = input.submissionIds?.length
     ? input.submissionIds
@@ -976,7 +1098,7 @@ export async function retryEinvoiceSubmissions(
     };
   }
 
-  const conditions: SQL[] = [];
+  const conditions: SQL[] = [eq(einvoiceSubmissions.companyId, companyId)];
   if (scopeCond) conditions.push(scopeCond);
 
   if (targetIds.length > 0) {
@@ -1028,7 +1150,7 @@ export async function retryEinvoiceSubmissions(
             ...(shouldResetAttempts ? { attempts: 0 } : {}),
             updatedAt: now,
           })
-          .where(eq(einvoiceSubmissions.id, row.id));
+          .where(and(eq(einvoiceSubmissions.id, row.id), eq(einvoiceSubmissions.companyId, companyId)));
 
         if (row.invoiceId) {
           await tx
@@ -1038,7 +1160,7 @@ export async function retryEinvoiceSubmissions(
               eInvoiceStatus: "pending_submission",
               updatedAt: now,
             })
-            .where(eq(salesInvoices.id, row.invoiceId));
+            .where(and(eq(salesInvoices.id, row.invoiceId), eq(salesInvoices.companyId, companyId)));
         }
         if (row.posReturnId) {
           await tx
@@ -1046,7 +1168,7 @@ export async function retryEinvoiceSubmissions(
             .set({
               etaReceiptStatus: "pending_submission",
             })
-            .where(eq(posReturns.id, row.posReturnId));
+            .where(and(eq(posReturns.id, row.posReturnId), eq(posReturns.companyId, companyId)));
         }
       }
     });
@@ -1062,7 +1184,11 @@ export async function retryEinvoiceSubmissions(
     };
   }
 
-  const workerResult = await processPendingEtaSubmissions({ limit: Math.max(10, count), db });
+  const workerResult = await processPendingEtaSubmissions({
+    limit: Math.max(10, count),
+    companyId,
+    db,
+  });
   return {
     queued: count,
     processed: workerResult.processed,
@@ -1076,6 +1202,7 @@ export async function retryEinvoiceSubmissions(
 
 export interface ProcessPendingEtaOptions {
   limit?: number;
+  companyId?: string;
   fetchImpl?: typeof fetch;
   db?: AppDatabase;
 }
@@ -1148,6 +1275,15 @@ export async function processPendingEtaSubmissions(
     }
 
     const now = new Date();
+    const pendingConds: SQL[] = [
+      eq(einvoiceSubmissions.provider, "eta_egypt"),
+      eq(einvoiceSubmissions.status, "pending"),
+      or(sql`${einvoiceSubmissions.nextRetryAt} IS NULL`, lte(einvoiceSubmissions.nextRetryAt, now))!,
+    ];
+    if (opts.companyId) {
+      pendingConds.push(eq(einvoiceSubmissions.companyId, opts.companyId));
+    }
+
     const duePendingRows = await tx
       .select({
         sub: einvoiceSubmissions,
@@ -1157,15 +1293,19 @@ export async function processPendingEtaSubmissions(
       .from(einvoiceSubmissions)
       .leftJoin(salesInvoices, eq(salesInvoices.id, einvoiceSubmissions.invoiceId))
       .leftJoin(posReturns, eq(posReturns.id, einvoiceSubmissions.posReturnId))
-      .where(
-        and(
-          eq(einvoiceSubmissions.provider, "eta_egypt"),
-          eq(einvoiceSubmissions.status, "pending"),
-          or(sql`${einvoiceSubmissions.nextRetryAt} IS NULL`, lte(einvoiceSubmissions.nextRetryAt, now))
-        )
-      )
+      .where(and(...pendingConds))
       .orderBy(asc(einvoiceSubmissions.createdAt))
       .limit(limit);
+
+    const submittedConds: SQL[] = [
+      eq(einvoiceSubmissions.provider, "eta_egypt"),
+      eq(einvoiceSubmissions.status, "submitted"),
+      isNotNull(einvoiceSubmissions.submissionUuid),
+      or(sql`${einvoiceSubmissions.nextRetryAt} IS NULL`, lte(einvoiceSubmissions.nextRetryAt, now))!,
+    ];
+    if (opts.companyId) {
+      submittedConds.push(eq(einvoiceSubmissions.companyId, opts.companyId));
+    }
 
     const dueSubmittedRows = await tx
       .select({
@@ -1176,14 +1316,7 @@ export async function processPendingEtaSubmissions(
       .from(einvoiceSubmissions)
       .leftJoin(salesInvoices, eq(salesInvoices.id, einvoiceSubmissions.invoiceId))
       .leftJoin(posReturns, eq(posReturns.id, einvoiceSubmissions.posReturnId))
-      .where(
-        and(
-          eq(einvoiceSubmissions.provider, "eta_egypt"),
-          eq(einvoiceSubmissions.status, "submitted"),
-          isNotNull(einvoiceSubmissions.submissionUuid),
-          or(sql`${einvoiceSubmissions.nextRetryAt} IS NULL`, lte(einvoiceSubmissions.nextRetryAt, now))
-        )
-      )
+      .where(and(...submittedConds))
       .orderBy(asc(einvoiceSubmissions.updatedAt))
       .limit(limit);
 

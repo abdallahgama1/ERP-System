@@ -1,33 +1,41 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
-import { AlertTriangle, ArrowRight, Bell, CheckCheck, Clock, FileWarning, PackageMinus, RotateCcw, Truck, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Bell, CheckCheck, Clock, FileWarning, PackageMinus, Truck, X } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useNotifications, type NotificationKind } from "@/contexts/NotificationsContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
+import {
+  useNotificationMutations,
+  useNotificationsQuery,
+  type UiNotification,
+} from "@/hooks/queries/useNotificationsQueries";
 import { apiRequest } from "@/lib/api-client";
 import { toast } from "sonner";
 
-const kindIcon: Record<NotificationKind, typeof Bell> = {
-  low_stock: PackageMinus,
-  po_overdue: AlertTriangle,
-  bill_overdue: FileWarning,
-  bill_mismatch: FileWarning,
-  in_transit: Truck,
-};
+const filters = ["all", "unread", "low_stock", "overdue", "approval", "transfer"] as const;
 
-const filters = ["all", "unread", "low_stock", "po_overdue", "bill_overdue", "bill_mismatch", "in_transit"] as const;
+function iconForNotification(n: UiNotification): typeof Bell {
+  const lower = n.type.toLowerCase();
+  if (lower.includes("stock")) return PackageMinus;
+  if (lower.includes("overdue")) return AlertTriangle;
+  if (lower.includes("bill") || lower.includes("invoice")) return FileWarning;
+  if (lower.includes("transfer")) return Truck;
+  return Bell;
+}
 
 export default function Notifications() {
   const { t } = useTranslation();
-  const { notifications, unreadCount, isRead, markRead, markAllRead, dismiss, restoreDismissed, dismissedCount } =
-    useNotifications();
+  const { data } = useNotificationsQuery({ limit: 100 });
+  const { markRead, markAllRead, dismiss } = useNotificationMutations();
   const { role } = usePermissions();
   const [filter, setFilter] = useState<(typeof filters)[number]>("all");
   const [sweeping, setSweeping] = useState(false);
+
+  const notifications = useMemo(() => data?.notifications ?? [], [data?.notifications]);
+  const unreadCount = data?.unreadCount ?? 0;
 
   const handleOverdueSweep = async () => {
     setSweeping(true);
@@ -52,9 +60,9 @@ export default function Notifications() {
 
   const visible = useMemo(() => {
     if (filter === "all") return notifications;
-    if (filter === "unread") return notifications.filter(n => !isRead(n.id));
-    return notifications.filter(n => n.kind === filter);
-  }, [notifications, filter, isRead]);
+    if (filter === "unread") return notifications.filter((n) => !n.isRead);
+    return notifications.filter((n) => n.type.toLowerCase().includes(filter));
+  }, [notifications, filter]);
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -75,20 +83,21 @@ export default function Notifications() {
               {t("notifications.runOverdueSweep", "Run Overdue Check")}
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={markAllRead} disabled={unreadCount === 0}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => markAllRead.mutate(undefined)}
+            disabled={unreadCount === 0 || markAllRead.isPending}
+          >
             <CheckCheck className="h-4 w-4 me-2" />
             {t("notifications.markAllRead", "Mark all read")}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={restoreDismissed} disabled={dismissedCount === 0}>
-            <RotateCcw className="h-4 w-4 me-2" />
-            {t("notifications.restoreDismissed", "Restore dismissed")} ({dismissedCount})
           </Button>
         </div>
       </div>
 
-      <Tabs value={filter} onValueChange={v => setFilter(v as (typeof filters)[number])}>
+      <Tabs value={filter} onValueChange={(v) => setFilter(v as (typeof filters)[number])}>
         <TabsList className="flex-wrap h-auto">
-          {filters.map(f => (
+          {filters.map((f) => (
             <TabsTrigger key={f} value={f}>
               {t(`notifications.filter.${f}`, f.replace("_", " "))}
             </TabsTrigger>
@@ -108,9 +117,9 @@ export default function Notifications() {
         </Card>
       ) : (
         <div className="space-y-3">
-          {visible.map(n => {
-            const Icon = kindIcon[n.kind];
-            const read = isRead(n.id);
+          {visible.map((n) => {
+            const Icon = iconForNotification(n);
+            const read = n.isRead;
             return (
               <Card key={n.id} className={read ? "opacity-70" : "border-primary/40"}>
                 <CardContent className="flex items-start gap-3 p-4">
@@ -122,7 +131,7 @@ export default function Notifications() {
                       <span className="font-medium">{n.title}</span>
                       <Badge
                         variant={
-                          n.severity === "critical" ? "destructive" : n.severity === "warning" ? "secondary" : "outline"
+                          n.severity === "destructive" ? "destructive" : n.severity === "warning" ? "secondary" : "outline"
                         }
                       >
                         {t(`notifications.severity.${n.severity}`, n.severity)}
@@ -132,7 +141,13 @@ export default function Notifications() {
                     <p className="text-sm text-muted-foreground">{n.description}</p>
                     <div className="flex flex-wrap gap-2 pt-1">
                       {n.link && (
-                        <Button asChild variant="link" size="sm" className="px-0" onClick={() => markRead(n.id)}>
+                        <Button
+                          asChild
+                          variant="link"
+                          size="sm"
+                          className="px-0"
+                          onClick={() => !read && markRead.mutate(n.id)}
+                        >
                           <Link to={n.link}>
                             {t("notifications.open", "Open")}
                             <ArrowRight className="h-3.5 w-3.5 ms-1" />
@@ -140,7 +155,7 @@ export default function Notifications() {
                         </Button>
                       )}
                       {!read && (
-                        <Button variant="ghost" size="sm" onClick={() => markRead(n.id)}>
+                        <Button variant="ghost" size="sm" onClick={() => markRead.mutate(n.id)}>
                           {t("notifications.markRead", "Mark read")}
                         </Button>
                       )}
@@ -150,7 +165,7 @@ export default function Notifications() {
                     variant="ghost"
                     size="icon"
                     aria-label={t("notifications.dismiss", "Dismiss")}
-                    onClick={() => dismiss(n.id)}
+                    onClick={() => dismiss.mutate(n.id)}
                   >
                     <X className="h-4 w-4" />
                   </Button>

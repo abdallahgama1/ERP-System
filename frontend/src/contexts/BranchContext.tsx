@@ -1,8 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest, buildApiUrl } from "@/lib/api-client";
 import { useAuth } from "@/contexts/AuthContext";
-import { queryKeysForServerEvent } from "@/hooks/queries/queryKeys";
+import { erpQueryKeys, queryKeysForServerEvent } from "@/hooks/queries/queryKeys";
+import { usePreferencesQuery, type UserPreferencesPayload } from "@/hooks/queries/useSettingsQueries";
 
 export interface ErpBranch {
   id: string;
@@ -32,56 +33,78 @@ interface BranchContextType {
 const BranchContext = createContext<BranchContextType | undefined>(undefined);
 
 export function BranchProvider({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
+  const { user, activeCompanyId, refreshUser } = useAuth();
   const queryClient = useQueryClient();
 
-  const [branches, setBranches] = useState<ErpBranch[]>([]);
-  const [directoryBranches, setDirectoryBranches] = useState<ErpBranch[]>([]);
-  const [activeBranchId, setActiveBranchIdState] = useState<string | "all">("all");
-  const [isLoading, setIsLoading] = useState(false);
+  const [activeBranchIdOverride, setActiveBranchIdOverride] = useState<{
+    userId: string;
+    companyId: string;
+    branchId: string | "all";
+  } | null>(null);
 
   const canViewAllBranches = user?.role === "admin" || user?.branchScopeMode === "all";
 
-  const refreshBranches = useCallback(async () => {
-    if (!user) {
-      setBranches([]);
-      setDirectoryBranches([]);
-      setActiveBranchIdState("all");
-      return;
+  const branchesQuery = useQuery({
+    queryKey: erpQueryKeys.branches,
+    queryFn: () => apiRequest<{ branches: ErpBranch[] }>("/api/branches"),
+    enabled: Boolean(user),
+    staleTime: 60_000,
+  });
+
+  const directoryQuery = useQuery({
+    queryKey: erpQueryKeys.branchesDirectory,
+    queryFn: () => apiRequest<{ branches: ErpBranch[] }>("/api/branches?scope=directory"),
+    enabled: false,
+    staleTime: 60_000,
+  });
+
+  const preferencesQuery = usePreferencesQuery(Boolean(user));
+
+  const branches = useMemo(() => (user ? (branchesQuery.data?.branches ?? []) : []), [user, branchesQuery.data]);
+
+  const directoryBranches = useMemo(() => {
+    if (!user) return [];
+    if (canViewAllBranches) {
+      return branches.filter((b) => b.isActive !== false);
     }
+    return directoryQuery.data?.branches ?? branches;
+  }, [user, canViewAllBranches, branches, directoryQuery.data]);
 
-    setIsLoading(true);
-    try {
-      const [accessibleRes, dirRes, prefRes] = await Promise.all([
-        apiRequest<{ branches: ErpBranch[] }>("/api/branches"),
-        apiRequest<{ branches: ErpBranch[] }>("/api/branches?scope=directory"),
-        apiRequest<{ preferences: { activeBranchId?: string | null } }>("/api/settings/preferences").catch(() => ({
-          preferences: { activeBranchId: null },
-        })),
-      ]);
-
-      const accessible = accessibleRes.branches ?? [];
-      setBranches(accessible);
-      setDirectoryBranches(dirRes.branches ?? accessible);
-
-      const savedId = prefRes.preferences?.activeBranchId ?? user.defaultBranchId ?? null;
-      if (savedId && accessible.some((b) => b.id === savedId)) {
-        setActiveBranchIdState(savedId);
-      } else if (user.role === "admin" || user.branchScopeMode === "all") {
-        setActiveBranchIdState("all");
-      } else {
-        setActiveBranchIdState(accessible[0]?.id ?? "all");
-      }
-    } catch {
-      // Retain existing branch list on transient network error
-    } finally {
-      setIsLoading(false);
-    }
-  }, [user]);
-
+  // Seed erpQueryKeys.branchesDirectory when canViewAllBranches so downstream directory consumers share cache without an extra GET
   useEffect(() => {
-    void refreshBranches();
-  }, [refreshBranches]);
+    if (user && canViewAllBranches && branchesQuery.data) {
+      queryClient.setQueryData(erpQueryKeys.branchesDirectory, {
+        branches: (branchesQuery.data.branches ?? []).filter((b) => b.isActive !== false),
+      });
+    }
+  }, [user, canViewAllBranches, branchesQuery.data, queryClient]);
+
+  const activeBranchId = useMemo<string | "all">(() => {
+    if (!user) return "all";
+    if (
+      activeBranchIdOverride &&
+      activeBranchIdOverride.userId === user.id &&
+      activeBranchIdOverride.companyId === activeCompanyId
+    ) {
+      return activeBranchIdOverride.branchId;
+    }
+    const savedId = preferencesQuery.data?.preferences?.activeBranchId ?? user.defaultBranchId ?? null;
+    if (savedId && branches.some((b) => b.id === savedId)) {
+      return savedId;
+    }
+    if (canViewAllBranches) {
+      return "all";
+    }
+    return branches[0]?.id ?? "all";
+  }, [user, activeCompanyId, activeBranchIdOverride, preferencesQuery.data, branches, canViewAllBranches]);
+
+  const refreshBranches = useCallback(async () => {
+    if (!user) return;
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: erpQueryKeys.branches }),
+      ...(!canViewAllBranches ? [queryClient.invalidateQueries({ queryKey: erpQueryKeys.branchesDirectory })] : []),
+    ]);
+  }, [user, canViewAllBranches, queryClient]);
 
   // Subscribe to server-sent live update events
   useEffect(() => {
@@ -92,8 +115,14 @@ export function BranchProvider({ children }: { children: React.ReactNode }) {
       source.addEventListener("erp_update", (ev: MessageEvent) => {
         try {
           const parsed = JSON.parse(ev.data) as { type?: string; payload?: Record<string, unknown> };
-          if (parsed.type === "branches_updated" || parsed.type === "users_updated") {
-            void refreshBranches();
+          if (
+            parsed.type === "permissions_updated" ||
+            parsed.type === "custom_roles_updated" ||
+            parsed.type === "roles_updated" ||
+            parsed.type === "companies_updated" ||
+            parsed.type === "users_updated"
+          ) {
+            void refreshUser();
           }
           const targets = queryKeysForServerEvent(parsed.type);
           if (targets.length > 0) {
@@ -115,14 +144,21 @@ export function BranchProvider({ children }: { children: React.ReactNode }) {
     return () => {
       source?.close();
     };
-  }, [user, refreshBranches, queryClient]);
+  }, [user, queryClient, refreshUser]);
 
   const setActiveBranchId = useCallback(
     async (branchId: string | "all") => {
+      if (!user) return;
       if (branchId === "all" && !canViewAllBranches) {
         return;
       }
-      setActiveBranchIdState(branchId);
+      setActiveBranchIdOverride({ userId: user.id, companyId: activeCompanyId, branchId });
+      queryClient.setQueryData<UserPreferencesPayload>(erpQueryKeys.preferences, (prev) => ({
+        preferences: {
+          ...(prev?.preferences ?? {}),
+          activeBranchId: branchId === "all" ? null : branchId,
+        },
+      }));
       try {
         await apiRequest("/api/settings/preferences", {
           method: "PUT",
@@ -132,13 +168,15 @@ export function BranchProvider({ children }: { children: React.ReactNode }) {
         // local state stays responsive
       }
     },
-    [canViewAllBranches]
+    [user, activeCompanyId, canViewAllBranches, queryClient]
   );
 
   const activeBranch = useMemo(
     () => (activeBranchId === "all" ? null : branches.find((b) => b.id === activeBranchId) ?? null),
     [branches, activeBranchId]
   );
+
+  const isLoading = Boolean(user) && (branchesQuery.isLoading || (!canViewAllBranches && directoryQuery.isLoading));
 
   const value = useMemo(
     () => ({

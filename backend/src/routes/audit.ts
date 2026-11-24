@@ -18,7 +18,7 @@ const createAuditSchema = z.object({
 });
 
 export async function auditRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/api/audit-logs", { preHandler: requirePermission("reports", "view") }, async (req) => {
+  app.get("/api/audit-logs", { preHandler: requirePermission("audit", "view") }, async (req) => {
     const query = req.query as {
       cursor?: string;
       limit?: string;
@@ -39,7 +39,7 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
     const actor = req.authUser!;
     const db = getDb();
 
-    const conditions: SQL[] = [];
+    const conditions: SQL[] = [eq(auditLogs.companyId, actor.activeCompanyId)];
     if (query.module && query.module !== "all") {
       conditions.push(eq(auditLogs.entityType, query.module));
     }
@@ -76,7 +76,7 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
     const rawRows = await db
       .select()
       .from(auditLogs)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .where(and(...conditions))
       .orderBy(orderDir(auditLogs.createdAt), orderDir(auditLogs.id))
       .limit(limit + 1)
       .offset(offset);
@@ -87,15 +87,20 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
 
     const entries = rows.map((r) => ({
       id: r.id,
+      companyId: r.companyId,
       at: r.createdAt.toISOString(),
-      actorUserId: r.userId ?? undefined,
+      actorUserId: r.userId ?? null,
       module: r.entityType,
       action: r.action,
-      entity: r.entityLabel ?? undefined,
+      entity: r.entityLabel ?? r.entityId,
       entityId: r.entityId,
       user: r.userName,
-      branchId: r.branchId ?? undefined,
+      userRole: r.userRole ?? null,
+      branchId: r.branchId ?? null,
       meta: r.details,
+      beforeJson: r.beforeJson ?? null,
+      afterJson: r.afterJson ?? null,
+      changedFields: r.changedFields ?? [],
     }));
 
     return {
@@ -118,6 +123,7 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
     const actor = req.authUser!;
     const db = getDb();
     await writeAuditLog(db, {
+      companyId: actor.activeCompanyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

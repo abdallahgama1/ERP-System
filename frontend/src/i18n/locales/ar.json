@@ -61,7 +61,15 @@
     "voidDocument": "إبطال",
     "confirmVoid": "تأكيد الإبطال",
     "reason": "السبب",
-    "voidReasonPlaceholder": "مثال: إدخال خاطئ أو شيك مرتجع"
+    "voidReasonPlaceholder": "مثال: إدخال خاطئ أو شيك مرتجع",
+    "searchPlaceholder": "بحث...",
+    "accessDenied": "تم رفض الوصول",
+    "accessDeniedDescription": "ليس لديك صلاحية لعرض هذه الصفحة.",
+    "backToDashboard": "العودة إلى لوحة التحكم",
+    "exportCsv": "تصدير CSV",
+    "exportXlsx": "تصدير Excel (.xlsx)",
+    "exporting": "جاري التصدير...",
+    "download": "تنزيل"
   },
   "nav": {
     "dashboard": "لوحة التحكم",
@@ -475,7 +483,15 @@
     "continueWithGoogle": "المتابعة باستخدام Google",
     "continueWithLovable": "المتابعة باستخدام Lovable",
     "checkEmail": "أكد بريدك الإلكتروني",
-    "checkEmailDescription": "أرسلنا رابط تأكيد إلى بريدك الإلكتروني. انقر عليه ثم سجّل الدخول."
+    "checkEmailDescription": "أرسلنا رابط تأكيد إلى بريدك الإلكتروني. انقر عليه ثم سجّل الدخول.",
+    "mfaTitle": "التحقق بخطوتين",
+    "mfaDescription": "أدخل الرمز المكون من 6 أرقام من تطبيق المصادقة أو رمز الاسترداد.",
+    "mfaCodeLabel": "رمز التحقق أو الاسترداد",
+    "mfaCodePlaceholder": "123456 أو رمز الاسترداد",
+    "mfaVerify": "تحقق وسجل الدخول",
+    "mfaVerifying": "جاري التحقق...",
+    "mfaBackToLogin": "العودة إلى تسجيل الدخول",
+    "mfaInvalidCode": "رمز التحقق أو الاسترداد غير صالح."
   },
   "profileDropdown": {
     "user": "المستخدم",
@@ -1438,5 +1454,91 @@
     "requestPayload": "بيانات الإرسال القياسية (ETA v1.2)",
     "responsePayload": "استجابة بوابة مصلحة الضرائب",
     "noResponseYet": "لا توجد استجابة مسجلة بعد (محفوظ محلياً)."
+  },
+  "commandPalette": {
+    "triggerLabel": "ابحث أو انتقل إلى...",
+    "triggerAria": "فتح لوحة الأوامر",
+    "title": "لوحة الأوامر",
+    "description": "ابحث في السجلات وانتقل عبر نظام ERP.",
+    "placeholder": "ابحث عن المنتجات أو العملاء أو الفواتير أو الصفحات...",
+    "searching": "جاري البحث...",
+    "noResults": "لم يتم العثور على سجلات أو صفحات مطابقة.",
+    "quickNavigation": "تنقل سريع",
+    "groups": {
+      "product": "المنتجات",
+      "customer": "العملاء",
+      "vendor": "الموردين",
+      "sales_order": "طلبات البيع",
+      "sales_invoice": "الفواتير",
+      "purchase_order": "طلبات الشراء",
+      "vendor_bill": "فواتير الموردين",
+      "journal_entry": "قيود اليومية"
+    }
+  },
+  "companySwitcher": {
+    "activeCompany": "الشركة النشطة",
+    "switchCompany": "تبديل الشركة",
+    "switched": "تم التبديل إلى شركة {{name}}",
+    "switchFailed": "فشل تبديل الشركة"
+  },
+  "dataTable": {
+    "columns": "الأعمدة",
+    "toggleColumns": "إظهار أو إخفاء الأعمدة",
+    "selectedCount": "تم تحديد {{count}}",
+    "clearSelection": "إلغاء التحديد",
+    "selectAll": "تحديد كل الصفوف في الصفحة",
+    "selectRow": "تحديد الصف",
+    "export": "تصدير",
+    "exportFailed": "فشل تصدير البيانات",
+    "sortAscending": "ترتيب تصاعدي",
+    "sortDescending": "ترتيب تنازلي"
+  },
+  "savedViews": {
+    "title": "العروض المحفوظة",
+    "defaultBadge": "افتراضي",
+    "noViews": "لا توجد عروض محفوظة بعد",
+    "saveCurrent": "حفظ العرض الحالي",
+    "viewName": "اسم العرض",
+    "viewNamePlaceholder": "مثال: الفواتير المفتوحة",
+    "setAsDefault": "تعيين كعرض افتراضي",
+    "save": "حفظ العرض",
+    "saved": "تم حفظ العرض \"{{name}}\"",
+    "deleted": "تم حذف العرض \"{{name}}\"",
+    "nameRequired": "اسم العرض مطلوب"
+  },
+  "attachments": {
+    "title": "المرفقات",
+    "upload": "رفع ملف",
+    "uploading": "جاري الرفع...",
+    "empty": "لا توجد مرفقات بعد.",
+    "deleteConfirmTitle": "حذف المرفق",
+    "uploaded": "تم رفع المرفق",
+    "deleted": "تم حذف المرفق",
+    "downloadFailed": "فشل تنزيل المرفق",
+    "invalidType": "نوع الملف \"{{type}}\" غير مسموح به.",
+    "fileTooLarge": "يتجاوز الملف الحد الأقصى البالغ 10 ميجابايت.",
+    "emptyFile": "لا يمكن رفع ملف فارغ.",
+    "allowedHint": "PDF أو PNG أو JPEG أو WEBP أو CSV أو XLSX أو DOCX أو TXT بحد أقصى 10 ميجابايت"
+  },
+  "emailDocument": {
+    "title": "إرسال المستند بالبريد",
+    "description": "إرسال {{document}} إلى مستلم واحد أو أكثر.",
+    "to": "المستلمون (إلى)",
+    "toPlaceholder": "client@example.com, billing@example.com",
+    "cc": "نسخة (CC) اختياري",
+    "ccPlaceholder": "manager@example.com",
+    "subject": "الموضوع",
+    "subjectPlaceholder": "فاتورة #INV-0001",
+    "message": "الرسالة",
+    "messagePlaceholder": "يرجى الاطلاع على المستند المرفق...",
+    "attachStoredFiles": "إرفاق الملفات المخزنة / PDF",
+    "selectAttachments": "اختر المرفقات المخزنة",
+    "template": "قالب الطباعة",
+    "defaultTemplate": "القالب الافتراضي",
+    "send": "إرسال البريد",
+    "sending": "جاري الإرسال...",
+    "sentSuccess": "تم إرسال البريد إلى {{count}} مستلم",
+    "invalidRecipients": "أدخل بريدًا إلكترونيًا صالحًا واحدًا على الأقل.",
+    "invalidSubject": "الموضوع مطلوب ولا يجب أن يحتوي على فواصل أسطر."
   }
 }

@@ -10,6 +10,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, or, sql } from "drizzle-orm";
 import {
   branches,
   branchLotBalances,
+  DEFAULT_COMPANY_ID,
   products,
   stockLots,
   stockMovementAllocations,
@@ -20,10 +21,11 @@ import type { DbOrTx } from "../auth/permissions.ts";
 import { AppError, num, toNumeric } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
-import type { RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, type RequestActor } from "./stock-locks.ts";
 
 export interface TrackedProductMeta {
   id: string;
+  companyId?: string;
   name: string;
   sku: string;
   trackingMode: TrackingModeShared;
@@ -32,6 +34,10 @@ export interface TrackedProductMeta {
   requiresExpiry: boolean;
   shelfLifeDays: number | null;
   pickingStrategy: PickingStrategyShared;
+}
+
+function resolveTrackingCompanyId(input: { companyId?: string; product?: TrackedProductMeta }): string {
+  return input.companyId || input.product?.companyId || DEFAULT_COMPANY_ID;
 }
 
 export interface LotAllocationRequest {
@@ -63,6 +69,7 @@ export function resolveProductTrackingMode(prod: {
 export async function receiveTrackedStock(
   tx: DbOrTx,
   input: {
+    companyId?: string;
     product: TrackedProductMeta;
     branchId: string;
     quantity: number;
@@ -81,6 +88,7 @@ export async function receiveTrackedStock(
 ): Promise<void> {
   const mode = resolveProductTrackingMode(input.product);
   if (mode === "none" || input.quantity <= 0) return;
+  const companyId = resolveTrackingCompanyId(input);
 
   if (mode === "lot") {
     const lotNumber = input.lotNumber?.trim();
@@ -109,7 +117,13 @@ export async function receiveTrackedStock(
     const existing = await tx
       .select()
       .from(stockLots)
-      .where(and(eq(stockLots.productId, input.product.id), eq(stockLots.lotNumber, lotNumber)))
+      .where(
+        and(
+          eq(stockLots.companyId, companyId),
+          eq(stockLots.productId, input.product.id),
+          eq(stockLots.lotNumber, lotNumber)
+        )
+      )
       .limit(1);
 
     let lotId: string;
@@ -119,6 +133,7 @@ export async function receiveTrackedStock(
       const [inserted] = await tx
         .insert(stockLots)
         .values({
+          companyId,
           productId: input.product.id,
           lotNumber,
           manufactureDate: mfgDate,
@@ -134,6 +149,7 @@ export async function receiveTrackedStock(
     await tx
       .insert(branchLotBalances)
       .values({
+        companyId,
         branchId: input.branchId,
         lotId,
         productId: input.product.id,
@@ -145,7 +161,7 @@ export async function receiveTrackedStock(
     const balRows = await tx.execute<{ id: string; qty_on_hand: string }>(sql`
       SELECT id, qty_on_hand
       FROM branch_lot_balances
-      WHERE branch_id = ${input.branchId} AND lot_id = ${lotId}
+      WHERE branch_id = ${input.branchId} AND lot_id = ${lotId} AND company_id = ${companyId}
       FOR UPDATE
     `);
     const bal = balRows[0];
@@ -186,7 +202,13 @@ export async function receiveTrackedStock(
   const dupRows = await tx
     .select({ serialNumber: stockSerials.serialNumber })
     .from(stockSerials)
-    .where(and(eq(stockSerials.productId, input.product.id), inArray(stockSerials.serialNumber, uniqueSerials)));
+    .where(
+      and(
+        eq(stockSerials.companyId, companyId),
+        eq(stockSerials.productId, input.product.id),
+        inArray(stockSerials.serialNumber, uniqueSerials)
+      )
+    );
 
   if (dupRows.length > 0) {
     throw new AppError(
@@ -200,6 +222,7 @@ export async function receiveTrackedStock(
     .insert(stockSerials)
     .values(
       uniqueSerials.map((sn) => ({
+        companyId,
         productId: input.product.id,
         serialNumber: sn,
         branchId: input.branchId,
@@ -226,6 +249,7 @@ export async function receiveTrackedStock(
 export async function consumeTrackedStock(
   tx: DbOrTx,
   input: {
+    companyId?: string;
     product: TrackedProductMeta;
     branchId: string;
     quantity: number;
@@ -246,6 +270,7 @@ export async function consumeTrackedStock(
   if (mode === "none" || input.quantity <= 0) {
     return { tracked: false, totalCost: 0, unitCost: 0, allocations: [] };
   }
+  const companyId = resolveTrackingCompanyId(input);
 
   const now = new Date();
 
@@ -272,7 +297,13 @@ export async function consumeTrackedStock(
           const [found] = await tx
             .select({ id: stockLots.id })
             .from(stockLots)
-            .where(and(eq(stockLots.productId, input.product.id), eq(stockLots.lotNumber, req.lotNumber.trim())))
+            .where(
+              and(
+                eq(stockLots.companyId, companyId),
+                eq(stockLots.productId, input.product.id),
+                eq(stockLots.lotNumber, req.lotNumber.trim())
+              )
+            )
             .limit(1);
           targetLotId = found?.id;
         }
@@ -290,7 +321,10 @@ export async function consumeTrackedStock(
           SELECT blb.id AS bal_id, blb.qty_on_hand, sl.lot_number, sl.expiry_date, sl.unit_cost
           FROM branch_lot_balances blb
           INNER JOIN stock_lots sl ON sl.id = blb.lot_id
-          WHERE blb.branch_id = ${input.branchId} AND blb.lot_id = ${targetLotId}
+          WHERE blb.branch_id = ${input.branchId}
+            AND blb.lot_id = ${targetLotId}
+            AND blb.company_id = ${companyId}
+            AND sl.company_id = ${companyId}
           FOR UPDATE OF blb
         `);
         const row = rows[0];
@@ -350,6 +384,8 @@ export async function consumeTrackedStock(
         INNER JOIN stock_lots sl ON sl.id = blb.lot_id
         WHERE blb.branch_id = ${input.branchId}
           AND blb.product_id = ${input.product.id}
+          AND blb.company_id = ${companyId}
+          AND sl.company_id = ${companyId}
           AND blb.qty_on_hand > 0
         ORDER BY ${orderClause}
         FOR UPDATE OF blb
@@ -428,6 +464,7 @@ export async function consumeTrackedStock(
     .from(stockSerials)
     .where(
       and(
+        eq(stockSerials.companyId, companyId),
         eq(stockSerials.productId, input.product.id),
         eq(stockSerials.branchId, input.branchId),
         eq(stockSerials.status, "in_stock"),
@@ -460,7 +497,7 @@ export async function consumeTrackedStock(
         ...(input.workOrderId ? { workOrderId: input.workOrderId } : {}),
         updatedAt: now,
       })
-      .where(eq(stockSerials.id, row.id));
+      .where(and(eq(stockSerials.id, row.id), eq(stockSerials.companyId, companyId)));
 
     consumed.push({
       serialId: row.id,
@@ -497,6 +534,7 @@ export async function linkConsumedAllocations(
 export async function receiveTransferredTrackedStock(
   tx: DbOrTx,
   input: {
+    companyId?: string;
     transferId: string;
     product: TrackedProductMeta;
     toBranchId: string;
@@ -507,12 +545,14 @@ export async function receiveTransferredTrackedStock(
 ): Promise<void> {
   const mode = resolveProductTrackingMode(input.product);
   if (mode === "none" || input.qtyReceived <= 0) return;
+  const companyId = resolveTrackingCompanyId(input);
 
   const outMovements = await tx
     .select({ id: stockMovements.id })
     .from(stockMovements)
     .where(
       and(
+        eq(stockMovements.companyId, companyId),
         eq(stockMovements.referenceType, "transfer"),
         eq(stockMovements.referenceId, input.transferId),
         eq(stockMovements.productId, input.product.id),
@@ -537,6 +577,7 @@ export async function receiveTransferredTrackedStock(
       await tx
         .insert(branchLotBalances)
         .values({
+          companyId,
           branchId: input.toBranchId,
           lotId: a.lotId,
           productId: input.product.id,
@@ -547,7 +588,7 @@ export async function receiveTransferredTrackedStock(
 
       const balRows = await tx.execute<{ id: string; qty_on_hand: string }>(sql`
         SELECT id, qty_on_hand FROM branch_lot_balances
-        WHERE branch_id = ${input.toBranchId} AND lot_id = ${a.lotId}
+        WHERE branch_id = ${input.toBranchId} AND lot_id = ${a.lotId} AND company_id = ${companyId}
         FOR UPDATE
       `);
       const bal = balRows[0];
@@ -574,7 +615,13 @@ export async function receiveTransferredTrackedStock(
   const inTransitSerials = await tx
     .select()
     .from(stockSerials)
-    .where(and(inArray(stockSerials.id, serialIds), eq(stockSerials.status, "in_transit")));
+    .where(
+      and(
+        eq(stockSerials.companyId, companyId),
+        inArray(stockSerials.id, serialIds),
+        eq(stockSerials.status, "in_transit")
+      )
+    );
 
   const toReceive = inTransitSerials.slice(0, Math.round(input.qtyReceived));
   for (const s of toReceive) {
@@ -585,7 +632,7 @@ export async function receiveTransferredTrackedStock(
         status: "in_stock",
         updatedAt: new Date(),
       })
-      .where(eq(stockSerials.id, s.id));
+      .where(and(eq(stockSerials.id, s.id), eq(stockSerials.companyId, companyId)));
 
     await tx.insert(stockMovementAllocations).values({
       movementId: input.movementId,
@@ -607,6 +654,7 @@ export async function listLots(
     pageSize?: string | number;
   }
 ) {
+  const companyId = actorCompanyId(actor);
   const hasExplicitPaging = query.page !== undefined || query.pageSize !== undefined;
   const parsed = offsetPageQuerySchema.safeParse({
     page: query.page ?? 1,
@@ -615,7 +663,7 @@ export async function listLots(
   const page = parsed.success ? parsed.data.page : 1;
   const pageSize = parsed.success ? parsed.data.pageSize : 200;
 
-  const conditions = [];
+  const conditions = [eq(branchLotBalances.companyId, companyId)];
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
     conditions.push(eq(branchLotBalances.branchId, query.branchId));
@@ -633,7 +681,7 @@ export async function listLots(
     conditions.push(gt(branchLotBalances.qtyOnHand, "0.0001"));
   }
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const whereClause = and(...conditions);
   const [{ total }] = await db
     .select({ total: sql<number>`count(*)::int` })
     .from(branchLotBalances)
@@ -711,6 +759,7 @@ export async function listSerials(
     pageSize?: string | number;
   }
 ) {
+  const companyId = actorCompanyId(actor);
   const hasExplicitPaging = query.page !== undefined || query.pageSize !== undefined;
   const parsed = offsetPageQuerySchema.safeParse({
     page: query.page ?? 1,
@@ -719,7 +768,7 @@ export async function listSerials(
   const page = parsed.success ? parsed.data.page : 1;
   const pageSize = parsed.success ? parsed.data.pageSize : 200;
 
-  const conditions = [];
+  const conditions = [eq(stockSerials.companyId, companyId)];
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
     conditions.push(eq(stockSerials.branchId, query.branchId));
@@ -744,7 +793,7 @@ export async function listSerials(
     );
   }
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const whereClause = and(...conditions);
   const [{ total }] = await db
     .select({ total: sql<number>`count(*)::int` })
     .from(stockSerials)
@@ -799,6 +848,7 @@ export async function listSerials(
 }
 
 export async function getSerialTrace(db: AppDatabase, actor: RequestActor, serialId: string) {
+  const companyId = actorCompanyId(actor);
   const [serial] = await db
     .select({
       id: stockSerials.id,
@@ -813,7 +863,7 @@ export async function getSerialTrace(db: AppDatabase, actor: RequestActor, seria
     })
     .from(stockSerials)
     .innerJoin(products, eq(products.id, stockSerials.productId))
-    .where(eq(stockSerials.id, serialId))
+    .where(and(eq(stockSerials.id, serialId), eq(stockSerials.companyId, companyId)))
     .limit(1);
 
   if (!serial) throw new AppError(404, "Serial number not found", "NOT_FOUND");
@@ -836,7 +886,7 @@ export async function getSerialTrace(db: AppDatabase, actor: RequestActor, seria
     .from(stockMovementAllocations)
     .innerJoin(stockMovements, eq(stockMovements.id, stockMovementAllocations.movementId))
     .leftJoin(branches, eq(branches.id, stockMovements.branchId))
-    .where(eq(stockMovementAllocations.serialId, serialId))
+    .where(and(eq(stockMovementAllocations.serialId, serialId), eq(stockMovements.companyId, companyId)))
     .orderBy(asc(stockMovements.createdAt));
 
   return {

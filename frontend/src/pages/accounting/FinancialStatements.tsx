@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { csvTimestamp, downloadCsv } from "@/lib/export/csv";
@@ -20,7 +20,7 @@ import {
 
 export default function FinancialStatements() {
   const { t } = useTranslation();
-  const { branches } = useInventory();
+  const { branches } = useInventoryScope();
   const { settings } = useSettings();
 
   const [tab, setTab] = useState("trial-balance");

@@ -1,19 +1,10 @@
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { TablePagination } from "@/components/TablePagination";
 import { useProductsPageQuery } from "@/hooks/queries/useInventoryQueries";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -23,11 +14,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -36,37 +22,47 @@ import {
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Package, Plus, Search, Edit, Trash2, ChevronDown, ChevronRight, MapPin, FileText, Upload, Download } from "lucide-react";
+import { Package, Plus, Edit, Trash2, ChevronDown, ChevronRight, MapPin, FileText, Upload, Download, Paperclip } from "lucide-react";
 import { exportJsonToExcel } from "@/lib/export/excel";
 import { Product } from "@/types";
 import { useToast } from "@/hooks/use-toast";
-import { useInventory } from "@/contexts/InventoryContext";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import ProductLedgerDialog from "@/components/inventory/ProductLedgerDialog";
 import type { ImportColumn } from "@/components/import/BulkImportDialog";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { TaxonomySelect } from "@/components/taxonomy/TaxonomySelect";
-import { useTaxonomy } from "@/contexts/TaxonomyContext";
+import { useTaxonomyQuery } from "@/hooks/queries/useTaxonomyQueries";
+import { EnterpriseDataTable, type EnterpriseColumn } from "@/components/EnterpriseDataTable";
+import { AttachmentsPanel } from "@/components/AttachmentsPanel";
 
 const BulkImportDialog = lazy(() => import("@/components/import/BulkImportDialog"));
 
 const Products = () => {
   const { t } = useTranslation();
   const { settings } = useSettings();
-  const { products, addProduct, updateProduct, deleteProduct, getAvailableQuantity, getAssignedQuantity, branchProducts, branches } = useInventory();
-  const { record } = useAuditLog();
-  const { brands, categories } = useTaxonomy();
+  const { can } = usePermissions();
+  const { products, addProduct, updateProduct, deleteProduct, getAvailableQuantity, getAssignedQuantity, branchProducts, branches } = useInventoryScope({ products: true });
+  const { record } = useAuditRecorder();
+  const { data: taxonomyData } = useTaxonomyQuery();
+  const brands = taxonomyData?.brands ?? [];
+  const categories = taxonomyData?.categories ?? [];
   const [searchTerm, setSearchTerm] = useState("");
   const [page, setPage] = useState(1);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [attachmentsProduct, setAttachmentsProduct] = useState<Product | null>(null);
   const [expandedProducts, setExpandedProducts] = useState<Set<string>>(new Set());
   const [ledgerProduct, setLedgerProduct] = useState<Product | null>(null);
   const [deleteProductId, setDeleteProductId] = useState<string | null>(null);
   const { toast } = useToast();
+  const canCreate = can("products", "create");
+  const canEdit = can("products", "edit");
+  const canDelete = can("products", "delete");
 
   const getBranchAssignments = (productId: string) => {
     return branchProducts
@@ -386,9 +382,157 @@ const Products = () => {
   };
 
 
+  const productColumns: EnterpriseColumn<Product>[] = [
+    {
+      id: "name",
+      header: t("products.productName"),
+      sortable: true,
+      hideable: false,
+      cell: (product) => (
+        <div className="flex items-center gap-1.5 flex-wrap font-medium">
+          <span>{product.product_name}</span>
+          {product.trackingMode && product.trackingMode !== "none" && (
+            <Badge variant="outline" className="text-[10px] uppercase">
+              {product.trackingMode}
+            </Badge>
+          )}
+          {product.itemType === "manufactured" && (
+            <Badge variant="secondary" className="text-[10px]">
+              MFG
+            </Badge>
+          )}
+        </div>
+      ),
+    },
+    {
+      id: "sku",
+      header: t("products.sku"),
+      accessorKey: "product_sku",
+      sortable: true,
+    },
+    {
+      id: "brand",
+      header: t("products.brand"),
+      accessorKey: "brand",
+      sortable: true,
+    },
+    {
+      id: "category",
+      header: t("products.category"),
+      accessorKey: "category",
+      sortable: true,
+    },
+    {
+      id: "quantity",
+      header: t("products.totalQty"),
+      accessorKey: "quantity",
+      sortable: true,
+    },
+    {
+      id: "assigned",
+      header: t("products.assigned"),
+      cell: (product) => {
+        const assignedQty = getAssignedQuantity(product.productId);
+        const isExpanded = expandedProducts.has(product.productId);
+        return assignedQty > 0 ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-auto p-1 text-muted-foreground hover:text-foreground"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleProductExpansion(product.productId);
+            }}
+          >
+            {isExpanded ? <ChevronDown className="h-4 w-4 me-1" /> : <ChevronRight className="h-4 w-4 me-1" />}
+            {assignedQty}
+          </Button>
+        ) : (
+          <span className="text-muted-foreground">0</span>
+        );
+      },
+    },
+    {
+      id: "available",
+      header: t("products.available"),
+      cell: (product) => {
+        const assignedQty = getAssignedQuantity(product.productId);
+        const availableQty = Math.max(0, product.quantity - assignedQty);
+        return (
+          <span className={availableQty <= 10 ? "text-destructive font-medium" : ""}>
+            {availableQty}
+          </span>
+        );
+      },
+    },
+    {
+      id: "sellingPrice",
+      header: t("products.sellingPrice"),
+      sortable: true,
+      cell: (product) => formatMoney(product.sellingPrice, settings.currency),
+    },
+    {
+      id: "costPrice",
+      header: t("products.costPrice"),
+      sortable: true,
+      cell: (product) => formatMoney(product.costPrice, settings.currency),
+    },
+    {
+      id: "status",
+      header: t("common.status"),
+      cell: (product) => {
+        const assignedQty = getAssignedQuantity(product.productId);
+        const availableQty = Math.max(0, product.quantity - assignedQty);
+        const stockStatus = getStockStatus(availableQty, product.quantity);
+        return <Badge variant={stockStatus.variant}>{stockStatus.label}</Badge>;
+      },
+    },
+    {
+      id: "actions",
+      header: t("common.actions"),
+      hideable: false,
+      cell: (product) => (
+        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label={t("attachments.title", "Attachments")}
+            onClick={() => setAttachmentsProduct(product)}
+          >
+            <Paperclip className="h-4 w-4" />
+          </Button>
+          {canEdit && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-label={t("common.edit", "Edit")}
+              onClick={() => handleEdit(product)}
+            >
+              <Edit className="h-4 w-4" />
+            </Button>
+          )}
+          {canDelete && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-label={t("common.delete", "Delete")}
+              onClick={() => handleDeleteClick(product.productId)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+      ),
+    },
+  ];
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">{t('products.title')}</h1>
           <p className="text-muted-foreground">
@@ -396,25 +540,29 @@ const Products = () => {
           </p>
         </div>
         
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button variant="outline" onClick={handleExportProducts}>
             <Download className="me-2 h-4 w-4" />
             {t('bulkImport.export')}
           </Button>
           
-          <Button variant="outline" onClick={() => setIsImportDialogOpen(true)}>
-            <Upload className="me-2 h-4 w-4" />
-            {t('bulkImport.title')}
-          </Button>
+          {canCreate && (
+            <Button variant="outline" onClick={() => setIsImportDialogOpen(true)}>
+              <Upload className="me-2 h-4 w-4" />
+              {t('bulkImport.title')}
+            </Button>
+          )}
           
           <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
-            <DialogTrigger asChild>
-              <Button onClick={resetForm}>
-                <Plus className="me-2 h-4 w-4" />
-                {t('products.addProduct')}
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="max-w-md">
+            {canCreate && (
+              <DialogTrigger asChild>
+                <Button onClick={resetForm}>
+                  <Plus className="me-2 h-4 w-4" />
+                  {t('products.addProduct')}
+                </Button>
+              </DialogTrigger>
+            )}
+            <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>
                 {editingProduct ? t('products.editProduct') : t('products.addNewProduct')}
@@ -634,175 +782,87 @@ const Products = () => {
           <CardDescription>
             {t('products.catalogInfo')}
           </CardDescription>
-          
-          <div className="flex items-center gap-2">
-            <Search className="h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder={t('products.searchProducts')}
-              value={searchTerm}
-              onChange={(e) => {
-                setSearchTerm(e.target.value);
-                setPage(1);
-              }}
-              className="max-w-sm"
-            />
-          </div>
         </CardHeader>
         
         <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{t('products.productName')}</TableHead>
-                <TableHead>{t('products.sku')}</TableHead>
-                <TableHead>{t('products.brand')}</TableHead>
-                <TableHead>{t('products.category')}</TableHead>
-                <TableHead>{t('products.totalQty')}</TableHead>
-                <TableHead>{t('products.assigned')}</TableHead>
-                <TableHead>{t('products.available')}</TableHead>
-                <TableHead>{t('products.sellingPrice')}</TableHead>
-                <TableHead>{t('products.costPrice')}</TableHead>
-                <TableHead>{t('common.status')}</TableHead>
-                <TableHead>{t('common.actions')}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filteredProducts.map((product) => {
-                const assignedQty = getAssignedQuantity(product.productId);
-                const availableQty = Math.max(0, product.quantity - assignedQty);
-                const stockStatus = getStockStatus(availableQty, product.quantity);
-                const branchAssignments = getBranchAssignments(product.productId);
-                const isExpanded = expandedProducts.has(product.productId);
-                
-                return (
-                  <Collapsible key={product.productId} asChild open={isExpanded}>
-                    <>
-                      <TableRow>
-                        <TableCell className="font-medium">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span>{product.product_name}</span>
-                            {product.trackingMode && product.trackingMode !== "none" && (
-                              <Badge variant="outline" className="text-[10px] uppercase">
-                                {product.trackingMode}
-                              </Badge>
-                            )}
-                            {product.itemType === "manufactured" && (
-                              <Badge variant="secondary" className="text-[10px]">
-                                MFG
-                              </Badge>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell>{product.product_sku}</TableCell>
-                        <TableCell>{product.brand}</TableCell>
-                        <TableCell>{product.category}</TableCell>
-                        <TableCell>{product.quantity}</TableCell>
-                        <TableCell>
-                          {assignedQty > 0 ? (
-                            <CollapsibleTrigger asChild>
-                              <Button 
-                                variant="ghost" 
-                                size="sm" 
-                                className="h-auto p-1 text-muted-foreground hover:text-foreground"
-                                onClick={() => toggleProductExpansion(product.productId)}
-                              >
-                                {isExpanded ? (
-                                  <ChevronDown className="h-4 w-4 me-1" />
-                                ) : (
-                                  <ChevronRight className="h-4 w-4 me-1" />
-                                )}
-                                {assignedQty}
-                              </Button>
-                            </CollapsibleTrigger>
-                          ) : (
-                            <span className="text-muted-foreground">0</span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <span className={availableQty <= 10 ? "text-destructive font-medium" : ""}>
-                            {availableQty}
-                          </span>
-                        </TableCell>
-                        <TableCell>{formatMoney(product.sellingPrice, settings.currency)}</TableCell>
-                        <TableCell>{formatMoney(product.costPrice, settings.currency)}</TableCell>
-                        <TableCell>
-                          <Badge variant={stockStatus.variant}>
-                            {stockStatus.label}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex items-center gap-2">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleEdit(product)}
-                            >
-                              <Edit className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleDeleteClick(product.productId)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                      <CollapsibleContent asChild>
-                        <TableRow className="bg-muted/30 hover:bg-muted/40">
-                          <TableCell colSpan={11} className="py-3">
-                            <div className="ps-4 space-y-2">
-                              <div className="flex items-center justify-between">
-                                <p className="text-sm font-medium text-muted-foreground flex items-center gap-1">
-                                  <MapPin className="h-3.5 w-3.5" />
-                                  {t('products.branchAssignments')}
-                                </p>
-                                <TooltipProvider>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Button
-                                        variant="outline"
-                                        size="sm"
-                                        className="gap-1.5"
-                                        onClick={() => setLedgerProduct(product)}
-                                      >
-                                        <FileText className="h-4 w-4" />
-                                        {t('movements.viewLedger')}
-                                      </Button>
-                                    </TooltipTrigger>
-                                    <TooltipContent>
-                                      {t('movements.stockLedger')}
-                                    </TooltipContent>
-                                  </Tooltip>
-                                </TooltipProvider>
-                              </div>
-                              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                                {branchAssignments.map((assignment) => (
-                                  <div 
-                                    key={`${assignment.productId}-${assignment.branchId}`}
-                                    className="flex items-center justify-between bg-background rounded-md px-3 py-2 border"
-                                  >
-                                    <span className="text-sm">{assignment.branchName}</span>
-                                    <Badge variant="secondary" className="ms-2">
-                                      {assignment.quantity}
-                                    </Badge>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      </CollapsibleContent>
-                    </>
-                  </Collapsible>
-                );
-              })}
-            </TableBody>
-          </Table>
-          <TablePagination pageInfo={productsPage?.pageInfo} onPageChange={setPage} />
+          <EnterpriseDataTable
+            data={filteredProducts}
+            columns={productColumns}
+            getRowId={(product) => product.productId}
+            searchValue={searchTerm}
+            onSearchChange={(val) => {
+              setSearchTerm(val);
+              setPage(1);
+            }}
+            searchPlaceholder={t("products.searchProducts")}
+            selectable
+            enableColumnVisibility
+            savedViewsResource="products"
+            exportResource="products"
+            pageInfo={productsPage?.pageInfo}
+            onPageChange={setPage}
+            isRowExpanded={(product) => expandedProducts.has(product.productId)}
+            renderRowExpansion={(product) => {
+              const branchAssignments = getBranchAssignments(product.productId);
+              return (
+                <div className="ps-4 space-y-2 py-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-muted-foreground flex items-center gap-1">
+                      <MapPin className="h-3.5 w-3.5" />
+                      {t("products.branchAssignments")}
+                    </p>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5"
+                            onClick={() => setLedgerProduct(product)}
+                          >
+                            <FileText className="h-4 w-4" />
+                            {t("movements.viewLedger")}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{t("movements.stockLedger")}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                    {branchAssignments.map((assignment) => (
+                      <div
+                        key={`${assignment.productId}-${assignment.branchId}`}
+                        className="flex items-center justify-between bg-background rounded-md px-3 py-2 border"
+                      >
+                        <span className="text-sm">{assignment.branchName}</span>
+                        <Badge variant="secondary" className="ms-2">
+                          {assignment.quantity}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            }}
+            testId="products-data-table"
+          />
         </CardContent>
       </Card>
+
+      {/* Product Attachments Dialog */}
+      <Dialog open={attachmentsProduct !== null} onOpenChange={(open) => !open && setAttachmentsProduct(null)}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          {attachmentsProduct && (
+            <>
+              <DialogHeader>
+                <DialogTitle>{attachmentsProduct.product_name}</DialogTitle>
+                <DialogDescription>{attachmentsProduct.product_sku}</DialogDescription>
+              </DialogHeader>
+              <AttachmentsPanel entityType="product" entityId={attachmentsProduct.productId} />
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Product Ledger Dialog */}
       {ledgerProduct && (

@@ -1,4 +1,4 @@
-import { asc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import {
   calculateLineAmounts,
@@ -22,7 +22,12 @@ import { applyInvoiceEInvoiceMetadata } from "./einvoicing.service.ts";
 import { postMappedJournal, reverseJournalEntriesForSource } from "./gl.service.ts";
 import { consumeTrackedStock, linkConsumedAllocations } from "./lots-serials.service.ts";
 import { groupByKey, listBranchScopedPaginated } from "./query-helpers.ts";
-import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  applyBranchStockMovement,
+  assertBranchInCompany,
+  type RequestActor,
+} from "./stock-locks.ts";
 
 export interface SalesInvoiceListQuery {
   page?: string | number;
@@ -41,6 +46,7 @@ export async function listSalesInvoices(
   actor: RequestActor,
   query: SalesInvoiceListQuery = {}
 ) {
+  const companyId = actorCompanyId(actor);
   const hasExplicitPaging = query.page !== undefined || query.pageSize !== undefined;
   const parsed = offsetPageQuerySchema.safeParse({
     page: query.page ?? 1,
@@ -72,7 +78,7 @@ export async function listSalesInvoices(
     const matchedCustomers = await db
       .select({ id: customers.id })
       .from(customers)
-      .where(ilike(customers.name, pattern));
+      .where(and(eq(customers.companyId, companyId), ilike(customers.name, pattern)));
     const customerIds = matchedCustomers.map((c) => c.id);
     if (customerIds.length > 0) {
       extraConditions.push(
@@ -133,16 +139,82 @@ export async function listSalesInvoices(
   return { items, pageInfo };
 }
 
+export async function getSalesInvoiceById(db: AppDatabase, actor: RequestActor, id: string) {
+  const companyId = actorCompanyId(actor);
+  const [inv] = await db
+    .select()
+    .from(salesInvoices)
+    .where(and(eq(salesInvoices.id, id), eq(salesInvoices.companyId, companyId)))
+    .limit(1);
+  if (!inv) throw new AppError(404, "Invoice not found", "NOT_FOUND");
+  assertBranchAccess(actor, inv.branchId);
+
+  const lines = await db.select().from(salesInvoiceLines).where(eq(salesInvoiceLines.invoiceId, inv.id));
+
+  return {
+    ...inv,
+    fxRate: num(inv.fxRate),
+    subtotal: num(inv.subtotal),
+    taxTotal: num(inv.taxTotal),
+    totalAmount: num(inv.totalAmount),
+    paidAmount: num(inv.paidAmount),
+    creditAppliedAmount: num(inv.creditAppliedAmount),
+    retainerAppliedAmount: num(inv.retainerAppliedAmount),
+    invoiceDate: inv.invoiceDate.toISOString(),
+    dueDate: inv.dueDate.toISOString(),
+    createdAt: inv.createdAt.toISOString(),
+    lines: lines.map((l) => ({
+      ...l,
+      quantity: num(l.quantity),
+      unitPrice: num(l.unitPrice),
+      unitCostSnapshot: num(l.unitCostSnapshot),
+      discount: num(l.discount),
+      taxRate: num(l.taxRate),
+      taxAmount: num(l.taxAmount),
+      lineTotal: num(l.lineTotal),
+    })),
+  };
+}
+
 export async function createSalesInvoice(
   db: AppDatabase,
   actor: RequestActor,
   data: z.infer<typeof invoiceSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const invoiceNumber = await nextDocNumber(tx, "INV", "INV-");
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const [cust] = await tx
+      .select({ id: customers.id })
+      .from(customers)
+      .where(and(eq(customers.id, data.customerId), eq(customers.companyId, companyId)))
+      .limit(1);
+    if (!cust) throw new AppError(404, "Customer not found", "NOT_FOUND");
+
+    if (data.soId) {
+      const [so] = await tx
+        .select({ id: salesOrders.id })
+        .from(salesOrders)
+        .where(and(eq(salesOrders.id, data.soId), eq(salesOrders.companyId, companyId)))
+        .limit(1);
+      if (!so) throw new AppError(404, "Sales order not found", "NOT_FOUND");
+    }
+
+    const lineProdIds = Array.from(new Set(data.lines.map((l) => l.productId).filter((pid): pid is string => Boolean(pid))));
+    if (lineProdIds.length > 0) {
+      const validProds = await tx
+        .select({ id: products.id })
+        .from(products)
+        .where(and(eq(products.companyId, companyId), inArray(products.id, lineProdIds)));
+      if (validProds.length !== lineProdIds.length) {
+        throw new AppError(404, "One or more products not found in active company", "NOT_FOUND");
+      }
+    }
+
+    const invoiceNumber = await nextDocNumber(tx, "INV", "INV-", null, companyId);
     let subtotal = 0;
     let taxTotal = 0;
     const computedLines = data.lines.map((l) => {
@@ -156,12 +228,13 @@ export async function createSalesInvoice(
     });
 
     if (data.status === "Sent") {
-      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal, data.soId ?? null);
+      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal, data.soId ?? null, companyId);
     }
 
     const [inv] = await tx
       .insert(salesInvoices)
       .values({
+        companyId,
         invoiceNumber,
         customerId: data.customerId,
         branchId: data.branchId,
@@ -186,12 +259,17 @@ export async function createSalesInvoice(
     for (const line of sorted) {
       let unitCostSnapshot = 0;
       if (line.productId && shouldDeduct) {
-        const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+        const [prod] = await tx
+          .select()
+          .from(products)
+          .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+          .limit(1);
         if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
 
         const isStockItem = prod.itemType !== "non_stock" && prod.itemType !== "service";
         if (isStockItem) {
           const tracked = await consumeTrackedStock(tx, {
+            companyId,
             product: prod,
             branchId: data.branchId,
             quantity: line.quantity,
@@ -202,6 +280,7 @@ export async function createSalesInvoice(
           });
 
           const moved = await applyBranchStockMovement(tx, {
+            companyId,
             branchId: data.branchId,
             productId: line.productId,
             qtyDelta: -line.quantity,
@@ -239,6 +318,7 @@ export async function createSalesInvoice(
 
     if (shouldDeduct) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: inv.branchId,
         entryDate: inv.invoiceDate,
         sourceType: "sales_invoice",
@@ -255,6 +335,7 @@ export async function createSalesInvoice(
 
       if (totalCogsVal > 0.0001) {
         await postMappedJournal(tx, {
+          companyId,
           branchId: inv.branchId,
           entryDate: inv.invoiceDate,
           sourceType: "sales_invoice",
@@ -294,10 +375,11 @@ export async function createSalesInvoice(
       await tx
         .update(salesOrders)
         .set({ status: allFulfilled ? "Fulfilled" : "Partially Fulfilled", updatedAt: new Date() })
-        .where(eq(salesOrders.id, data.soId));
+        .where(and(eq(salesOrders.id, data.soId), eq(salesOrders.companyId, companyId)));
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -314,6 +396,7 @@ export async function createSalesInvoice(
 }
 
 export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const invRows = await tx.execute<{
       id: string;
@@ -330,7 +413,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
       total_amount: string;
     }>(sql`
       SELECT id, invoice_number, customer_id, branch_id, so_id, status, invoice_date, currency, fx_rate, subtotal, tax_total, total_amount
-      FROM sales_invoices WHERE id = ${id} FOR UPDATE
+      FROM sales_invoices WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE
     `);
     const inv = invRows[0];
     if (!inv) throw new AppError(404, "Invoice not found", "NOT_FOUND");
@@ -338,7 +421,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
     if (inv.status !== "Draft") {
       throw new AppError(400, "Only Draft invoices can be posted/sent", "INVALID_STATUS");
     }
-    await assertCustomerCreditLimit(tx, inv.customer_id, num(inv.total_amount), inv.so_id);
+    await assertCustomerCreditLimit(tx, inv.customer_id, num(inv.total_amount), inv.so_id, companyId);
 
     const lines = await tx
       .select()
@@ -350,11 +433,16 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
     for (const line of lines) {
       if (!line.productId) continue;
       const qty = num(line.quantity);
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+        .limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
       if (prod.itemType === "non_stock" || prod.itemType === "service") continue;
 
       const tracked = await consumeTrackedStock(tx, {
+        companyId,
         product: prod,
         branchId: inv.branch_id,
         quantity: qty,
@@ -363,6 +451,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
       });
 
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: inv.branch_id,
         productId: line.productId,
         qtyDelta: -qty,
@@ -390,11 +479,12 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
     const [res] = await tx
       .update(salesInvoices)
       .set({ status: "Sent", updatedAt: new Date() })
-      .where(eq(salesInvoices.id, id))
+      .where(and(eq(salesInvoices.id, id), eq(salesInvoices.companyId, companyId)))
       .returning();
 
     const fxRate = num(inv.fx_rate) || 1;
     await postMappedJournal(tx, {
+      companyId,
       branchId: inv.branch_id,
       entryDate: new Date(inv.invoice_date),
       sourceType: "sales_invoice",
@@ -411,6 +501,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
 
     if (totalCogsVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: inv.branch_id,
         entryDate: new Date(inv.invoice_date),
         sourceType: "sales_invoice",
@@ -428,6 +519,7 @@ export async function sendSalesInvoice(db: AppDatabase, actor: RequestActor, id:
     await applyInvoiceEInvoiceMetadata(tx, id);
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -450,8 +542,13 @@ export async function voidSalesInvoice(
   reason: string,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [inv] = await tx.select().from(salesInvoices).where(eq(salesInvoices.id, id)).limit(1);
+    const [inv] = await tx
+      .select()
+      .from(salesInvoices)
+      .where(and(eq(salesInvoices.id, id), eq(salesInvoices.companyId, companyId)))
+      .limit(1);
     if (!inv) throw new AppError(404, "Invoice not found", "NOT_FOUND");
     assertBranchAccess(actor, inv.branchId);
     if (inv.status === "Cancelled") throw new AppError(400, "Invoice is already voided", "ALREADY_VOIDED");
@@ -471,12 +568,13 @@ export async function voidSalesInvoice(
         const [prod] = await tx
           .select({ itemType: products.itemType })
           .from(products)
-          .where(eq(products.id, line.productId))
+          .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
           .limit(1);
         if (prod && (prod.itemType === "non_stock" || prod.itemType === "service")) continue;
         const qty = num(line.quantity);
         const unitCost = num(line.unitCostSnapshot);
         await applyBranchStockMovement(tx, {
+          companyId,
           branchId: inv.branchId,
           productId: line.productId,
           qtyDelta: qty,
@@ -503,12 +601,13 @@ export async function voidSalesInvoice(
         voidedBy: actor.id,
         updatedAt: new Date(),
       })
-      .where(eq(salesInvoices.id, id))
+      .where(and(eq(salesInvoices.id, id), eq(salesInvoices.companyId, companyId)))
       .returning();
 
-    await reverseJournalEntriesForSource(tx, "sales_invoice", id, actor.id, reason);
+    await reverseJournalEntriesForSource(tx, "sales_invoice", id, actor.id, reason, companyId);
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

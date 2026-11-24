@@ -7,7 +7,7 @@ import {
   type issueWorkOrderSchema,
   type updateBomSchema,
 } from "@erp/shared";
-import { asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
   billsOfMaterials,
@@ -24,10 +24,16 @@ import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { consumeTrackedStock, linkConsumedAllocations, receiveTrackedStock } from "./lots-serials.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
-import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  applyBranchStockMovement,
+  assertBranchInCompany,
+  type RequestActor,
+} from "./stock-locks.ts";
 
 async function assertNoBomCycle(
   tx: DbOrTx,
+  companyId: string,
   finishedProductId: string,
   componentProductIds: string[],
   ignoreBomId?: string
@@ -36,8 +42,16 @@ async function assertNoBomCycle(
     throw new AppError(400, "A product cannot be a component of its own Bill of Materials", "BOM_CYCLE_DETECTED");
   }
 
-  const allBoms = await tx.select({ id: billsOfMaterials.id, productId: billsOfMaterials.productId }).from(billsOfMaterials);
-  const allComps = await tx.select().from(bomComponents);
+  const allBoms = await tx
+    .select({ id: billsOfMaterials.id, productId: billsOfMaterials.productId })
+    .from(billsOfMaterials)
+    .where(eq(billsOfMaterials.companyId, companyId));
+  const allComps = allBoms.length
+    ? await tx
+        .select()
+        .from(bomComponents)
+        .where(inArray(bomComponents.bomId, allBoms.map((b) => b.id)))
+    : [];
 
   const adj = new Map<string, Set<string>>();
   for (const b of allBoms) {
@@ -72,8 +86,13 @@ async function assertNoBomCycle(
   }
 }
 
-export async function listBoms(db: AppDatabase) {
-  const boms = await db.select().from(billsOfMaterials).orderBy(desc(billsOfMaterials.createdAt));
+export async function listBoms(db: AppDatabase, actor?: RequestActor) {
+  const companyId = actorCompanyId(actor);
+  const boms = await db
+    .select()
+    .from(billsOfMaterials)
+    .where(eq(billsOfMaterials.companyId, companyId))
+    .orderBy(desc(billsOfMaterials.createdAt));
   if (boms.length === 0) return [];
 
   const comps = await db
@@ -85,7 +104,10 @@ export async function listBoms(db: AppDatabase) {
     new Set([...boms.map((b) => b.productId), ...comps.map((c) => c.componentProductId)])
   );
   const prodRows = productIds.length
-    ? await db.select().from(products).where(inArray(products.id, productIds))
+    ? await db
+        .select()
+        .from(products)
+        .where(and(eq(products.companyId, companyId), inArray(products.id, productIds)))
     : [];
   const prodMap = new Map(prodRows.map((p) => [p.id, p]));
   const compByBom = groupByKey(comps, (c) => c.bomId);
@@ -126,25 +148,31 @@ export async function createBom(
   data: z.infer<typeof createBomSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [fg] = await tx.select().from(products).where(eq(products.id, data.productId)).limit(1);
+    const [fg] = await tx
+      .select()
+      .from(products)
+      .where(and(eq(products.id, data.productId), eq(products.companyId, companyId)))
+      .limit(1);
     if (!fg) throw new AppError(404, "Finished product not found", "NOT_FOUND");
 
     const componentIds = data.components.map((c) => c.componentProductId);
     const existingComps = await tx
       .select({ id: products.id })
       .from(products)
-      .where(inArray(products.id, componentIds));
+      .where(and(eq(products.companyId, companyId), inArray(products.id, componentIds)));
     if (existingComps.length !== new Set(componentIds).size) {
       throw new AppError(404, "One or more BOM component products were not found", "NOT_FOUND");
     }
 
-    await assertNoBomCycle(tx, data.productId, componentIds);
+    await assertNoBomCycle(tx, companyId, data.productId, componentIds);
 
-    const bomNumber = await nextDocNumber(tx, "BOM", "BOM-");
+    const bomNumber = await nextDocNumber(tx, "BOM", "BOM-", undefined, companyId);
     const [bom] = await tx
       .insert(billsOfMaterials)
       .values({
+        companyId,
         bomNumber,
         productId: data.productId,
         name: data.name,
@@ -168,9 +196,10 @@ export async function createBom(
     await tx
       .update(products)
       .set({ hasBom: true, updatedAt: new Date() })
-      .where(eq(products.id, data.productId));
+      .where(and(eq(products.id, data.productId), eq(products.companyId, companyId)));
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -193,13 +222,25 @@ export async function updateBom(
   data: z.infer<typeof updateBomSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [current] = await tx.select().from(billsOfMaterials).where(eq(billsOfMaterials.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(billsOfMaterials)
+      .where(and(eq(billsOfMaterials.id, id), eq(billsOfMaterials.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "BOM not found", "NOT_FOUND");
 
     if (data.components) {
       const componentIds = data.components.map((c) => c.componentProductId);
-      await assertNoBomCycle(tx, current.productId, componentIds, id);
+      const existingComps = await tx
+        .select({ id: products.id })
+        .from(products)
+        .where(and(eq(products.companyId, companyId), inArray(products.id, componentIds)));
+      if (existingComps.length !== new Set(componentIds).size) {
+        throw new AppError(404, "One or more BOM component products were not found", "NOT_FOUND");
+      }
+      await assertNoBomCycle(tx, companyId, current.productId, componentIds, id);
     }
 
     const [updated] = await tx
@@ -211,7 +252,7 @@ export async function updateBom(
         notes: data.notes ?? current.notes,
         updatedAt: new Date(),
       })
-      .where(eq(billsOfMaterials.id, id))
+      .where(and(eq(billsOfMaterials.id, id), eq(billsOfMaterials.companyId, companyId)))
       .returning();
 
     if (data.components) {
@@ -228,6 +269,7 @@ export async function updateBom(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -243,6 +285,7 @@ export async function updateBom(
 }
 
 export async function listWorkOrders(db: AppDatabase, actor: RequestActor) {
+  const companyId = actorCompanyId(actor);
   const headers = (await listBranchScoped(
     db,
     workOrders,
@@ -264,9 +307,18 @@ export async function listWorkOrders(db: AppDatabase, actor: RequestActor) {
   const bomIds = Array.from(new Set(headers.map((h) => h.bomId)));
 
   const [prodRows, branchRows, bomRows] = await Promise.all([
-    productIds.length ? db.select().from(products).where(inArray(products.id, productIds)) : Promise.resolve([]),
-    branchIds.length ? db.select().from(branches).where(inArray(branches.id, branchIds)) : Promise.resolve([]),
-    bomIds.length ? db.select().from(billsOfMaterials).where(inArray(billsOfMaterials.id, bomIds)) : Promise.resolve([]),
+    productIds.length
+      ? db.select().from(products).where(and(eq(products.companyId, companyId), inArray(products.id, productIds)))
+      : Promise.resolve([]),
+    branchIds.length
+      ? db.select().from(branches).where(and(eq(branches.companyId, companyId), inArray(branches.id, branchIds)))
+      : Promise.resolve([]),
+    bomIds.length
+      ? db
+          .select()
+          .from(billsOfMaterials)
+          .where(and(eq(billsOfMaterials.companyId, companyId), inArray(billsOfMaterials.id, bomIds)))
+      : Promise.resolve([]),
   ]);
 
   const prodMap = new Map(prodRows.map((p) => [p.id, p]));
@@ -325,22 +377,30 @@ export async function createWorkOrder(
   data: z.infer<typeof createWorkOrderSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const [bom] = await tx.select().from(billsOfMaterials).where(eq(billsOfMaterials.id, data.bomId)).limit(1);
+    await assertBranchInCompany(tx, data.branchId, companyId);
+
+    const [bom] = await tx
+      .select()
+      .from(billsOfMaterials)
+      .where(and(eq(billsOfMaterials.id, data.bomId), eq(billsOfMaterials.companyId, companyId)))
+      .limit(1);
     if (!bom) throw new AppError(404, "BOM not found", "NOT_FOUND");
     if (!bom.isActive) throw new AppError(400, "Cannot create a work order from an inactive BOM", "INACTIVE_BOM");
 
     const comps = await tx.select().from(bomComponents).where(eq(bomComponents.bomId, bom.id));
     if (comps.length === 0) throw new AppError(400, "BOM has no components", "EMPTY_BOM");
 
-    const woNumber = await nextDocNumber(tx, "MFG", "MO-");
+    const woNumber = await nextDocNumber(tx, "MFG", "MO-", undefined, companyId);
     const scale = data.plannedQty / Math.max(0.0001, num(bom.outputQty));
 
     const [wo] = await tx
       .insert(workOrders)
       .values({
+        companyId,
         woNumber,
         bomId: bom.id,
         branchId: data.branchId,
@@ -369,6 +429,7 @@ export async function createWorkOrder(
     );
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -392,6 +453,7 @@ export async function issueWorkOrderMaterials(
   data: z.infer<typeof issueWorkOrderSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const rows = await tx.execute<{
       id: string;
@@ -402,7 +464,7 @@ export async function issueWorkOrderMaterials(
       started_at: Date | null;
     }>(sql`
       SELECT id, wo_number, branch_id, status, wip_value_issued, started_at
-      FROM work_orders WHERE id = ${id} FOR UPDATE
+      FROM work_orders WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE
     `);
     const wo = rows[0];
     if (!wo) throw new AppError(404, "Work order not found", "NOT_FOUND");
@@ -443,7 +505,11 @@ export async function issueWorkOrderMaterials(
         throw new AppError(400, `Component ${line.componentProductId} is not part of this work order`, "INVALID_COMPONENT");
       }
 
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.componentProductId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, line.componentProductId), eq(products.companyId, companyId)))
+        .limit(1);
       if (!prod) throw new AppError(404, "Component product not found", "NOT_FOUND");
 
       const tracked = await consumeTrackedStock(tx, {
@@ -457,6 +523,7 @@ export async function issueWorkOrderMaterials(
       });
 
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: wo.branch_id,
         productId: line.componentProductId,
         qtyDelta: -line.quantity,
@@ -503,11 +570,12 @@ export async function issueWorkOrderMaterials(
         startedAt: wo.started_at ?? now,
         updatedAt: now,
       })
-      .where(eq(workOrders.id, id))
+      .where(and(eq(workOrders.id, id), eq(workOrders.companyId, companyId)))
       .returning();
 
     if (totalIssuedVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: wo.branch_id,
         sourceType: "work_order_issue",
         sourceId: wo.id,
@@ -522,6 +590,7 @@ export async function issueWorkOrderMaterials(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -545,6 +614,7 @@ export async function completeWorkOrder(
   data: z.infer<typeof completeWorkOrderSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const rows = await tx.execute<{
       id: string;
@@ -558,7 +628,7 @@ export async function completeWorkOrder(
       wip_value_absorbed: string;
     }>(sql`
       SELECT id, wo_number, branch_id, product_id, planned_qty, completed_qty, status, wip_value_issued, wip_value_absorbed
-      FROM work_orders WHERE id = ${id} FOR UPDATE
+      FROM work_orders WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE
     `);
     const wo = rows[0];
     if (!wo) throw new AppError(404, "Work order not found", "NOT_FOUND");
@@ -592,10 +662,15 @@ export async function completeWorkOrder(
       : roundCurrency(wipRemaining * (data.qtyCompleted / remainingQty), 4);
     const unitCost = data.qtyCompleted > 0 ? roundCurrency(absorbedNow / data.qtyCompleted, 4) : 0;
 
-    const [fg] = await tx.select().from(products).where(eq(products.id, wo.product_id)).limit(1);
+    const [fg] = await tx
+      .select()
+      .from(products)
+      .where(and(eq(products.id, wo.product_id), eq(products.companyId, companyId)))
+      .limit(1);
     if (!fg) throw new AppError(404, "Finished good product not found", "NOT_FOUND");
 
     const moved = await applyBranchStockMovement(tx, {
+      companyId,
       branchId: wo.branch_id,
       productId: wo.product_id,
       qtyDelta: data.qtyCompleted,
@@ -640,11 +715,12 @@ export async function completeWorkOrder(
         completedAt: isFinal ? now : null,
         updatedAt: now,
       })
-      .where(eq(workOrders.id, id))
+      .where(and(eq(workOrders.id, id), eq(workOrders.companyId, companyId)))
       .returning();
 
     if (absorbedNow > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: wo.branch_id,
         sourceType: "work_order_complete",
         sourceId: wo.id,
@@ -659,6 +735,7 @@ export async function completeWorkOrder(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -682,6 +759,7 @@ export async function cancelWorkOrder(
   data: z.infer<typeof cancelWorkOrderSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const rows = await tx.execute<{
       id: string;
@@ -692,7 +770,7 @@ export async function cancelWorkOrder(
       wip_value_absorbed: string;
     }>(sql`
       SELECT id, wo_number, branch_id, status, wip_value_issued, wip_value_absorbed
-      FROM work_orders WHERE id = ${id} FOR UPDATE
+      FROM work_orders WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE
     `);
     const wo = rows[0];
     if (!wo) throw new AppError(404, "Work order not found", "NOT_FOUND");
@@ -721,6 +799,7 @@ export async function cancelWorkOrder(
         if (returnQty <= 0.0001) continue;
 
         await applyBranchStockMovement(tx, {
+          companyId,
           branchId: wo.branch_id,
           productId: m.componentProductId,
           qtyDelta: returnQty,
@@ -738,6 +817,7 @@ export async function cancelWorkOrder(
       }
 
       await postMappedJournal(tx, {
+        companyId,
         branchId: wo.branch_id,
         sourceType: "work_order_cancel",
         sourceId: wo.id,
@@ -759,10 +839,11 @@ export async function cancelWorkOrder(
         notes: `${data.reason}`,
         updatedAt: new Date(),
       })
-      .where(eq(workOrders.id, id))
+      .where(and(eq(workOrders.id, id), eq(workOrders.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

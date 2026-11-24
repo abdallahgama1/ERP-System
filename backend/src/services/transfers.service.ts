@@ -1,4 +1,4 @@
-import { asc, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 import type { z } from "zod";
 import type { createTransferSchema, receiveTransferSchema } from "@erp/shared";
 import { products, stockTransferLines, stockTransfers } from "../../drizzle/schema.ts";
@@ -9,19 +9,33 @@ import { checkApprovalRequired, createApprovalRequest } from "./approvals.servic
 import { postMappedJournal } from "./gl.service.ts";
 import { consumeTrackedStock, linkConsumedAllocations, receiveTransferredTrackedStock } from "./lots-serials.service.ts";
 import { groupByKey } from "./query-helpers.ts";
-import { applyBranchStockMovement, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  applyBranchStockMovement,
+  assertBranchInCompany,
+  lockBranchProduct,
+  type RequestActor,
+} from "./stock-locks.ts";
 
 export async function listTransfers(db: AppDatabase, actor: RequestActor) {
+  const companyId = actorCompanyId(actor);
   const headers =
     actor.role === "admin" || actor.branchScopeMode === "all"
-      ? await db.select().from(stockTransfers).orderBy(desc(stockTransfers.createdAt))
+      ? await db
+          .select()
+          .from(stockTransfers)
+          .where(eq(stockTransfers.companyId, companyId))
+          .orderBy(desc(stockTransfers.createdAt))
       : actor.branchIds.length === 0
         ? []
         : await db
             .select()
             .from(stockTransfers)
             .where(
-              or(inArray(stockTransfers.fromBranchId, actor.branchIds), inArray(stockTransfers.toBranchId, actor.branchIds))
+              and(
+                eq(stockTransfers.companyId, companyId),
+                or(inArray(stockTransfers.fromBranchId, actor.branchIds), inArray(stockTransfers.toBranchId, actor.branchIds))
+              )
             )
             .orderBy(desc(stockTransfers.createdAt));
 
@@ -62,34 +76,43 @@ export async function createTransfer(
   data: z.infer<typeof createTransferSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   if (data.fromBranchId === data.toBranchId) {
     throw new AppError(400, "Source and destination branches must be different", "SAME_BRANCH_TRANSFER");
   }
   assertBranchAccess(actor, data.fromBranchId);
 
   return db.transaction(async (tx) => {
+    await assertBranchInCompany(tx, data.fromBranchId, companyId);
+    await assertBranchInCompany(tx, data.toBranchId, companyId);
+
     const sortedLines = [...data.lines].sort((a, b) => a.productId.localeCompare(b.productId));
-    const transferNumber = await nextDocNumber(tx, "TRF", "TRF-");
+    const transferNumber = await nextDocNumber(tx, "TRF", "TRF-", null, companyId);
     const wantsDispatch = data.status === "In Transit";
 
     let estimatedVal = 0;
     const prodMap = new Map<string, { prod: typeof products.$inferSelect; cost: number }>();
     for (const line of sortedLines) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+        .limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
-      const locked = await lockBranchProduct(tx, data.fromBranchId, line.productId, num(prod.costPrice));
+      const locked = await lockBranchProduct(tx, data.fromBranchId, line.productId, num(prod.costPrice), companyId);
       const unitCost = locked.avgCost > 0 ? locked.avgCost : num(prod.costPrice);
       prodMap.set(line.productId, { prod, cost: unitCost });
       estimatedVal += line.quantity * unitCost;
     }
 
     const needsApproval =
-      wantsDispatch && Boolean(await checkApprovalRequired(tx, "stock_transfer", estimatedVal));
+      wantsDispatch && Boolean(await checkApprovalRequired(tx, "stock_transfer", estimatedVal, companyId));
     const isDispatching = wantsDispatch && !needsApproval;
 
     const [tr] = await tx
       .insert(stockTransfers)
       .values({
+        companyId,
         transferNumber,
         fromBranchId: data.fromBranchId,
         toBranchId: data.toBranchId,
@@ -109,6 +132,7 @@ export async function createTransfer(
       let unitCost = meta.cost;
       if (isDispatching) {
         const tracked = await consumeTrackedStock(tx, {
+          companyId,
           product: meta.prod,
           branchId: data.fromBranchId,
           quantity: line.quantity,
@@ -118,6 +142,7 @@ export async function createTransfer(
         });
 
         const moved = await applyBranchStockMovement(tx, {
+          companyId,
           branchId: data.fromBranchId,
           productId: line.productId,
           qtyDelta: -line.quantity,
@@ -162,6 +187,7 @@ export async function createTransfer(
 
     if (isDispatching && totalDispatchedVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: data.fromBranchId,
         sourceType: "stock_transfer",
         sourceId: tr.id,
@@ -176,6 +202,7 @@ export async function createTransfer(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -197,13 +224,16 @@ export async function dispatchTransfer(
   id: string,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const rows = await tx.execute<{
       id: string;
       transfer_number: string;
       from_branch_id: string;
       status: string;
-    }>(sql`SELECT id, transfer_number, from_branch_id, status FROM stock_transfers WHERE id = ${id} FOR UPDATE`);
+    }>(
+      sql`SELECT id, transfer_number, from_branch_id, status FROM stock_transfers WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE`
+    );
     const tr = rows[0];
     if (!tr) throw new AppError(404, "Transfer not found", "NOT_FOUND");
     assertBranchAccess(actor, tr.from_branch_id);
@@ -219,11 +249,11 @@ export async function dispatchTransfer(
       .orderBy(asc(stockTransferLines.productId));
 
     const estimatedVal = lines.reduce((sum, l) => sum + num(l.qtySent) * num(l.unitCost), 0);
-    if (await checkApprovalRequired(tx, "stock_transfer", estimatedVal)) {
+    if (await checkApprovalRequired(tx, "stock_transfer", estimatedVal, companyId)) {
       const [pending] = await tx
         .update(stockTransfers)
         .set({ approvalStatus: "pending", updatedAt: new Date() })
-        .where(eq(stockTransfers.id, id))
+        .where(and(eq(stockTransfers.id, id), eq(stockTransfers.companyId, companyId)))
         .returning();
       await createApprovalRequest(tx, {
         entityType: "stock_transfer",
@@ -242,6 +272,7 @@ export async function dispatchTransfer(
     for (const line of lines) {
       const qtySent = num(line.qtySent);
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: tr.from_branch_id,
         productId: line.productId,
         qtyDelta: -qtySent,
@@ -265,6 +296,7 @@ export async function dispatchTransfer(
 
     if (totalDispatchedVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: tr.from_branch_id,
         sourceType: "stock_transfer",
         sourceId: id,
@@ -281,10 +313,11 @@ export async function dispatchTransfer(
     const [res] = await tx
       .update(stockTransfers)
       .set({ status: "In Transit", shippedAt: new Date(), updatedAt: new Date() })
-      .where(eq(stockTransfers.id, id))
+      .where(and(eq(stockTransfers.id, id), eq(stockTransfers.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -307,6 +340,7 @@ export async function receiveTransfer(
   data: z.infer<typeof receiveTransferSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const trRows = await tx.execute<{
       id: string;
@@ -314,7 +348,9 @@ export async function receiveTransfer(
       from_branch_id: string;
       to_branch_id: string;
       status: string;
-    }>(sql`SELECT id, transfer_number, from_branch_id, to_branch_id, status FROM stock_transfers WHERE id = ${id} FOR UPDATE`);
+    }>(
+      sql`SELECT id, transfer_number, from_branch_id, to_branch_id, status FROM stock_transfers WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE`
+    );
     const tr = trRows[0];
     if (!tr) throw new AppError(404, "Transfer not found", "NOT_FOUND");
     assertBranchAccess(actor, tr.to_branch_id);
@@ -351,8 +387,13 @@ export async function receiveTransfer(
 
       const unitCost = num(line.unitCost);
       if (receiveNow > 0) {
-        const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+        const [prod] = await tx
+          .select()
+          .from(products)
+          .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+          .limit(1);
         const moved = await applyBranchStockMovement(tx, {
+          companyId,
           branchId: tr.to_branch_id,
           productId: line.productId,
           qtyDelta: receiveNow,
@@ -369,6 +410,7 @@ export async function receiveTransfer(
         });
         if (prod) {
           await receiveTransferredTrackedStock(tx, {
+            companyId,
             transferId: id,
             product: prod,
             toBranchId: tr.to_branch_id,
@@ -386,6 +428,7 @@ export async function receiveTransfer(
         hasShortage = true;
         if (data.shortageResolution === "return_to_source") {
           const movedBack = await applyBranchStockMovement(tx, {
+            companyId,
             branchId: tr.from_branch_id,
             productId: line.productId,
             qtyDelta: shortQty,
@@ -414,6 +457,7 @@ export async function receiveTransfer(
     const totalClearedInTransit = totalReceivedVal + totalReturnedToSrcVal + totalWrittenOffShortVal;
     if (totalClearedInTransit > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: tr.to_branch_id,
         sourceType: "stock_transfer",
         sourceId: id,
@@ -448,10 +492,11 @@ export async function receiveTransfer(
         receivedBy: actor.id,
         updatedAt: new Date(),
       })
-      .where(eq(stockTransfers.id, id))
+      .where(and(eq(stockTransfers.id, id), eq(stockTransfers.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -474,13 +519,16 @@ export async function cancelTransfer(
   id: string,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const trRows = await tx.execute<{
       id: string;
       transfer_number: string;
       from_branch_id: string;
       status: string;
-    }>(sql`SELECT id, transfer_number, from_branch_id, status FROM stock_transfers WHERE id = ${id} FOR UPDATE`);
+    }>(
+      sql`SELECT id, transfer_number, from_branch_id, status FROM stock_transfers WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE`
+    );
     const tr = trRows[0];
     if (!tr) throw new AppError(404, "Transfer not found", "NOT_FOUND");
     assertBranchAccess(actor, tr.from_branch_id);
@@ -503,6 +551,7 @@ export async function cancelTransfer(
         if (returnQty <= 0) continue;
         const unitCost = num(line.unitCost);
         const moved = await applyBranchStockMovement(tx, {
+          companyId,
           branchId: tr.from_branch_id,
           productId: line.productId,
           qtyDelta: returnQty,
@@ -521,6 +570,7 @@ export async function cancelTransfer(
 
       if (returnedVal > 0.0001) {
         await postMappedJournal(tx, {
+          companyId,
           branchId: tr.from_branch_id,
           sourceType: "stock_transfer",
           sourceId: id,
@@ -538,10 +588,11 @@ export async function cancelTransfer(
     const [res] = await tx
       .update(stockTransfers)
       .set({ status: "Cancelled", updatedAt: new Date() })
-      .where(eq(stockTransfers.id, id))
+      .where(and(eq(stockTransfers.id, id), eq(stockTransfers.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

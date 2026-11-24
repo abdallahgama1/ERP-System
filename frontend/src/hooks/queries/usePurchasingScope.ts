@@ -1,7 +1,9 @@
-import React, { createContext, useCallback, useContext, useMemo, ReactNode } from "react";
+import { useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
-import { erpQueryKeys } from "@/hooks/queries/queryKeys";
+import { useBranch } from "@/contexts/BranchContext";
+import { erpQueryKeys } from "./queryKeys";
+import { useProductsQuery } from "./useInventoryQueries";
 import {
   usePaymentsMadeQuery,
   usePurchaseOrdersQuery,
@@ -9,18 +11,10 @@ import {
   usePurchaseReturnsQuery,
   useVendorBillsQuery,
   useVendorsQuery,
-  type ApiBill,
-  type ApiPO,
-  type ApiPaymentMade,
-  type ApiPurchaseReturn,
-  type ApiReceive,
   type ApiVendor,
-} from "@/hooks/queries/usePurchasingQueries";
-import { useBranch } from "./BranchContext";
-import { useInventory } from "./InventoryContext";
+} from "./usePurchasingQueries";
 import type {
   BillMatchStatus,
-  BillStatus,
   PaymentMade,
   PaymentMethod,
   PurchaseOrder,
@@ -31,118 +25,45 @@ import type {
   VendorBill,
 } from "@/types";
 
+export interface PurchasingScopeOptions {
+  vendors?: boolean;
+  purchaseOrders?: boolean;
+  receives?: boolean;
+  bills?: boolean;
+  payments?: boolean;
+  purchaseReturns?: boolean;
+  products?: boolean;
+}
+
 const daysFromTerms = (terms: "NET15" | "NET30" | "COD"): number =>
   terms === "COD" ? 0 : terms === "NET15" ? 15 : 30;
 
 const termsFromDays = (days: number): "NET15" | "NET30" | "COD" =>
   days <= 0 ? "COD" : days <= 15 ? "NET15" : "NET30";
 
-interface PurchasesContextType {
-  vendors: Vendor[];
-  addVendor: (
-    data: Omit<Vendor, "id" | "createdAt" | "updatedAt" | "payablesBalance">
-  ) => Promise<{ ok: true; vendor: Vendor } | { ok: false; error: string }>;
-  updateVendor: (
-    id: string,
-    data: Partial<Omit<Vendor, "id" | "createdAt">>
-  ) => Promise<{ ok: true } | { ok: false; error: string }>;
-  deleteVendor: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  purchaseOrders: PurchaseOrder[];
-  createPurchaseOrder: (
-    data: Omit<PurchaseOrder, "id" | "createdAt" | "updatedAt">
-  ) => Promise<{ ok: true; order: PurchaseOrder } | { ok: false; error: string }>;
-  updatePurchaseOrder: (
-    id: string,
-    data: Partial<Omit<PurchaseOrder, "id" | "createdAt">>
-  ) => Promise<{ ok: true } | { ok: false; error: string }>;
-  deletePurchaseOrder: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  cancelPurchaseOrder: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  applyReceiptToPO: (poId: string, receipts: Array<{ itemId: string; receivingNow: number }>) => void;
-
-  receives: PurchaseReceive[];
-  addReceive: (
-    data: Omit<PurchaseReceive, "id" | "createdAt">
-  ) => Promise<{ ok: true; receive: PurchaseReceive } | { ok: false; error: string }>;
-
-  purchaseReturns: PurchaseReturn[];
-  returnedQtyForReceive: (receiveId: string) => Record<string, number>;
-  createPurchaseReturn: (input: {
-    receiveId: string;
-    reason: PurchaseReturnReason;
-    note?: string;
-    createdBy?: string;
-    items: Array<{ receiveItemId: string; returnQty: number }>;
-  }) => Promise<{ ok: true; purchaseReturn: PurchaseReturn } | { ok: false; error: string }>;
-  vendorCredit: (vendorId: string) => number;
-
-  bills: VendorBill[];
-  createBill: (input: {
-    vendorId: string;
-    receiveId?: string;
-    branchId?: string;
-    vendorBillReference?: string;
-    billDate: string;
-    dueDate: string;
-    notes?: string;
-    createdBy?: string;
-    items: Array<{
-      productId: string;
-      product_name: string;
-      product_sku: string;
-      quantity: number;
-      unitPrice: number;
-      taxPercent: number;
-      receivedQty?: number;
-      orderedUnitPrice?: number;
-    }>;
-  }) => Promise<{ ok: true; bill: VendorBill } | { ok: false; error: string }>;
-  deleteBill: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  voidBill: (id: string, reason: string, actor?: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  payments: PaymentMade[];
-  createPayment: (input: {
-    vendorId: string;
-    paymentDate: string;
-    method: PaymentMethod;
-    reference?: string;
-    notes?: string;
-    createdBy?: string;
-    amount: number;
-    allocations: Array<{ billId: string; amount: number }>;
-  }) => Promise<{ ok: true; payment: PaymentMade } | { ok: false; error: string }>;
-  voidPayment: (id: string, reason: string, actor?: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  vendorPayables: (vendorId: number | string) => number;
-  billBalance: (bill: VendorBill) => number;
-
-  nextPoNumber: () => string;
-  nextReceiveNumber: () => string;
-  nextReturnNumber: () => string;
-  refreshPurchases: () => Promise<void>;
-}
-
-const PurchasesContext = createContext<PurchasesContextType | undefined>(undefined);
-
-export function PurchasesProvider({ children }: { children: ReactNode }) {
+export function usePurchasingScope(options: PurchasingScopeOptions = {}) {
   const queryClient = useQueryClient();
-  const { activeBranchId } = useBranch();
-  const { products, branches, refreshInventory } = useInventory();
+  const { branches: shellBranches, activeBranchId } = useBranch();
 
-  const vendorsQuery = useVendorsQuery();
-  const posQuery = usePurchaseOrdersQuery();
-  const receivesQuery = usePurchaseReceivesQuery();
-  const billsQuery = useVendorBillsQuery();
-  const paymentsQuery = usePaymentsMadeQuery();
-  const returnsQuery = usePurchaseReturnsQuery();
+  const vendorsQuery = useVendorsQuery(Boolean(options.vendors));
+  const posQuery = usePurchaseOrdersQuery(Boolean(options.purchaseOrders));
+  const receivesQuery = usePurchaseReceivesQuery(Boolean(options.receives));
+  const billsQuery = useVendorBillsQuery(Boolean(options.bills));
+  const paymentsQuery = usePaymentsMadeQuery(Boolean(options.payments));
+  const returnsQuery = usePurchaseReturnsQuery(Boolean(options.purchaseReturns));
+  const productsQuery = useProductsQuery(Boolean(options.products));
 
-  const loadAll = useCallback(async () => {
+  const refreshPurchases = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: erpQueryKeys.purchases.all });
   }, [queryClient]);
 
+  const refreshInventory = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: erpQueryKeys.inventory.all });
+  }, [queryClient]);
+
   const { vendors, purchaseOrders, receives, bills, payments, purchaseReturns } = useMemo(() => {
-    const prodMap = new Map(products.map((p) => [p.productId, p]));
-    const brMap = new Map(branches.map((b) => [b.branchId, b]));
+    const prodMap = new Map((productsQuery.data?.products ?? []).map((p) => [p.id, p]));
+    const brMap = new Map(shellBranches.map((b) => [b.id, b]));
     const rawVendors = vendorsQuery.data?.vendors ?? [];
     const vendorNameMap = new Map(rawVendors.map((v) => [v.id, v.name]));
 
@@ -155,7 +76,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
       vendorId: po.vendorId,
       vendorName: vendorNameMap.get(po.vendorId) ?? "",
       branchId: po.branchId,
-      branchName: brMap.get(po.branchId)?.branch_name ?? "",
+      branchName: brMap.get(po.branchId)?.name ?? "",
       orderDate: po.orderDate.slice(0, 10),
       expectedDate: (po.expectedDate ?? po.orderDate).slice(0, 10),
       status: po.status,
@@ -170,8 +91,8 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         return {
           id: l.id,
           productId: l.productId,
-          product_name: p?.product_name ?? "",
-          product_sku: p?.product_sku ?? "",
+          product_name: p?.name ?? "",
+          product_sku: p?.sku ?? "",
           quantity: l.quantity,
           receivedQty: l.receivedQty,
           unitPrice: l.unitCost,
@@ -194,7 +115,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         vendorId: r.vendorId,
         vendorName: vendorNameMap.get(r.vendorId) ?? "",
         branchId: r.branchId,
-        branchName: brMap.get(r.branchId)?.branch_name ?? "",
+        branchName: brMap.get(r.branchId)?.name ?? "",
         receiveDate: r.receiveDate.slice(0, 10),
         notes: r.notes || undefined,
         createdAt: r.createdAt,
@@ -204,8 +125,8 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
           return {
             id: l.id,
             productId: l.productId,
-            product_name: p?.product_name ?? "",
-            product_sku: p?.product_sku ?? "",
+            product_name: p?.name ?? "",
+            product_sku: p?.sku ?? "",
             orderedQty: poLine?.quantity ?? l.quantity,
             previouslyReceivedQty: Math.max(0, (poLine?.receivedQty ?? l.quantity) - l.quantity),
             receivingNow: l.quantity,
@@ -230,17 +151,17 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         const poLine = linkedPo?.lines.find((pl) => pl.productId === l.productId);
         if (recLine && Math.abs(l.quantity - recLine.quantity) > 0.001) {
           matchStatus = "qty_mismatch";
-          matchNotes.push(`${p?.product_name ?? "Item"}: billed ${l.quantity}, received ${recLine.quantity}`);
+          matchNotes.push(`${p?.name ?? "Item"}: billed ${l.quantity}, received ${recLine.quantity}`);
         }
         if (poLine && Math.abs(l.unitCost - poLine.unitCost) > 0.01) {
           if (matchStatus === "matched") matchStatus = "price_mismatch";
-          matchNotes.push(`${p?.product_name ?? "Item"}: bill price ${l.unitCost}, PO price ${poLine.unitCost}`);
+          matchNotes.push(`${p?.name ?? "Item"}: bill price ${l.unitCost}, PO price ${poLine.unitCost}`);
         }
         return {
           id: l.id,
           productId: l.productId ?? "",
-          product_name: p?.product_name ?? l.description ?? "",
-          product_sku: p?.product_sku ?? "",
+          product_name: p?.name ?? l.description ?? "",
+          product_sku: p?.sku ?? "",
           quantity: l.quantity,
           unitPrice: l.unitCost,
           taxPercent: l.taxRate,
@@ -310,7 +231,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         vendorId: ret.vendorId,
         vendorName: vendorNameMap.get(ret.vendorId) ?? "",
         branchId: ret.branchId,
-        branchName: brMap.get(ret.branchId)?.branch_name ?? "",
+        branchName: brMap.get(ret.branchId)?.name ?? "",
         returnDate: ret.returnDate.slice(0, 10),
         reason: ret.reason,
         note: ret.notes || undefined,
@@ -322,8 +243,8 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
           return {
             id: l.id,
             productId: l.productId,
-            product_name: p?.product_name ?? "",
-            product_sku: p?.product_sku ?? "",
+            product_name: p?.name ?? "",
+            product_sku: p?.sku ?? "",
             receivedQty: recLine?.quantity ?? l.quantity,
             returnQty: l.quantity,
             unitPrice: l.unitCost,
@@ -364,8 +285,8 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
       purchaseReturns: mappedReturns,
     };
   }, [
-    products,
-    branches,
+    productsQuery.data,
+    shellBranches,
     vendorsQuery.data,
     posQuery.data,
     receivesQuery.data,
@@ -377,13 +298,17 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
   const resolveBranchId = useCallback(
     (preferred?: string) =>
       preferred ||
-      (activeBranchId !== "all" ? activeBranchId : (branches.find((b) => b.isDefault)?.branchId ?? branches[0]?.branchId)) ||
+      (activeBranchId !== "all"
+        ? activeBranchId
+        : (shellBranches.find((b) => b.isDefault)?.id ?? shellBranches[0]?.id)) ||
       "",
-    [activeBranchId, branches]
+    [activeBranchId, shellBranches]
   );
 
-  const addVendor = useCallback<PurchasesContextType["addVendor"]>(
-    async (data) => {
+  const addVendor = useCallback(
+    async (
+      data: Omit<Vendor, "id" | "createdAt" | "updatedAt" | "payablesBalance">
+    ): Promise<{ ok: true; vendor: Vendor } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ vendor: ApiVendor }>("/api/vendors", {
           method: "POST",
@@ -398,7 +323,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
             paymentTermsDays: daysFromTerms(data.paymentTerms),
           },
         });
-        await loadAll();
+        await refreshPurchases();
         return {
           ok: true,
           vendor: {
@@ -415,11 +340,14 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to add vendor" };
       }
     },
-    [loadAll]
+    [refreshPurchases]
   );
 
-  const updateVendor = useCallback<PurchasesContextType["updateVendor"]>(
-    async (id, data) => {
+  const updateVendor = useCallback(
+    async (
+      id: string,
+      data: Partial<Omit<Vendor, "id" | "createdAt">>
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/vendors/${id}`, {
           method: "PUT",
@@ -434,30 +362,32 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
             ...(data.paymentTerms !== undefined ? { paymentTermsDays: daysFromTerms(data.paymentTerms) } : {}),
           },
         });
-        await loadAll();
+        await refreshPurchases();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to update vendor" };
       }
     },
-    [loadAll]
+    [refreshPurchases]
   );
 
-  const deleteVendor = useCallback<PurchasesContextType["deleteVendor"]>(
-    async (id) => {
+  const deleteVendor = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/vendors/${id}`, { method: "DELETE" });
-        await loadAll();
+        await refreshPurchases();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to delete vendor" };
       }
     },
-    [loadAll]
+    [refreshPurchases]
   );
 
-  const createPurchaseOrder = useCallback<PurchasesContextType["createPurchaseOrder"]>(
-    async (data) => {
+  const createPurchaseOrder = useCallback(
+    async (
+      data: Omit<PurchaseOrder, "id" | "createdAt" | "updatedAt">
+    ): Promise<{ ok: true; order: PurchaseOrder } | { ok: false; error: string }> => {
       try {
         const branchId = resolveBranchId(data.branchId);
         const res = await apiRequest<{ purchaseOrder: { id: string; poNumber: string; createdAt: string; updatedAt: string } }>(
@@ -481,7 +411,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshPurchases();
         return {
           ok: true,
           order: {
@@ -496,11 +426,14 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create PO" };
       }
     },
-    [resolveBranchId, loadAll]
+    [resolveBranchId, refreshPurchases]
   );
 
-  const updatePurchaseOrder = useCallback<PurchasesContextType["updatePurchaseOrder"]>(
-    async (id, data) => {
+  const updatePurchaseOrder = useCallback(
+    async (
+      id: string,
+      data: Partial<Omit<PurchaseOrder, "id" | "createdAt">>
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         const current = purchaseOrders.find((p) => p.id === id);
         if (!current) return { ok: false, error: "Purchase order not found" };
@@ -526,47 +459,49 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
             },
           });
         }
-        await loadAll();
+        await refreshPurchases();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to update PO" };
       }
     },
-    [purchaseOrders, resolveBranchId, loadAll]
+    [purchaseOrders, resolveBranchId, refreshPurchases]
   );
 
-  const deletePurchaseOrder = useCallback<PurchasesContextType["deletePurchaseOrder"]>(
-    async (id) => {
+  const deletePurchaseOrder = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/purchase-orders/${id}`, { method: "DELETE" });
-        await loadAll();
+        await refreshPurchases();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to delete PO" };
       }
     },
-    [loadAll]
+    [refreshPurchases]
   );
 
-  const cancelPurchaseOrder = useCallback<PurchasesContextType["cancelPurchaseOrder"]>(
-    async (id) => {
+  const cancelPurchaseOrder = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/purchase-orders/${id}/cancel`, { method: "POST" });
-        await loadAll();
+        await refreshPurchases();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to cancel PO" };
       }
     },
-    [loadAll]
+    [refreshPurchases]
   );
 
-  const applyReceiptToPO = useCallback<PurchasesContextType["applyReceiptToPO"]>(() => {
+  const applyReceiptToPO = useCallback(() => {
     // Handled atomically server-side inside POST /api/purchase-receives
   }, []);
 
-  const addReceive = useCallback<PurchasesContextType["addReceive"]>(
-    async (data) => {
+  const addReceive = useCallback(
+    async (
+      data: Omit<PurchaseReceive, "id" | "createdAt">
+    ): Promise<{ ok: true; receive: PurchaseReceive } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ receive: { id: string; receiveNumber: string; createdAt: string } }>(
           "/api/purchase-receives",
@@ -591,7 +526,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await Promise.all([loadAll(), refreshInventory()]);
+        await Promise.all([refreshPurchases(), refreshInventory()]);
         return {
           ok: true,
           receive: {
@@ -605,7 +540,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to post receive" };
       }
     },
-    [loadAll, refreshInventory]
+    [refreshPurchases, refreshInventory]
   );
 
   const returnedQtyForReceive = useCallback(
@@ -626,8 +561,14 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
     [purchaseReturns, receives]
   );
 
-  const createPurchaseReturn = useCallback<PurchasesContextType["createPurchaseReturn"]>(
-    async (input) => {
+  const createPurchaseReturn = useCallback(
+    async (input: {
+      receiveId: string;
+      reason: PurchaseReturnReason;
+      note?: string;
+      createdBy?: string;
+      items: Array<{ receiveItemId: string; returnQty: number }>;
+    }): Promise<{ ok: true; purchaseReturn: PurchaseReturn } | { ok: false; error: string }> => {
       const rec = receives.find((r) => r.id === input.receiveId);
       if (!rec) return { ok: false, error: "Receive document not found" };
 
@@ -644,21 +585,20 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         });
 
       try {
-        const res = await apiRequest<{ purchaseReturn: { id: string; returnNumber: string; totalAmount: string; createdAt: string } }>(
-          "/api/purchase-returns",
-          {
-            method: "POST",
-            body: {
-              vendorId: rec.vendorId,
-              branchId: rec.branchId,
-              receiveId: rec.id,
-              reason: input.reason,
-              notes: input.note ?? "",
-              lines,
-            },
-          }
-        );
-        await Promise.all([loadAll(), refreshInventory()]);
+        const res = await apiRequest<{
+          purchaseReturn: { id: string; returnNumber: string; totalAmount: string; createdAt: string };
+        }>("/api/purchase-returns", {
+          method: "POST",
+          body: {
+            vendorId: rec.vendorId,
+            branchId: rec.branchId,
+            receiveId: rec.id,
+            reason: input.reason,
+            notes: input.note ?? "",
+            lines,
+          },
+        });
+        await Promise.all([refreshPurchases(), refreshInventory()]);
         const created: PurchaseReturn = {
           id: res.purchaseReturn.id,
           reference: res.purchaseReturn.returnNumber,
@@ -682,7 +622,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create purchase return" };
       }
     },
-    [receives, loadAll, refreshInventory]
+    [receives, refreshPurchases, refreshInventory]
   );
 
   const vendorCredit = useCallback(
@@ -691,8 +631,27 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
     [purchaseReturns]
   );
 
-  const createBill = useCallback<PurchasesContextType["createBill"]>(
-    async (input) => {
+  const createBill = useCallback(
+    async (input: {
+      vendorId: string;
+      receiveId?: string;
+      branchId?: string;
+      vendorBillReference?: string;
+      billDate: string;
+      dueDate: string;
+      notes?: string;
+      createdBy?: string;
+      items: Array<{
+        productId: string;
+        product_name: string;
+        product_sku: string;
+        quantity: number;
+        unitPrice: number;
+        taxPercent: number;
+        receivedQty?: number;
+        orderedUnitPrice?: number;
+      }>;
+    }): Promise<{ ok: true; bill: VendorBill } | { ok: false; error: string }> => {
       const rec = input.receiveId ? receives.find((r) => r.id === input.receiveId) : undefined;
       const branchId = resolveBranchId(input.branchId ?? rec?.branchId);
       try {
@@ -720,7 +679,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshPurchases();
         const subtotal = input.items.reduce((s, i) => s + i.quantity * i.unitPrice, 0);
         const totalTax = input.items.reduce((s, i) => s + (i.quantity * i.unitPrice * i.taxPercent) / 100, 0);
         const created: VendorBill = {
@@ -750,35 +709,41 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create vendor bill" };
       }
     },
-    [receives, resolveBranchId, vendors, loadAll]
+    [receives, resolveBranchId, vendors, refreshPurchases]
   );
 
-  const deleteBill = useCallback<PurchasesContextType["deleteBill"]>(
-    async (id) => {
-      return voidBill(id, "Deleted by user");
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
-
-  const voidBill = useCallback<PurchasesContextType["voidBill"]>(
-    async (id, reason) => {
+  const voidBill = useCallback(
+    async (id: string, reason: string, _actor?: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/vendor-bills/${id}/void`, {
           method: "POST",
           body: { reason },
         });
-        await loadAll();
+        await refreshPurchases();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to void bill" };
       }
     },
-    [loadAll]
+    [refreshPurchases]
   );
 
-  const createPayment = useCallback<PurchasesContextType["createPayment"]>(
-    async (input) => {
+  const deleteBill = useCallback(
+    async (id: string) => voidBill(id, "Deleted by user"),
+    [voidBill]
+  );
+
+  const createPayment = useCallback(
+    async (input: {
+      vendorId: string;
+      paymentDate: string;
+      method: PaymentMethod;
+      reference?: string;
+      notes?: string;
+      createdBy?: string;
+      amount: number;
+      allocations: Array<{ billId: string; amount: number }>;
+    }): Promise<{ ok: true; payment: PaymentMade } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ payment: { id: string; paymentNumber: string; createdAt: string } }>(
           "/api/payments-made",
@@ -796,7 +761,7 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshPurchases();
         const created: PaymentMade = {
           id: res.payment.id,
           paymentNumber: res.payment.paymentNumber,
@@ -820,23 +785,23 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create payment" };
       }
     },
-    [activeBranchId, vendors, bills, loadAll]
+    [activeBranchId, vendors, bills, refreshPurchases]
   );
 
-  const voidPayment = useCallback<PurchasesContextType["voidPayment"]>(
-    async (id, reason) => {
+  const voidPayment = useCallback(
+    async (id: string, reason: string, _actor?: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/payments-made/${id}/void`, {
           method: "POST",
           body: { reason },
         });
-        await loadAll();
+        await refreshPurchases();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to void payment" };
       }
     },
-    [loadAll]
+    [refreshPurchases]
   );
 
   const billBalance = useCallback(
@@ -865,76 +830,35 @@ export function PurchasesProvider({ children }: { children: ReactNode }) {
     [purchaseReturns.length]
   );
 
-  const value = useMemo<PurchasesContextType>(
-    () => ({
-      vendors,
-      addVendor,
-      updateVendor,
-      deleteVendor,
-      purchaseOrders,
-      createPurchaseOrder,
-      updatePurchaseOrder,
-      deletePurchaseOrder,
-      cancelPurchaseOrder,
-      applyReceiptToPO,
-      receives,
-      addReceive,
-      purchaseReturns,
-      returnedQtyForReceive,
-      createPurchaseReturn,
-      vendorCredit,
-      bills,
-      createBill,
-      deleteBill,
-      voidBill,
-      payments,
-      createPayment,
-      voidPayment,
-      vendorPayables,
-      billBalance,
-      nextPoNumber,
-      nextReceiveNumber,
-      nextReturnNumber,
-      refreshPurchases: loadAll,
-    }),
-    [
-      vendors,
-      addVendor,
-      updateVendor,
-      deleteVendor,
-      purchaseOrders,
-      createPurchaseOrder,
-      updatePurchaseOrder,
-      deletePurchaseOrder,
-      cancelPurchaseOrder,
-      applyReceiptToPO,
-      receives,
-      addReceive,
-      purchaseReturns,
-      returnedQtyForReceive,
-      createPurchaseReturn,
-      vendorCredit,
-      bills,
-      createBill,
-      deleteBill,
-      voidBill,
-      payments,
-      createPayment,
-      voidPayment,
-      vendorPayables,
-      billBalance,
-      nextPoNumber,
-      nextReceiveNumber,
-      nextReturnNumber,
-      loadAll,
-    ]
-  );
-
-  return <PurchasesContext.Provider value={value}>{children}</PurchasesContext.Provider>;
-}
-
-export function usePurchases() {
-  const ctx = useContext(PurchasesContext);
-  if (!ctx) throw new Error("usePurchases must be used within a PurchasesProvider");
-  return ctx;
+  return {
+    vendors,
+    addVendor,
+    updateVendor,
+    deleteVendor,
+    purchaseOrders,
+    createPurchaseOrder,
+    updatePurchaseOrder,
+    deletePurchaseOrder,
+    cancelPurchaseOrder,
+    applyReceiptToPO,
+    receives,
+    addReceive,
+    purchaseReturns,
+    returnedQtyForReceive,
+    createPurchaseReturn,
+    vendorCredit,
+    bills,
+    createBill,
+    deleteBill,
+    voidBill,
+    payments,
+    createPayment,
+    voidPayment,
+    vendorPayables,
+    billBalance,
+    nextPoNumber,
+    nextReceiveNumber,
+    nextReturnNumber,
+    refreshPurchases,
+  };
 }

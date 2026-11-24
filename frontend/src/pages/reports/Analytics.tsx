@@ -20,8 +20,8 @@ import {
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useInventory } from "@/contexts/InventoryContext";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import { useSettings } from "@/contexts/SettingsContext";
 
 const PIE_COLORS = [
@@ -40,8 +40,8 @@ function monthKey(iso: string): string {
 
 export default function Analytics() {
   const { t } = useTranslation();
-  const { products, branchProducts, branches, movements, getAvailableQuantity } = useInventory();
-  const { purchaseOrders } = usePurchases();
+  const { products, branchProducts, branches, movements, getAvailableQuantity } = useInventoryScope({ products: true, movements: true });
+  const { purchaseOrders } = usePurchasingScope({ purchaseOrders: true });
   const { settings } = useSettings();
 
   const fmt = (n: number) =>

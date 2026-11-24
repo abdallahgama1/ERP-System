@@ -1,6 +1,7 @@
 import { roundCurrency } from "@erp/shared";
 import { and, eq, ne, notInArray, sql } from "drizzle-orm";
 import {
+  DEFAULT_COMPANY_ID,
   receivedPaymentAllocations,
   receivedPayments,
   retainerInvoices,
@@ -24,17 +25,20 @@ export interface CustomerCreditSummary {
 export async function getCustomerCreditSummary(
   tx: DbOrTx,
   customerId: string,
-  options: { lock?: boolean; excludeSoId?: string | null } = {}
+  options: { lock?: boolean; excludeSoId?: string | null; companyId?: string } = {}
 ): Promise<CustomerCreditSummary> {
   const lockClause = options.lock ? sql`FOR UPDATE` : sql``;
+  const companyFilter = options.companyId ? sql`AND company_id = ${options.companyId}` : sql``;
   const custRows = await tx.execute<{
     id: string;
+    company_id: string;
     name: string;
     credit_limit: string | null;
   }>(sql`
-    SELECT id, name, credit_limit
+    SELECT id, company_id, name, credit_limit
     FROM customers
     WHERE id = ${customerId}
+    ${companyFilter}
     ${lockClause}
   `);
 
@@ -43,6 +47,7 @@ export async function getCustomerCreditSummary(
     throw new AppError(404, "Customer not found", "NOT_FOUND");
   }
 
+  const companyId = options.companyId || cust.company_id || DEFAULT_COMPANY_ID;
   const creditLimit = cust.credit_limit === null ? null : num(cust.credit_limit);
 
   const [arRow] = await tx
@@ -52,6 +57,7 @@ export async function getCustomerCreditSummary(
     .from(salesInvoices)
     .where(
       and(
+        eq(salesInvoices.companyId, companyId),
         eq(salesInvoices.customerId, customerId),
         notInArray(salesInvoices.status, ["Draft", "Cancelled", "Paid"])
       )
@@ -59,15 +65,17 @@ export async function getCustomerCreditSummary(
 
   const soExclude = options.excludeSoId
     ? and(
+        eq(salesOrders.companyId, companyId),
         eq(salesOrders.customerId, customerId),
         ne(salesOrders.id, options.excludeSoId),
         sql`${salesOrders.status} IN ('Confirmed', 'Partially Fulfilled')`,
-        sql`NOT EXISTS (SELECT 1 FROM sales_invoices si WHERE si.so_id = ${salesOrders.id} AND si.status <> 'Cancelled')`
+        sql`NOT EXISTS (SELECT 1 FROM sales_invoices si WHERE si.so_id = ${salesOrders.id} AND si.company_id = ${companyId} AND si.status <> 'Cancelled')`
       )
     : and(
+        eq(salesOrders.companyId, companyId),
         eq(salesOrders.customerId, customerId),
         sql`${salesOrders.status} IN ('Confirmed', 'Partially Fulfilled')`,
-        sql`NOT EXISTS (SELECT 1 FROM sales_invoices si WHERE si.so_id = ${salesOrders.id} AND si.status <> 'Cancelled')`
+        sql`NOT EXISTS (SELECT 1 FROM sales_invoices si WHERE si.so_id = ${salesOrders.id} AND si.company_id = ${companyId} AND si.status <> 'Cancelled')`
       );
 
   const [soRow] = await tx
@@ -82,7 +90,13 @@ export async function getCustomerCreditSummary(
       totalPaid: sql<string>`coalesce(sum(${receivedPayments.amount}), 0)`,
     })
     .from(receivedPayments)
-    .where(and(eq(receivedPayments.customerId, customerId), eq(receivedPayments.status, "Posted")));
+    .where(
+      and(
+        eq(receivedPayments.companyId, companyId),
+        eq(receivedPayments.customerId, customerId),
+        eq(receivedPayments.status, "Posted")
+      )
+    );
 
   const [allocRow] = await tx
     .select({
@@ -90,14 +104,26 @@ export async function getCustomerCreditSummary(
     })
     .from(receivedPaymentAllocations)
     .innerJoin(receivedPayments, eq(receivedPaymentAllocations.paymentId, receivedPayments.id))
-    .where(and(eq(receivedPayments.customerId, customerId), eq(receivedPayments.status, "Posted")));
+    .where(
+      and(
+        eq(receivedPayments.companyId, companyId),
+        eq(receivedPayments.customerId, customerId),
+        eq(receivedPayments.status, "Posted")
+      )
+    );
 
   const [cnRow] = await tx
     .select({
       openCreditNotes: sql<string>`coalesce(sum(greatest(0, ${salesReturns.totalAmount} - ${salesReturns.appliedAmount})), 0)`,
     })
     .from(salesReturns)
-    .where(and(eq(salesReturns.customerId, customerId), ne(salesReturns.status, "Cancelled")));
+    .where(
+      and(
+        eq(salesReturns.companyId, companyId),
+        eq(salesReturns.customerId, customerId),
+        ne(salesReturns.status, "Cancelled")
+      )
+    );
 
   const [retRow] = await tx
     .select({
@@ -106,6 +132,7 @@ export async function getCustomerCreditSummary(
     .from(retainerInvoices)
     .where(
       and(
+        eq(retainerInvoices.companyId, companyId),
         eq(retainerInvoices.customerId, customerId),
         sql`${retainerInvoices.status} IN ('Paid', 'Partially Applied')`
       )
@@ -139,9 +166,10 @@ export async function assertCustomerCreditLimit(
   tx: DbOrTx,
   customerId: string,
   additionalAmount: number,
-  excludeSoId?: string | null
+  excludeSoId?: string | null,
+  companyId?: string
 ): Promise<CustomerCreditSummary> {
-  const summary = await getCustomerCreditSummary(tx, customerId, { lock: true, excludeSoId });
+  const summary = await getCustomerCreditSummary(tx, customerId, { lock: true, excludeSoId, companyId });
   if (summary.creditLimit === null) {
     return summary;
   }

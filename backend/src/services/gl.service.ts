@@ -2,6 +2,7 @@ import { buildOffsetPageInfo, roundCurrency, type AccountTypeShared, type GlMapp
 import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import {
+  DEFAULT_COMPANY_ID,
   chartOfAccounts,
   currencies,
   fiscalPeriods,
@@ -14,7 +15,7 @@ import type { DbOrTx } from "../auth/permissions.ts";
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { groupByKey } from "./query-helpers.ts";
-import type { RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, assertBranchInCompany, type RequestActor } from "./stock-locks.ts";
 
 interface DefaultAccountDef {
   code: string;
@@ -54,11 +55,17 @@ export function defaultNormalBalance(accountType: AccountTypeShared): NormalBala
  * Seeds default Chart of Accounts, GL account mappings, base currency,
  * and open fiscal calendar periods idempotently inside any DB transaction.
  */
-export async function ensureAccountingDefaults(tx: DbOrTx): Promise<void> {
+export async function ensureAccountingDefaults(
+  tx: DbOrTx,
+  companyId: string = DEFAULT_COMPANY_ID
+): Promise<void> {
+  const effectiveCompanyId = companyId || DEFAULT_COMPANY_ID;
+
   for (const def of DEFAULT_COA) {
     await tx
       .insert(chartOfAccounts)
       .values({
+        companyId: effectiveCompanyId,
         code: def.code,
         name: def.name,
         accountType: def.accountType,
@@ -69,7 +76,10 @@ export async function ensureAccountingDefaults(tx: DbOrTx): Promise<void> {
       .onConflictDoNothing();
   }
 
-  const coaRows = await tx.select().from(chartOfAccounts);
+  const coaRows = await tx
+    .select()
+    .from(chartOfAccounts)
+    .where(eq(chartOfAccounts.companyId, effectiveCompanyId));
   const byCode = new Map(coaRows.map((a) => [a.code, a.id]));
 
   for (const def of DEFAULT_COA) {
@@ -78,31 +88,53 @@ export async function ensureAccountingDefaults(tx: DbOrTx): Promise<void> {
     if (!accountId) continue;
     await tx
       .insert(glAccountMappings)
-      .values({ mappingKey: def.mappingKey, accountId })
+      .values({ companyId: effectiveCompanyId, mappingKey: def.mappingKey, accountId })
       .onConflictDoNothing();
   }
 
-  const existingCurrency = await tx.select({ code: currencies.code }).from(currencies).limit(1);
+  const existingCurrency = await tx
+    .select({ code: currencies.code })
+    .from(currencies)
+    .where(eq(currencies.companyId, effectiveCompanyId))
+    .limit(1);
   if (existingCurrency.length === 0) {
     await tx
       .insert(currencies)
-      .values({ code: "USD", name: "US Dollar", symbol: "$", decimals: 2, isBase: true, isActive: true })
+      .values({
+        companyId: effectiveCompanyId,
+        code: "USD",
+        name: "US Dollar",
+        symbol: "$",
+        decimals: 2,
+        isBase: true,
+        isActive: true,
+      })
       .onConflictDoNothing();
   }
 
   const nowYear = new Date().getUTCFullYear();
   for (const year of [nowYear, nowYear + 1]) {
-    await seedCalendarFiscalYear(tx, year);
+    await seedCalendarFiscalYear(tx, year, effectiveCompanyId);
   }
 }
 
-async function seedCalendarFiscalYear(tx: DbOrTx, year: number): Promise<void> {
-  const existing = await tx.select({ id: fiscalYears.id }).from(fiscalYears).where(eq(fiscalYears.name, `FY ${year}`)).limit(1);
+async function seedCalendarFiscalYear(
+  tx: DbOrTx,
+  year: number,
+  companyId: string = DEFAULT_COMPANY_ID
+): Promise<void> {
+  const effectiveCompanyId = companyId || DEFAULT_COMPANY_ID;
+  const existing = await tx
+    .select({ id: fiscalYears.id })
+    .from(fiscalYears)
+    .where(and(eq(fiscalYears.companyId, effectiveCompanyId), eq(fiscalYears.name, `FY ${year}`)))
+    .limit(1);
   if (existing.length > 0) return;
 
   const [fy] = await tx
     .insert(fiscalYears)
     .values({
+      companyId: effectiveCompanyId,
       name: `FY ${year}`,
       startDate: new Date(Date.UTC(year, 0, 1, 0, 0, 0)),
       endDate: new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999)),
@@ -118,6 +150,7 @@ async function seedCalendarFiscalYear(tx: DbOrTx, year: number): Promise<void> {
     const startDate = new Date(Date.UTC(year, m, 1, 0, 0, 0));
     const endDate = new Date(Date.UTC(year, m + 1, 0, 23, 59, 59, 999));
     periods.push({
+      companyId: effectiveCompanyId,
       fiscalYearId: fy.id,
       periodNumber: m + 1,
       name: `${year}-${String(m + 1).padStart(2, "0")}`,
@@ -240,7 +273,12 @@ export function validateAndNormalizeJournalLines(
   return { normalizedLines, totalDebit, totalCredit, pennyDiffPlugged };
 }
 
-export async function assertPeriodOpen(tx: DbOrTx, entryDate: Date): Promise<string | null> {
+export async function assertPeriodOpen(
+  tx: DbOrTx,
+  entryDate: Date,
+  companyId: string = DEFAULT_COMPANY_ID
+): Promise<string | null> {
+  const effectiveCompanyId = companyId || DEFAULT_COMPANY_ID;
   const periods = await tx
     .select({
       id: fiscalPeriods.id,
@@ -249,7 +287,13 @@ export async function assertPeriodOpen(tx: DbOrTx, entryDate: Date): Promise<str
       fiscalYearId: fiscalPeriods.fiscalYearId,
     })
     .from(fiscalPeriods)
-    .where(and(lte(fiscalPeriods.startDate, entryDate), gte(fiscalPeriods.endDate, entryDate)))
+    .where(
+      and(
+        eq(fiscalPeriods.companyId, effectiveCompanyId),
+        lte(fiscalPeriods.startDate, entryDate),
+        gte(fiscalPeriods.endDate, entryDate)
+      )
+    )
     .limit(1);
 
   const period = periods[0];
@@ -262,7 +306,7 @@ export async function assertPeriodOpen(tx: DbOrTx, entryDate: Date): Promise<str
   const [fy] = await tx
     .select({ name: fiscalYears.name, status: fiscalYears.status })
     .from(fiscalYears)
-    .where(eq(fiscalYears.id, period.fiscalYearId))
+    .where(and(eq(fiscalYears.id, period.fiscalYearId), eq(fiscalYears.companyId, effectiveCompanyId)))
     .limit(1);
   if (fy && fy.status === "closed") {
     throw new AppError(400, `Fiscal year '${fy.name}' is closed`, "FISCAL_YEAR_CLOSED");
@@ -271,11 +315,21 @@ export async function assertPeriodOpen(tx: DbOrTx, entryDate: Date): Promise<str
   return period.id;
 }
 
-export async function getGlAccountMap(tx: DbOrTx): Promise<Record<GlMappingKey, string>> {
-  let rows = await tx.select().from(glAccountMappings);
+export async function getGlAccountMap(
+  tx: DbOrTx,
+  companyId: string = DEFAULT_COMPANY_ID
+): Promise<Record<GlMappingKey, string>> {
+  const effectiveCompanyId = companyId || DEFAULT_COMPANY_ID;
+  let rows = await tx
+    .select()
+    .from(glAccountMappings)
+    .where(eq(glAccountMappings.companyId, effectiveCompanyId));
   if (rows.length === 0) {
-    await ensureAccountingDefaults(tx);
-    rows = await tx.select().from(glAccountMappings);
+    await ensureAccountingDefaults(tx, effectiveCompanyId);
+    rows = await tx
+      .select()
+      .from(glAccountMappings)
+      .where(eq(glAccountMappings.companyId, effectiveCompanyId));
   }
   const map = {} as Record<GlMappingKey, string>;
   for (const r of rows) {
@@ -285,6 +339,7 @@ export async function getGlAccountMap(tx: DbOrTx): Promise<Record<GlMappingKey, 
 }
 
 export interface PostJournalEntryInput {
+  companyId?: string;
   entryDate?: Date;
   branchId?: string | null;
   sourceType: string;
@@ -297,18 +352,49 @@ export interface PostJournalEntryInput {
 }
 
 export async function postJournalEntry(tx: DbOrTx, input: PostJournalEntryInput) {
+  const effectiveCompanyId = input.companyId || DEFAULT_COMPANY_ID;
   const entryDate = input.entryDate ?? new Date();
-  const glMap = await getGlAccountMap(tx);
-  const fiscalPeriodId = await assertPeriodOpen(tx, entryDate);
+  const glMap = await getGlAccountMap(tx, effectiveCompanyId);
+  const fiscalPeriodId = await assertPeriodOpen(tx, entryDate, effectiveCompanyId);
   const { normalizedLines } = validateAndNormalizeJournalLines(
     input.lines,
     input.allowRoundingPlug ? glMap.rounding_variance : undefined
   );
 
-  const entryNumber = await nextDocNumber(tx, "JE", "JE-");
+  // Verify every account belongs to effectiveCompanyId
+  const distinctAccountIds = Array.from(new Set(normalizedLines.map((l) => l.accountId)));
+  const companyAccounts = await tx
+    .select({ id: chartOfAccounts.id })
+    .from(chartOfAccounts)
+    .where(
+      and(
+        eq(chartOfAccounts.companyId, effectiveCompanyId),
+        inArray(chartOfAccounts.id, distinctAccountIds)
+      )
+    );
+  if (companyAccounts.length !== distinctAccountIds.length) {
+    throw new AppError(404, "One or more journal accounts were not found in the active company", "NOT_FOUND");
+  }
+
+  if (input.branchId) {
+    await assertBranchInCompany(tx, input.branchId, effectiveCompanyId);
+  }
+  const lineBranchIds = Array.from(
+    new Set(
+      normalizedLines
+        .map((l) => l.branchId)
+        .filter((b): b is string => Boolean(b) && b !== input.branchId)
+    )
+  );
+  for (const bId of lineBranchIds) {
+    await assertBranchInCompany(tx, bId, effectiveCompanyId);
+  }
+
+  const entryNumber = await nextDocNumber(tx, "JE", "JE-", undefined, effectiveCompanyId);
   const [je] = await tx
     .insert(journalEntries)
     .values({
+      companyId: effectiveCompanyId,
       entryNumber,
       entryDate,
       branchId: input.branchId ?? null,
@@ -358,7 +444,8 @@ export async function postMappedJournal(
   tx: DbOrTx,
   input: Omit<PostJournalEntryInput, "lines"> & { lines: MappedLineSpec[] }
 ) {
-  const glMap = await getGlAccountMap(tx);
+  const effectiveCompanyId = input.companyId || DEFAULT_COMPANY_ID;
+  const glMap = await getGlAccountMap(tx, effectiveCompanyId);
   const activeLines: JournalLineSpec[] = [];
   for (const l of input.lines) {
     const debit = roundCurrency(l.debit ?? 0, 4);
@@ -380,7 +467,12 @@ export async function postMappedJournal(
   }
 
   if (activeLines.length < 2) return null;
-  return postJournalEntry(tx, { ...input, allowRoundingPlug: true, lines: activeLines });
+  return postJournalEntry(tx, {
+    ...input,
+    companyId: effectiveCompanyId,
+    allowRoundingPlug: true,
+    lines: activeLines,
+  });
 }
 
 export async function reverseJournalEntriesForSource(
@@ -388,22 +480,41 @@ export async function reverseJournalEntriesForSource(
   sourceType: string,
   sourceId: string,
   actorId: string,
-  reason: string
+  reason: string,
+  companyId?: string
 ) {
+  const conds: SQL[] = [
+    eq(journalEntries.sourceType, sourceType),
+    eq(journalEntries.sourceId, sourceId),
+    eq(journalEntries.status, "posted"),
+  ];
+  if (companyId) {
+    conds.push(eq(journalEntries.companyId, companyId));
+  }
+
   const existing = await tx
     .select()
     .from(journalEntries)
-    .where(and(eq(journalEntries.sourceType, sourceType), eq(journalEntries.sourceId, sourceId), eq(journalEntries.status, "posted")));
+    .where(and(...conds));
 
   const reversals = [];
   for (const je of existing) {
-    reversals.push(await reverseSingleJournalEntry(tx, je.id, actorId, reason));
+    reversals.push(await reverseSingleJournalEntry(tx, je.id, actorId, reason, companyId ?? je.companyId));
   }
   return reversals;
 }
 
-export async function reverseSingleJournalEntry(tx: DbOrTx, entryId: string, actorId: string, reason: string) {
-  const [je] = await tx.select().from(journalEntries).where(eq(journalEntries.id, entryId)).limit(1);
+export async function reverseSingleJournalEntry(
+  tx: DbOrTx,
+  entryId: string,
+  actorId: string,
+  reason: string,
+  companyId?: string
+) {
+  const whereCond = companyId
+    ? and(eq(journalEntries.id, entryId), eq(journalEntries.companyId, companyId))
+    : eq(journalEntries.id, entryId);
+  const [je] = await tx.select().from(journalEntries).where(whereCond).limit(1);
   if (!je) throw new AppError(404, "Journal entry not found", "NOT_FOUND");
   if (je.status === "reversed") {
     throw new AppError(400, "Journal entry has already been reversed", "ALREADY_REVERSED");
@@ -411,6 +522,7 @@ export async function reverseSingleJournalEntry(tx: DbOrTx, entryId: string, act
 
   const lines = await tx.select().from(journalLines).where(eq(journalLines.entryId, entryId));
   const rev = await postJournalEntry(tx, {
+    companyId: je.companyId,
     entryDate: new Date(),
     branchId: je.branchId,
     sourceType: "reversal",
@@ -439,9 +551,21 @@ export async function reverseSingleJournalEntry(tx: DbOrTx, entryId: string, act
 
 // ---------------- CRUD & Admin Queries ----------------
 
-export async function listAccounts(db: AppDatabase) {
-  await ensureAccountingDefaults(db);
-  return db.select().from(chartOfAccounts).orderBy(asc(chartOfAccounts.code));
+function resolveCompanyId(actorOrCompanyId?: RequestActor | string): string {
+  if (typeof actorOrCompanyId === "string") {
+    return actorOrCompanyId || DEFAULT_COMPANY_ID;
+  }
+  return actorCompanyId(actorOrCompanyId);
+}
+
+export async function listAccounts(db: AppDatabase, actorOrCompanyId?: RequestActor | string) {
+  const companyId = resolveCompanyId(actorOrCompanyId);
+  await ensureAccountingDefaults(db, companyId);
+  return db
+    .select()
+    .from(chartOfAccounts)
+    .where(eq(chartOfAccounts.companyId, companyId))
+    .orderBy(asc(chartOfAccounts.code));
 }
 
 export async function createAccount(
@@ -450,17 +574,28 @@ export async function createAccount(
   data: z.infer<typeof createAccountSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const dup = await tx
       .select({ id: chartOfAccounts.id })
       .from(chartOfAccounts)
-      .where(eq(chartOfAccounts.code, data.code))
+      .where(and(eq(chartOfAccounts.companyId, companyId), eq(chartOfAccounts.code, data.code)))
       .limit(1);
     if (dup.length > 0) throw new AppError(409, `Account code '${data.code}' already exists`, "DUPLICATE_ACCOUNT_CODE");
+
+    if (data.parentId) {
+      const [parent] = await tx
+        .select({ id: chartOfAccounts.id })
+        .from(chartOfAccounts)
+        .where(and(eq(chartOfAccounts.id, data.parentId), eq(chartOfAccounts.companyId, companyId)))
+        .limit(1);
+      if (!parent) throw new AppError(404, "Parent account not found", "NOT_FOUND");
+    }
 
     const [row] = await tx
       .insert(chartOfAccounts)
       .values({
+        companyId,
         code: data.code,
         name: data.name,
         accountType: data.accountType,
@@ -473,6 +608,7 @@ export async function createAccount(
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -493,8 +629,13 @@ export async function updateAccount(
   data: Partial<z.infer<typeof createAccountSchema>>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [current] = await tx.select().from(chartOfAccounts).where(eq(chartOfAccounts.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(chartOfAccounts)
+      .where(and(eq(chartOfAccounts.id, id), eq(chartOfAccounts.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Account not found", "NOT_FOUND");
     const [row] = await tx
       .update(chartOfAccounts)
@@ -504,10 +645,11 @@ export async function updateAccount(
         ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
         updatedAt: new Date(),
       })
-      .where(eq(chartOfAccounts.id, id))
+      .where(and(eq(chartOfAccounts.id, id), eq(chartOfAccounts.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -521,9 +663,14 @@ export async function updateAccount(
   });
 }
 
-export async function listGlMappings(db: AppDatabase) {
-  await ensureAccountingDefaults(db);
-  return db.select().from(glAccountMappings).orderBy(asc(glAccountMappings.mappingKey));
+export async function listGlMappings(db: AppDatabase, actorOrCompanyId?: RequestActor | string) {
+  const companyId = resolveCompanyId(actorOrCompanyId);
+  await ensureAccountingDefaults(db, companyId);
+  return db
+    .select()
+    .from(glAccountMappings)
+    .where(eq(glAccountMappings.companyId, companyId))
+    .orderBy(asc(glAccountMappings.mappingKey));
 }
 
 export async function updateGlMapping(
@@ -533,19 +680,25 @@ export async function updateGlMapping(
   accountId: string,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [acct] = await tx.select().from(chartOfAccounts).where(eq(chartOfAccounts.id, accountId)).limit(1);
+    const [acct] = await tx
+      .select()
+      .from(chartOfAccounts)
+      .where(and(eq(chartOfAccounts.id, accountId), eq(chartOfAccounts.companyId, companyId)))
+      .limit(1);
     if (!acct) throw new AppError(404, "Referenced account not found", "NOT_FOUND");
 
     await tx
       .insert(glAccountMappings)
-      .values({ mappingKey, accountId, updatedAt: new Date() })
+      .values({ companyId, mappingKey, accountId, updatedAt: new Date() })
       .onConflictDoUpdate({
-        target: glAccountMappings.mappingKey,
+        target: [glAccountMappings.companyId, glAccountMappings.mappingKey],
         set: { accountId, updatedAt: new Date() },
       });
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -573,10 +726,11 @@ export async function listJournalEntries(
     pageSize?: string;
   }
 ) {
+  const companyId = actorCompanyId(actor);
   const page = Math.max(1, Number.parseInt(filters.page ?? "1", 10) || 1);
   const pageSize = Math.min(200, Math.max(1, Number.parseInt(filters.pageSize ?? "50", 10) || 50));
 
-  const conditions: SQL[] = [];
+  const conditions: SQL[] = [eq(journalEntries.companyId, companyId)];
   if (filters.branchId) {
     conditions.push(eq(journalEntries.branchId, filters.branchId));
   } else if (actor.role !== "admin" && actor.branchScopeMode === "selected") {
@@ -648,8 +802,10 @@ export async function createManualJournal(
   data: z.infer<typeof createJournalEntrySchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const je = await postJournalEntry(tx, {
+      companyId,
       entryDate: data.entryDate ? new Date(data.entryDate) : new Date(),
       branchId: data.branchId ?? null,
       sourceType: "manual",
@@ -660,6 +816,7 @@ export async function createManualJournal(
     });
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -674,10 +831,22 @@ export async function createManualJournal(
   });
 }
 
-export async function listFiscalYearsWithPeriods(db: AppDatabase) {
-  await ensureAccountingDefaults(db);
-  const years = await db.select().from(fiscalYears).orderBy(desc(fiscalYears.startDate));
-  const periods = await db.select().from(fiscalPeriods).orderBy(asc(fiscalPeriods.periodNumber));
+export async function listFiscalYearsWithPeriods(
+  db: AppDatabase,
+  actorOrCompanyId?: RequestActor | string
+) {
+  const companyId = resolveCompanyId(actorOrCompanyId);
+  await ensureAccountingDefaults(db, companyId);
+  const years = await db
+    .select()
+    .from(fiscalYears)
+    .where(eq(fiscalYears.companyId, companyId))
+    .orderBy(desc(fiscalYears.startDate));
+  const periods = await db
+    .select()
+    .from(fiscalPeriods)
+    .where(eq(fiscalPeriods.companyId, companyId))
+    .orderBy(asc(fiscalPeriods.periodNumber));
   const pMap = groupByKey(periods, (p) => p.fiscalYearId);
 
   return years.map((y) => ({
@@ -699,6 +868,7 @@ export async function createFiscalYear(
   data: z.infer<typeof createFiscalYearSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   const start = new Date(data.startDate);
   const end = new Date(data.endDate);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end) {
@@ -706,9 +876,18 @@ export async function createFiscalYear(
   }
 
   return db.transaction(async (tx) => {
+    const dup = await tx
+      .select({ id: fiscalYears.id })
+      .from(fiscalYears)
+      .where(and(eq(fiscalYears.companyId, companyId), eq(fiscalYears.name, data.name)))
+      .limit(1);
+    if (dup.length > 0) {
+      throw new AppError(409, `Fiscal year '${data.name}' already exists`, "DUPLICATE_FISCAL_YEAR");
+    }
+
     const [fy] = await tx
       .insert(fiscalYears)
-      .values({ name: data.name, startDate: start, endDate: end, status: "open" })
+      .values({ companyId, name: data.name, startDate: start, endDate: end, status: "open" })
       .returning();
 
     const periods: Array<typeof fiscalPeriods.$inferInsert> = [];
@@ -719,6 +898,7 @@ export async function createFiscalYear(
       const nextMonthEnd = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0, 23, 59, 59, 999));
       const pEnd = nextMonthEnd > end ? end : nextMonthEnd;
       periods.push({
+        companyId,
         fiscalYearId: fy.id,
         periodNumber: idx,
         name: `${cursor.getUTCFullYear()}-${String(cursor.getUTCMonth() + 1).padStart(2, "0")}`,
@@ -735,6 +915,7 @@ export async function createFiscalYear(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -755,8 +936,13 @@ export async function setFiscalPeriodLock(
   locked: boolean,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [current] = await tx.select().from(fiscalPeriods).where(eq(fiscalPeriods.id, periodId)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(fiscalPeriods)
+      .where(and(eq(fiscalPeriods.id, periodId), eq(fiscalPeriods.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Fiscal period not found", "NOT_FOUND");
 
     const [updated] = await tx
@@ -766,10 +952,11 @@ export async function setFiscalPeriodLock(
         lockedBy: locked ? actor.id : null,
         lockedAt: locked ? new Date() : null,
       })
-      .where(eq(fiscalPeriods.id, periodId))
+      .where(and(eq(fiscalPeriods.id, periodId), eq(fiscalPeriods.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

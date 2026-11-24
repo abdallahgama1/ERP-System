@@ -12,7 +12,13 @@ import { and, asc, desc, eq, gt, inArray, lt, or, sql, type AnyColumn, type SQL 
 import type { PgTable } from "drizzle-orm/pg-core";
 import { AppError } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
-import type { RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, type RequestActor } from "./stock-locks.ts";
+
+function tableCompanyCondition(table: PgTable, actor: RequestActor): SQL | null {
+  const companyCol = (table as unknown as Record<string, AnyColumn | undefined>).companyId;
+  if (!companyCol) return null;
+  return eq(companyCol, actorCompanyId(actor));
+}
 
 export function parseOffsetQueryOrThrow<
   TSchema extends z.ZodType<OffsetPageQuery, z.ZodTypeDef, unknown>,
@@ -43,19 +49,25 @@ export async function listBranchScoped<TTable extends PgTable>(
   actor: RequestActor,
   extraCondition?: SQL
 ) {
+  const companyCond = tableCompanyCondition(table, actor);
+  const baseConds: SQL[] = [];
+  if (companyCond) baseConds.push(companyCond);
+  if (extraCondition) baseConds.push(extraCondition);
+
   if (actor.role === "admin" || actor.branchScopeMode === "all") {
     return db
       .select()
       .from(table as PgTable)
-      .where(extraCondition)
+      .where(baseConds.length > 0 ? and(...baseConds) : undefined)
       .orderBy(desc(createdAtCol));
   }
   if (actor.branchIds.length === 0) return [];
   const scopeFilter = inArray(branchIdCol, actor.branchIds);
+  baseConds.push(scopeFilter);
   return db
     .select()
     .from(table as PgTable)
-    .where(extraCondition ? and(scopeFilter, extraCondition) : scopeFilter)
+    .where(and(...baseConds))
     .orderBy(desc(createdAtCol));
 }
 
@@ -121,6 +133,8 @@ export async function listBranchScopedPaginated<TTable extends PgTable>(
   }
 
   const conds: SQL[] = [];
+  const companyCond = tableCompanyCondition(table, actor);
+  if (companyCond) conds.push(companyCond);
   if (scopeCond) conds.push(scopeCond);
   if (options.extraConditions) conds.push(...options.extraConditions);
   const whereClause = conds.length > 0 ? and(...conds) : undefined;

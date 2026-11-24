@@ -31,8 +31,8 @@ import {
 import { Label } from "@/components/ui/label";
 import { ClipboardList, Plus, Search, Eye, Trash2, Calendar, User, Building2, Edit } from "lucide-react";
 import { Session, SessionStatus } from "@/types";
-import { useInventory } from "@/contexts/InventoryContext";
-import { useSessions } from "@/contexts/SessionsContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { useSessionsScope } from "@/hooks/queries/useSessionsScope";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useToast } from "@/hooks/use-toast";
@@ -47,8 +47,8 @@ const EDITABLE_STATUS_OPTIONS: Array<"Active" | "In Progress" | "Cancelled"> = [
 
 const Sessions = () => {
   const { t } = useTranslation();
-  const { branches } = useInventory();
-  const { sessions, getSessionItems, createSession, updateSession, deleteSession } = useSessions();
+  const { branches } = useInventoryScope();
+  const { sessions, getSessionItems, createSession, updateSession, deleteSession } = useSessionsScope({ includeProducts: true });
   const { user } = useAuth();
   const { role } = usePermissions();
   const [searchTerm, setSearchTerm] = useState("");

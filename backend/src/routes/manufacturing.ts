@@ -20,19 +20,20 @@ import {
   listWorkOrders,
   updateBom,
 } from "../services/manufacturing.service.ts";
-import { parseOrThrow } from "../services/stock-locks.ts";
+import { actorCompanyId, parseOrThrow } from "../services/stock-locks.ts";
 
 export async function manufacturingRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/api/manufacturing/boms", { preHandler: requirePermission("inventory", "view") }, async () => {
-    const boms = await listBoms(getDb());
+  app.get("/api/manufacturing/boms", { preHandler: requirePermission("inventory", "view") }, async (req) => {
+    const boms = await listBoms(getDb(), req.authUser!);
     return { boms };
   });
 
   app.post("/api/manufacturing/boms", { preHandler: requirePermission("inventory", "create") }, async (req, reply) => {
     const data = parseOrThrow(createBomSchema, req.body);
     const bom = await createBom(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("manufacturing_updated", { bomId: bom.id });
-    eventBroadcaster.broadcast("inventory_updated", { productId: bom.productId });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("manufacturing_updated", { bomId: bom.id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { productId: bom.productId }, companyId);
     return reply.status(201).send({ bom });
   });
 
@@ -40,7 +41,7 @@ export async function manufacturingRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const data = parseOrThrow(updateBomSchema, req.body);
     const bom = await updateBom(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("manufacturing_updated", { bomId: bom.id });
+    eventBroadcaster.broadcast("manufacturing_updated", { bomId: bom.id }, actorCompanyId(req.authUser!));
     return { bom };
   });
 
@@ -52,7 +53,7 @@ export async function manufacturingRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/manufacturing/work-orders", { preHandler: requirePermission("inventory", "create") }, async (req, reply) => {
     const data = parseOrThrow(createWorkOrderSchema, req.body);
     const workOrder = await createWorkOrder(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("manufacturing_updated", { workOrderId: workOrder.id });
+    eventBroadcaster.broadcast("manufacturing_updated", { workOrderId: workOrder.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ workOrder });
   });
 
@@ -60,10 +61,11 @@ export async function manufacturingRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const data = parseOrThrow(issueWorkOrderSchema, req.body ?? {});
     const workOrder = await issueWorkOrderMaterials(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("manufacturing_updated", { workOrderId: id });
-    eventBroadcaster.broadcast("inventory_updated", { workOrderId: id });
-    eventBroadcaster.broadcast("tracking_updated", { workOrderId: id });
-    eventBroadcaster.broadcast("accounting_updated", { workOrderId: id });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("manufacturing_updated", { workOrderId: id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { workOrderId: id }, companyId);
+    eventBroadcaster.broadcast("tracking_updated", { workOrderId: id }, companyId);
+    eventBroadcaster.broadcast("accounting_updated", { workOrderId: id }, companyId);
     return { workOrder };
   });
 
@@ -71,10 +73,11 @@ export async function manufacturingRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const data = parseOrThrow(completeWorkOrderSchema, req.body);
     const workOrder = await completeWorkOrder(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("manufacturing_updated", { workOrderId: id });
-    eventBroadcaster.broadcast("inventory_updated", { workOrderId: id });
-    eventBroadcaster.broadcast("tracking_updated", { workOrderId: id });
-    eventBroadcaster.broadcast("accounting_updated", { workOrderId: id });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("manufacturing_updated", { workOrderId: id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { workOrderId: id }, companyId);
+    eventBroadcaster.broadcast("tracking_updated", { workOrderId: id }, companyId);
+    eventBroadcaster.broadcast("accounting_updated", { workOrderId: id }, companyId);
     return { workOrder };
   });
 
@@ -82,9 +85,10 @@ export async function manufacturingRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const data = parseOrThrow(cancelWorkOrderSchema, req.body ?? {});
     const workOrder = await cancelWorkOrder(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("manufacturing_updated", { workOrderId: id });
-    eventBroadcaster.broadcast("inventory_updated", { workOrderId: id });
-    eventBroadcaster.broadcast("accounting_updated", { workOrderId: id });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("manufacturing_updated", { workOrderId: id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { workOrderId: id }, companyId);
+    eventBroadcaster.broadcast("accounting_updated", { workOrderId: id }, companyId);
     return { workOrder };
   });
 }

@@ -125,11 +125,11 @@ const taxonomyItems = [
   { titleKey: "nav.taxonomy.units", url: "/units-of-measure", icon: Ruler },
 ];
 
-const adminItems = [
-  { titleKey: "nav.admin.approvals", url: "/approvals", icon: ClipboardCheck },
-  { titleKey: "nav.admin.einvoicing", url: "/admin/einvoicing", icon: Receipt },
-  { titleKey: "nav.admin.auditLog", url: "/audit-log", icon: History },
-  { titleKey: "nav.admin.roles", url: "/roles", icon: Shield },
+const adminItems: Array<{ titleKey: string; url: string; icon: typeof Shield; module?: PermissionModule }> = [
+  { titleKey: "nav.admin.approvals", url: "/approvals", icon: ClipboardCheck, module: "approvals" },
+  { titleKey: "nav.admin.einvoicing", url: "/admin/einvoicing", icon: Receipt, module: "einvoicing" },
+  { titleKey: "nav.admin.auditLog", url: "/audit-log", icon: History, module: "audit" },
+  { titleKey: "nav.admin.roles", url: "/roles", icon: Shield, module: "roles" },
   { titleKey: "nav.admin.notifications", url: "/notifications", icon: Bell },
   { titleKey: "nav.admin.help", url: "/help", icon: HelpCircle },
 ];
@@ -189,7 +189,8 @@ export function AppSidebar() {
   const isAccountingActive = accountingItems.some(item => currentPath.startsWith(item.url));
   const isReportsActive = reportsItems.some(item => currentPath.startsWith(item.url));
   const isTaxonomyActive = taxonomyItems.some(item => currentPath.startsWith(item.url));
-  const isAdminActive = adminItems.some(item => currentPath.startsWith(item.url));
+  const visibleAdminItems = adminItems.filter((item) => !item.module || can(item.module, "view"));
+  const isAdminActive = visibleAdminItems.some(item => currentPath.startsWith(item.url));
 
   const renderGroup = (
     items: typeof salesItems,
@@ -361,11 +362,11 @@ export function AppSidebar() {
 
               {/* Bottom items (Users) */}
               {can("inventory", "view") && renderGroup(inventoryOpsItems, "nav.inventoryOps.title", ArrowRightLeft, inventoryOpsOpen, setInventoryOpsOpen, isInventoryOpsActive)}
-              {can("inventory", "view") && renderGroup(manufacturingItems, "nav.manufacturing.title", Factory, manufacturingOpen, setManufacturingOpen, manufacturingItems.some(item => currentPath.startsWith(item.url)))}
+              {can("manufacturing", "view") && renderGroup(manufacturingItems, "nav.manufacturing.title", Factory, manufacturingOpen, setManufacturingOpen, manufacturingItems.some(item => currentPath.startsWith(item.url)))}
               {can("accounting", "view") && renderGroup(accountingItems, "nav.accounting.title", Scale, accountingOpen, setAccountingOpen, isAccountingActive)}
               {can("reports", "view") && renderGroup(reportsItems, "nav.reports.title", BarChart3, reportsOpen, setReportsOpen, isReportsActive)}
               {can("taxonomy", "view") && renderGroup(taxonomyItems, "nav.taxonomy.title", FolderTree, taxonomyOpen, setTaxonomyOpen, isTaxonomyActive)}
-              {renderGroup(adminItems, "nav.admin.title", Shield, adminOpen, setAdminOpen, isAdminActive)}
+              {visibleAdminItems.length > 0 && renderGroup(visibleAdminItems, "nav.admin.title", Shield, adminOpen, setAdminOpen, isAdminActive)}
 
               {bottomItems
                 .filter((item) => !item.module || can(item.module, "view"))

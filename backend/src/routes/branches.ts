@@ -4,7 +4,9 @@ import { branchInputSchema, updateBranchSchema } from "@erp/shared";
 import {
   branches,
   branchProducts,
+  companies,
   companySettings,
+  DEFAULT_COMPANY_ID,
   purchaseOrders,
   salesOrders,
   stockMovements,
@@ -16,11 +18,13 @@ import { AppError, nextDocNumber, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
 import { assertBranchAccess, requireAuth, requirePermission } from "../middleware/auth.ts";
+import { actorCompanyId } from "../services/stock-locks.ts";
 
 export async function branchRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/branches", { preHandler: requireAuth }, async (req) => {
     const query = req.query as { scope?: string };
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
 
     if (query.scope === "directory") {
@@ -36,12 +40,16 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
             isActive: branches.isActive,
           })
           .from(branches)
-          .where(eq(branches.isActive, true))
+          .where(and(eq(branches.companyId, companyId), eq(branches.isActive, true)))
           .orderBy(asc(branches.createdAt));
 
       let list = await fetchDirectory();
-      if (list.length === 0) {
-        const anyBranch = await db.select({ id: branches.id }).from(branches).limit(1);
+      if (list.length === 0 && companyId === DEFAULT_COMPANY_ID) {
+        const anyBranch = await db
+          .select({ id: branches.id })
+          .from(branches)
+          .where(eq(branches.companyId, companyId))
+          .limit(1);
         if (anyBranch.length === 0) {
           await ensureSeededDefaults(db);
           list = await fetchDirectory();
@@ -51,10 +59,18 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
     }
 
     if (actor.role === "admin" || actor.branchScopeMode === "all") {
-      let list = await db.select().from(branches).orderBy(asc(branches.createdAt));
-      if (list.length === 0) {
+      let list = await db
+        .select()
+        .from(branches)
+        .where(eq(branches.companyId, companyId))
+        .orderBy(asc(branches.createdAt));
+      if (list.length === 0 && companyId === DEFAULT_COMPANY_ID) {
         await ensureSeededDefaults(db);
-        list = await db.select().from(branches).orderBy(asc(branches.createdAt));
+        list = await db
+          .select()
+          .from(branches)
+          .where(eq(branches.companyId, companyId))
+          .orderBy(asc(branches.createdAt));
       }
       return { branches: list };
     }
@@ -66,7 +82,7 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
     const list = await db
       .select()
       .from(branches)
-      .where(inArray(branches.id, actor.branchIds))
+      .where(and(eq(branches.companyId, companyId), inArray(branches.id, actor.branchIds)))
       .orderBy(asc(branches.createdAt));
 
     return { branches: list };
@@ -79,24 +95,35 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
 
     const created = await db.transaction(async (tx) => {
-      await ensureSeededDefaults(tx);
-      const code = parsed.data.code || (await nextDocNumber(tx, "BR", "BR-"));
+      if (companyId === DEFAULT_COMPANY_ID) {
+        await ensureSeededDefaults(tx);
+      }
+      const code = parsed.data.code || (await nextDocNumber(tx, "BR", "BR-", null, companyId));
 
-      const existing = await tx.select({ id: branches.id }).from(branches).where(eq(branches.code, code)).limit(1);
+      const existing = await tx
+        .select({ id: branches.id })
+        .from(branches)
+        .where(and(eq(branches.companyId, companyId), eq(branches.code, code)))
+        .limit(1);
       if (existing.length > 0) {
         throw new AppError(409, `Branch code '${code}' already exists`, "DUPLICATE_CODE");
       }
 
       if (parsed.data.isDefault) {
-        await tx.update(branches).set({ isDefault: false, updatedAt: new Date() }).where(eq(branches.isDefault, true));
+        await tx
+          .update(branches)
+          .set({ isDefault: false, updatedAt: new Date() })
+          .where(and(eq(branches.companyId, companyId), eq(branches.isDefault, true)));
       }
 
       const [row] = await tx
         .insert(branches)
         .values({
+          companyId,
           code,
           name: parsed.data.name,
           branchType: parsed.data.branchType,
@@ -112,12 +139,19 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
 
       if (row.isDefault) {
         await tx
-          .update(companySettings)
+          .update(companies)
           .set({ defaultBranchId: row.id, updatedAt: new Date() })
-          .where(eq(companySettings.id, 1));
+          .where(eq(companies.id, companyId));
+        if (companyId === DEFAULT_COMPANY_ID) {
+          await tx
+            .update(companySettings)
+            .set({ defaultBranchId: row.id, updatedAt: new Date() })
+            .where(eq(companySettings.id, 1));
+        }
       }
 
       await writeAuditLog(tx, {
+        companyId,
         userId: actor.id,
         userName: actor.name,
         userRole: actor.role,
@@ -133,7 +167,7 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       return row;
     });
 
-    eventBroadcaster.broadcast("branches_updated", { branchId: created.id });
+    eventBroadcaster.broadcast("branches_updated", { branchId: created.id }, companyId);
     return reply.status(201).send({ branch: created });
   });
 
@@ -145,11 +179,16 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     assertBranchAccess(actor, branchId);
     const db = getDb();
 
     const updated = await db.transaction(async (tx) => {
-      const [current] = await tx.select().from(branches).where(eq(branches.id, branchId)).limit(1);
+      const [current] = await tx
+        .select()
+        .from(branches)
+        .where(and(eq(branches.id, branchId), eq(branches.companyId, companyId)))
+        .limit(1);
       if (!current) {
         throw new AppError(404, "Branch not found", "NOT_FOUND");
       }
@@ -158,7 +197,7 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
         const dup = await tx
           .select({ id: branches.id })
           .from(branches)
-          .where(eq(branches.code, parsed.data.code))
+          .where(and(eq(branches.companyId, companyId), eq(branches.code, parsed.data.code)))
           .limit(1);
         if (dup.length > 0) {
           throw new AppError(409, `Branch code '${parsed.data.code}' is already in use`, "DUPLICATE_CODE");
@@ -166,7 +205,10 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       }
 
       if (parsed.data.isDefault === true) {
-        await tx.update(branches).set({ isDefault: false, updatedAt: new Date() }).where(eq(branches.isDefault, true));
+        await tx
+          .update(branches)
+          .set({ isDefault: false, updatedAt: new Date() })
+          .where(and(eq(branches.companyId, companyId), eq(branches.isDefault, true)));
       }
 
       const [row] = await tx
@@ -184,17 +226,24 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
           isActive: parsed.data.isActive ?? current.isActive,
           updatedAt: new Date(),
         })
-        .where(eq(branches.id, branchId))
+        .where(and(eq(branches.id, branchId), eq(branches.companyId, companyId)))
         .returning();
 
       if (row.isDefault) {
         await tx
-          .update(companySettings)
+          .update(companies)
           .set({ defaultBranchId: row.id, updatedAt: new Date() })
-          .where(eq(companySettings.id, 1));
+          .where(eq(companies.id, companyId));
+        if (companyId === DEFAULT_COMPANY_ID) {
+          await tx
+            .update(companySettings)
+            .set({ defaultBranchId: row.id, updatedAt: new Date() })
+            .where(eq(companySettings.id, 1));
+        }
       }
 
       await writeAuditLog(tx, {
+        companyId,
         userId: actor.id,
         userName: actor.name,
         userRole: actor.role,
@@ -209,18 +258,23 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       return row;
     });
 
-    eventBroadcaster.broadcast("branches_updated", { branchId: updated.id });
+    eventBroadcaster.broadcast("branches_updated", { branchId: updated.id }, companyId);
     return { branch: updated };
   });
 
   app.delete("/api/branches/:id", { preHandler: requirePermission("branches", "delete") }, async (req) => {
     const branchId = (req.params as { id: string }).id;
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     assertBranchAccess(actor, branchId);
     const db = getDb();
 
     await db.transaction(async (tx) => {
-      const [current] = await tx.select().from(branches).where(eq(branches.id, branchId)).limit(1);
+      const [current] = await tx
+        .select()
+        .from(branches)
+        .where(and(eq(branches.id, branchId), eq(branches.companyId, companyId)))
+        .limit(1);
       if (!current) {
         throw new AppError(404, "Branch not found", "NOT_FOUND");
       }
@@ -231,32 +285,43 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       const [{ stockCount }] = await tx
         .select({ stockCount: sql<number>`count(*)::int` })
         .from(branchProducts)
-        .where(and(eq(branchProducts.branchId, branchId), sql`${branchProducts.qtyOnHand} <> 0`));
+        .where(
+          and(
+            eq(branchProducts.companyId, companyId),
+            eq(branchProducts.branchId, branchId),
+            sql`${branchProducts.qtyOnHand} <> 0`
+          )
+        );
 
       const [{ moveCount }] = await tx
         .select({ moveCount: sql<number>`count(*)::int` })
         .from(stockMovements)
-        .where(eq(stockMovements.branchId, branchId));
+        .where(and(eq(stockMovements.companyId, companyId), eq(stockMovements.branchId, branchId)));
 
       const [{ sessCount }] = await tx
         .select({ sessCount: sql<number>`count(*)::int` })
         .from(stockSessions)
-        .where(eq(stockSessions.branchId, branchId));
+        .where(and(eq(stockSessions.companyId, companyId), eq(stockSessions.branchId, branchId)));
 
       const [{ poCount }] = await tx
         .select({ poCount: sql<number>`count(*)::int` })
         .from(purchaseOrders)
-        .where(eq(purchaseOrders.branchId, branchId));
+        .where(and(eq(purchaseOrders.companyId, companyId), eq(purchaseOrders.branchId, branchId)));
 
       const [{ soCount }] = await tx
         .select({ soCount: sql<number>`count(*)::int` })
         .from(salesOrders)
-        .where(eq(salesOrders.branchId, branchId));
+        .where(and(eq(salesOrders.companyId, companyId), eq(salesOrders.branchId, branchId)));
 
       const [{ trCount }] = await tx
         .select({ trCount: sql<number>`count(*)::int` })
         .from(stockTransfers)
-        .where(or(eq(stockTransfers.fromBranchId, branchId), eq(stockTransfers.toBranchId, branchId)));
+        .where(
+          and(
+            eq(stockTransfers.companyId, companyId),
+            or(eq(stockTransfers.fromBranchId, branchId), eq(stockTransfers.toBranchId, branchId))
+          )
+        );
 
       if (stockCount > 0 || moveCount > 0 || sessCount > 0 || poCount > 0 || soCount > 0 || trCount > 0) {
         throw new AppError(
@@ -266,9 +331,10 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
         );
       }
 
-      await tx.delete(branches).where(eq(branches.id, branchId));
+      await tx.delete(branches).where(and(eq(branches.id, branchId), eq(branches.companyId, companyId)));
 
       await writeAuditLog(tx, {
+        companyId,
         userId: actor.id,
         userName: actor.name,
         userRole: actor.role,
@@ -280,7 +346,7 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       });
     });
 
-    eventBroadcaster.broadcast("branches_updated", { branchId });
+    eventBroadcaster.broadcast("branches_updated", { branchId }, companyId);
     return { ok: true };
   });
 }

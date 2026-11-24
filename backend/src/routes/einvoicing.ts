@@ -10,7 +10,7 @@ import {
   processPendingEtaSubmissions,
   retryEinvoiceSubmissions,
 } from "../services/einvoicing.service.ts";
-import { parseOrThrow } from "../services/stock-locks.ts";
+import { actorCompanyId, parseOrThrow } from "../services/stock-locks.ts";
 
 export async function einvoicingRoutes(app: FastifyInstance): Promise<void> {
   const requireAdminOrManager = requireRole("admin", "manager");
@@ -64,7 +64,7 @@ export async function einvoicingRoutes(app: FastifyInstance): Promise<void> {
         "Invalid E-Invoice retry payload"
       );
       const result = await retryEinvoiceSubmissions(req.authUser!, parsed, getDb());
-      eventBroadcaster.broadcast("einvoicing_updated", { submissionId: id });
+      eventBroadcaster.broadcast("einvoicing_updated", { submissionId: id }, actorCompanyId(req.authUser!));
       return result;
     }
   );
@@ -79,7 +79,7 @@ export async function einvoicingRoutes(app: FastifyInstance): Promise<void> {
         "Invalid E-Invoice retry payload"
       );
       const result = await retryEinvoiceSubmissions(req.authUser!, parsed, getDb());
-      eventBroadcaster.broadcast("einvoicing_updated", { queued: result.queued });
+      eventBroadcaster.broadcast("einvoicing_updated", { queued: result.queued }, actorCompanyId(req.authUser!));
       return result;
     }
   );
@@ -87,10 +87,11 @@ export async function einvoicingRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     "/api/einvoicing/submissions/process-now",
     { preHandler: requireAdminOrManager },
-    async () => {
-      const result = await processPendingEtaSubmissions({ limit: 25, db: getDb() });
+    async (req) => {
+      const companyId = actorCompanyId(req.authUser!);
+      const result = await processPendingEtaSubmissions({ limit: 25, companyId, db: getDb() });
       if (result.processed > 0) {
-        eventBroadcaster.broadcast("einvoicing_updated", { processed: result.processed });
+        eventBroadcaster.broadcast("einvoicing_updated", { processed: result.processed }, companyId);
       }
       return result;
     }

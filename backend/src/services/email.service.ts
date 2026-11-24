@@ -4,26 +4,53 @@ import { createModuleLogger } from "../logging/logger.ts";
 
 const log = createModuleLogger("email");
 
+export interface EmailAttachmentInput {
+  filename: string;
+  content: Buffer | string;
+  contentType?: string;
+}
+
 export interface SendEmailInput {
   to: string | string[];
+  cc?: string | string[];
   subject: string;
   text: string;
   html?: string;
+  attachments?: EmailAttachmentInput[];
 }
 
 export interface SendEmailResult {
   sent: boolean;
+  messageId?: string;
   skippedReason?: string;
 }
 
-let cachedTransporter: Transporter | null = null;
-
-export function isEmailConfigured(): boolean {
-  return Boolean(env.SMTP_HOST);
+export interface EmailTransportLike {
+  sendMail(mailOptions: {
+    from: string;
+    to: string;
+    cc?: string;
+    subject: string;
+    text: string;
+    html?: string;
+    attachments?: EmailAttachmentInput[];
+  }): Promise<{ messageId?: string } | void>;
 }
 
-function getTransporter(): Transporter | null {
-  if (!isEmailConfigured()) return null;
+let cachedTransporter: Transporter | null = null;
+let testTransportOverride: EmailTransportLike | null = null;
+
+export function setEmailTransportForTests(transport: EmailTransportLike | null): void {
+  testTransportOverride = transport;
+}
+
+export function isEmailConfigured(): boolean {
+  return Boolean(testTransportOverride || env.SMTP_HOST);
+}
+
+function getTransporter(): EmailTransportLike | null {
+  if (testTransportOverride) return testTransportOverride;
+  if (!env.SMTP_HOST) return null;
   if (!cachedTransporter) {
     cachedTransporter = nodemailer.createTransport({
       host: env.SMTP_HOST,
@@ -46,12 +73,15 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
   const recipients = (Array.isArray(input.to) ? input.to : [input.to])
     .map((e) => e.trim())
     .filter(Boolean);
+  const ccRecipients = (input.cc ? (Array.isArray(input.cc) ? input.cc : [input.cc]) : [])
+    .map((e) => e.trim())
+    .filter(Boolean);
 
   if (recipients.length === 0) {
     return { sent: false, skippedReason: "no_recipients" };
   }
 
-  if (env.NODE_ENV === "test") {
+  if (!testTransportOverride && env.NODE_ENV === "test") {
     return { sent: false, skippedReason: "test_environment" };
   }
 
@@ -61,14 +91,20 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
   }
 
   try {
-    await transporter.sendMail({
+    const info = await transporter.sendMail({
       from: env.SMTP_FROM,
       to: recipients.join(", "),
+      ...(ccRecipients.length > 0 ? { cc: ccRecipients.join(", ") } : {}),
       subject: input.subject,
       text: input.text,
       html: input.html,
+      ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
     });
-    return { sent: true };
+    const messageId =
+      info && typeof info === "object" && "messageId" in info && typeof info.messageId === "string"
+        ? info.messageId
+        : undefined;
+    return { sent: true, messageId };
   } catch (err) {
     log.warn({ err }, "Failed to send SMTP email");
     return { sent: false, skippedReason: "smtp_error" };

@@ -25,8 +25,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { useInventory } from "@/contexts/InventoryContext";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import type { PurchaseOrder, PurchaseOrderItem, Branch } from "@/types";
 
 interface ReceiveLineItem extends PurchaseOrderItem {
@@ -42,8 +42,8 @@ const PurchaseReceiveForm = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { toast } = useToast();
-  const { branches, products } = useInventory();
-  const { purchaseOrders, addReceive, nextReceiveNumber } = usePurchases();
+  const { branches, products } = useInventoryScope({ products: true });
+  const { purchaseOrders, addReceive, nextReceiveNumber } = usePurchasingScope({ purchaseOrders: true, receives: true, vendors: true, products: true });
   const productById = useMemo(() => new Map(products.map((p) => [p.productId, p])), [products]);
 
   const poId = searchParams.get("poId");

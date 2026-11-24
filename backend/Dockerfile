@@ -31,6 +31,8 @@ RUN npm ci --omit=dev --workspace=@erp/shared --workspace=erp-backend --include-
 COPY --from=builder --chown=node:node /app/backend/dist ./backend/dist
 COPY --from=builder --chown=node:node /app/backend/drizzle/migrations ./backend/drizzle/migrations
 
+RUN mkdir -p /app/uploads && chown -R node:node /app/uploads
+
 USER node
 
 ENV NODE_ENV=production \

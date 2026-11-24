@@ -21,19 +21,42 @@ import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { receiveTrackedStock, resolveProductTrackingMode } from "./lots-serials.service.ts";
 import { parseOffsetQueryOrThrow } from "./query-helpers.ts";
-import { computeWmac, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  assertBranchInCompany,
+  computeWmac,
+  lockBranchProduct,
+  type RequestActor,
+} from "./stock-locks.ts";
+
+function productAuditSnapshot(p: typeof products.$inferSelect): Record<string, unknown> {
+  return {
+    id: p.id,
+    sku: p.sku,
+    name: p.name,
+    category: p.category,
+    brand: p.brand,
+    unit: p.unit,
+    costPrice: num(p.costPrice),
+    sellingPrice: num(p.sellingPrice),
+    minStockLevel: num(p.minStockLevel),
+    isActive: p.isActive,
+  };
+}
 
 export async function listProducts(
   db: AppDatabase,
   actor: RequestActor,
   rawQuery?: Record<string, unknown>
 ) {
+  const companyId = actorCompanyId(actor);
   const query = parseOffsetQueryOrThrow(productsListQuerySchema, rawQuery);
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
+    await assertBranchInCompany(db, query.branchId, companyId);
   }
 
-  const conds: SQL[] = [];
+  const conds: SQL[] = [eq(products.companyId, companyId)];
   if (query.category) {
     conds.push(eq(products.category, query.category));
   }
@@ -56,7 +79,7 @@ export async function listProducts(
       )!
     );
   }
-  const whereClause = conds.length > 0 ? and(...conds) : undefined;
+  const whereClause = and(...conds);
 
   const [{ total }] = await db
     .select({ total: sql<number>`count(*)::int` })
@@ -85,9 +108,12 @@ export async function listProducts(
 
   let bpRows: Array<typeof branchProducts.$inferSelect> = [];
   if (actor.role === "admin" || actor.branchScopeMode === "all") {
-    bpRows = await db.select().from(branchProducts);
+    bpRows = await db.select().from(branchProducts).where(eq(branchProducts.companyId, companyId));
   } else if (actor.branchIds.length > 0) {
-    bpRows = await db.select().from(branchProducts).where(inArray(branchProducts.branchId, actor.branchIds));
+    bpRows = await db
+      .select()
+      .from(branchProducts)
+      .where(and(eq(branchProducts.companyId, companyId), inArray(branchProducts.branchId, actor.branchIds)));
   }
 
   const totalQtyByProduct = new Map<string, number>();
@@ -98,7 +124,10 @@ export async function listProducts(
   const prodMap = new Map(prodRows.map((p) => [p.id, p]));
   const missingBpProdIds = [...new Set(bpRows.map((bp) => bp.productId).filter((id) => !prodMap.has(id)))];
   if (missingBpProdIds.length > 0) {
-    const extraProds = await db.select().from(products).where(inArray(products.id, missingBpProdIds));
+    const extraProds = await db
+      .select()
+      .from(products)
+      .where(and(eq(products.companyId, companyId), inArray(products.id, missingBpProdIds)));
     for (const ep of extraProds) {
       prodMap.set(ep.id, ep);
     }
@@ -155,18 +184,85 @@ export async function listProducts(
   };
 }
 
+export async function getProductById(db: AppDatabase, actor: RequestActor, id: string) {
+  const companyId = actorCompanyId(actor);
+  const [p] = await db
+    .select()
+    .from(products)
+    .where(and(eq(products.id, id), eq(products.companyId, companyId)))
+    .limit(1);
+  if (!p) throw new AppError(404, "Product not found", "NOT_FOUND");
+
+  let bpRows: Array<typeof branchProducts.$inferSelect> = [];
+  if (actor.role === "admin" || actor.branchScopeMode === "all") {
+    bpRows = await db
+      .select()
+      .from(branchProducts)
+      .where(and(eq(branchProducts.companyId, companyId), eq(branchProducts.productId, id)));
+  } else if (actor.branchIds.length > 0) {
+    bpRows = await db
+      .select()
+      .from(branchProducts)
+      .where(
+        and(
+          eq(branchProducts.companyId, companyId),
+          eq(branchProducts.productId, id),
+          inArray(branchProducts.branchId, actor.branchIds)
+        )
+      );
+  }
+
+  const totalQuantity = bpRows.reduce((sum, bp) => sum + num(bp.qtyOnHand), 0);
+
+  return {
+    id: p.id,
+    sku: p.sku,
+    barcode: p.barcode,
+    name: p.name,
+    nameAr: p.nameAr,
+    description: p.description,
+    category: p.category,
+    brand: p.brand,
+    unit: p.unit,
+    tags: p.tags,
+    costPrice: num(p.costPrice),
+    sellingPrice: num(p.sellingPrice),
+    minStockLevel: num(p.minStockLevel),
+    itemType: p.itemType,
+    trackingMode: resolveProductTrackingMode(p),
+    requiresExpiry: p.requiresExpiry,
+    shelfLifeDays: p.shelfLifeDays,
+    pickingStrategy: p.pickingStrategy,
+    trackLots: p.trackLots,
+    trackSerials: p.trackSerials,
+    hasBom: p.hasBom,
+    isActive: p.isActive,
+    totalQuantity,
+    createdAt: p.createdAt.toISOString(),
+  };
+}
+
 export async function createProduct(
   db: AppDatabase,
   actor: RequestActor,
   data: z.infer<typeof createProductSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   for (const init of data.initialStock) {
     assertBranchAccess(actor, init.branchId);
   }
 
   const created = await db.transaction(async (tx) => {
-    const dup = await tx.select({ id: products.id }).from(products).where(eq(products.sku, data.sku)).limit(1);
+    for (const init of data.initialStock) {
+      await assertBranchInCompany(tx, init.branchId, companyId);
+    }
+
+    const dup = await tx
+      .select({ id: products.id })
+      .from(products)
+      .where(and(eq(products.companyId, companyId), eq(products.sku, data.sku)))
+      .limit(1);
     if (dup.length > 0) {
       throw new AppError(409, `SKU '${data.sku}' already exists`, "DUPLICATE_SKU");
     }
@@ -180,6 +276,7 @@ export async function createProduct(
     const [prod] = await tx
       .insert(products)
       .values({
+        companyId,
         sku: data.sku,
         barcode: data.barcode ?? null,
         name: data.name,
@@ -210,6 +307,7 @@ export async function createProduct(
       await tx
         .insert(branchProducts)
         .values({
+          companyId,
           branchId: init.branchId,
           productId: prod.id,
           qtyOnHand: toNumeric(init.quantity, 4),
@@ -227,6 +325,7 @@ export async function createProduct(
       const [mov] = await tx
         .insert(stockMovements)
         .values({
+          companyId,
           branchId: init.branchId,
           productId: prod.id,
           movementType: "opening_balance",
@@ -243,6 +342,7 @@ export async function createProduct(
         .returning({ id: stockMovements.id });
 
       await receiveTrackedStock(tx, {
+        companyId,
         product: prod,
         branchId: init.branchId,
         quantity: init.quantity,
@@ -259,6 +359,7 @@ export async function createProduct(
       const openingVal = Math.round((init.quantity * unitCost + Number.EPSILON) * 10000) / 10000;
       if (openingVal > 0) {
         await postMappedJournal(tx, {
+          companyId,
           branchId: init.branchId,
           sourceType: "product_opening",
           sourceId: prod.id,
@@ -275,6 +376,7 @@ export async function createProduct(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -283,6 +385,8 @@ export async function createProduct(
       entityId: prod.id,
       entityLabel: `${prod.name} (${prod.sku})`,
       details: { sku: prod.sku, initialTotalQty: totalQuantity },
+      before: null,
+      after: productAuditSnapshot(prod),
       ipAddress,
     });
 
@@ -324,12 +428,21 @@ export async function updateProduct(
   data: z.infer<typeof updateProductSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   const updated = await db.transaction(async (tx) => {
-    const [current] = await tx.select().from(products).where(eq(products.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(products)
+      .where(and(eq(products.id, id), eq(products.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Product not found", "NOT_FOUND");
 
     if (data.sku && data.sku !== current.sku) {
-      const dup = await tx.select({ id: products.id }).from(products).where(eq(products.sku, data.sku)).limit(1);
+      const dup = await tx
+        .select({ id: products.id })
+        .from(products)
+        .where(and(eq(products.companyId, companyId), eq(products.sku, data.sku)))
+        .limit(1);
       if (dup.length > 0) {
         throw new AppError(409, `SKU '${data.sku}' is already in use`, "DUPLICATE_SKU");
       }
@@ -371,10 +484,11 @@ export async function updateProduct(
         isActive: data.isActive ?? current.isActive,
         updatedAt: new Date(),
       })
-      .where(eq(products.id, id))
+      .where(and(eq(products.id, id), eq(products.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -382,6 +496,8 @@ export async function updateProduct(
       entityType: "inventory",
       entityId: row.id,
       entityLabel: `${row.name} (${row.sku})`,
+      before: productAuditSnapshot(current),
+      after: productAuditSnapshot(row),
       ipAddress,
     });
 
@@ -397,18 +513,29 @@ export async function updateProduct(
 }
 
 export async function deleteProduct(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [current] = await tx.select().from(products).where(eq(products.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(products)
+      .where(and(eq(products.id, id), eq(products.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Product not found", "NOT_FOUND");
 
     const [{ stockCount }] = await tx
       .select({ stockCount: sql<number>`count(*)::int` })
       .from(branchProducts)
-      .where(and(eq(branchProducts.productId, id), sql`${branchProducts.qtyOnHand} <> 0`));
+      .where(
+        and(
+          eq(branchProducts.companyId, companyId),
+          eq(branchProducts.productId, id),
+          sql`${branchProducts.qtyOnHand} <> 0`
+        )
+      );
     const [{ moveCount }] = await tx
       .select({ moveCount: sql<number>`count(*)::int` })
       .from(stockMovements)
-      .where(eq(stockMovements.productId, id));
+      .where(and(eq(stockMovements.companyId, companyId), eq(stockMovements.productId, id)));
     const [{ poLineCount }] = await tx
       .select({ poLineCount: sql<number>`count(*)::int` })
       .from(purchaseOrderLines)
@@ -426,8 +553,9 @@ export async function deleteProduct(db: AppDatabase, actor: RequestActor, id: st
       );
     }
 
-    await tx.delete(products).where(eq(products.id, id));
+    await tx.delete(products).where(and(eq(products.id, id), eq(products.companyId, companyId)));
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -435,6 +563,8 @@ export async function deleteProduct(db: AppDatabase, actor: RequestActor, id: st
       entityType: "inventory",
       entityId: id,
       entityLabel: `${current.name} (${current.sku})`,
+      before: productAuditSnapshot(current),
+      after: null,
       ipAddress,
     });
   });
@@ -446,10 +576,16 @@ export async function adjustBranchProductLevel(
   data: z.infer<typeof adjustBranchLevelSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   await db.transaction(async (tx) => {
-    const [prod] = await tx.select().from(products).where(eq(products.id, data.productId)).limit(1);
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const [prod] = await tx
+      .select()
+      .from(products)
+      .where(and(eq(products.id, data.productId), eq(products.companyId, companyId)))
+      .limit(1);
     if (!prod) throw new AppError(404, "Product not found", "NOT_FOUND");
 
     if (data.sellingPrice !== undefined || data.unitCost !== undefined) {
@@ -460,11 +596,11 @@ export async function adjustBranchProductLevel(
           ...(data.unitCost !== undefined ? { costPrice: toNumeric(data.unitCost, 4) } : {}),
           updatedAt: new Date(),
         })
-        .where(eq(products.id, prod.id));
+        .where(and(eq(products.id, prod.id), eq(products.companyId, companyId)));
     }
 
     const fallbackCost = data.unitCost ?? num(prod.costPrice);
-    const bp = await lockBranchProduct(tx, data.branchId, prod.id, fallbackCost);
+    const bp = await lockBranchProduct(tx, data.branchId, prod.id, fallbackCost, companyId);
     const delta = data.newQuantity - bp.qtyOnHand;
     const nextAvg =
       delta > 0 ? computeWmac(bp.qtyOnHand, bp.avgCost, delta, fallbackCost) : (bp.avgCost || fallbackCost);
@@ -480,6 +616,7 @@ export async function adjustBranchProductLevel(
 
     if (delta !== 0) {
       await tx.insert(stockMovements).values({
+        companyId,
         branchId: data.branchId,
         productId: prod.id,
         movementType: delta > 0 ? "adjustment_in" : "adjustment_out",
@@ -497,6 +634,7 @@ export async function adjustBranchProductLevel(
       const adjVal = Math.round((Math.abs(delta * nextAvg) + Number.EPSILON) * 10000) / 10000;
       if (adjVal > 0) {
         await postMappedJournal(tx, {
+          companyId,
           branchId: data.branchId,
           sourceType: "stock_adjustment",
           sourceId: bp.id,
@@ -518,6 +656,7 @@ export async function adjustBranchProductLevel(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

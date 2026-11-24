@@ -14,8 +14,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { useBranch } from "@/contexts/BranchContext";
-import { useSales } from "@/contexts/SalesContext";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import type { SalesOrder, SalesOrderStatus } from "@/types";
@@ -42,9 +43,13 @@ export default function SalesOrders() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { settings } = useSettings();
+  const { can } = usePermissions();
+  const canCreate = can("sales", "create");
+  const canEdit = can("sales", "edit");
+  const canDelete = can("sales", "delete");
   const { activeBranchId } = useBranch();
-  const { salesOrders, customers, deleteSalesOrder, confirmSalesOrder, cancelSalesOrder, fulfillSalesOrder } = useSales();
-  const { branchProducts, products, branches } = useInventory();
+  const { salesOrders, customers, deleteSalesOrder, confirmSalesOrder, cancelSalesOrder, fulfillSalesOrder } = useSalesScope({ salesOrders: true, customers: true, products: true });
+  const { branchProducts, products, branches } = useInventoryScope({ products: true });
   const [searchTerm, setSearchTerm] = useState("");
   const [page, setPage] = useState(1);
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -132,12 +137,14 @@ export default function SalesOrders() {
           <h1 className="text-3xl font-bold tracking-tight">{t("salesOrders.title")}</h1>
           <p className="text-muted-foreground">{t("salesOrders.description")}</p>
         </div>
-        <Button asChild>
-          <Link to="/sales/orders/new">
-            <Plus className="me-2 h-4 w-4" />
-            {t("salesOrders.createSO")}
-          </Link>
-        </Button>
+        {canCreate && (
+          <Button asChild>
+            <Link to="/sales/orders/new">
+              <Plus className="me-2 h-4 w-4" />
+              {t("salesOrders.createSO")}
+            </Link>
+          </Button>
+        )}
       </div>
 
       {salesOrders.length === 0 && (salesOrdersPage?.pageInfo?.total ?? 0) === 0 && !searchTerm.trim() ? (
@@ -147,12 +154,14 @@ export default function SalesOrders() {
           </div>
           <h3 className="mt-6 text-xl font-semibold">{t("salesOrders.noOrders")}</h3>
           <p className="mt-2 max-w-sm text-center text-muted-foreground">{t("salesOrders.noOrdersDescription")}</p>
-          <Button className="mt-6" asChild>
-            <Link to="/sales/orders/new">
-              <Plus className="me-2 h-4 w-4" />
-              {t("salesOrders.createFirstSO")}
-            </Link>
-          </Button>
+          {canCreate && (
+            <Button className="mt-6" asChild>
+              <Link to="/sales/orders/new">
+                <Plus className="me-2 h-4 w-4" />
+                {t("salesOrders.createFirstSO")}
+              </Link>
+            </Button>
+          )}
         </Card>
       ) : (
         <Card>
@@ -215,34 +224,40 @@ export default function SalesOrders() {
                           </Button>
                           {o.status === "Draft" && (
                             <>
-                              <Button variant="ghost" size="icon" asChild title={t("common.edit")}>
-                                <Link to={`/sales/orders/${o.id}/edit`}>
-                                  <Edit className="h-4 w-4" />
-                                </Link>
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                title={t("salesOrders.confirm")}
-                                onClick={async () => {
-                                  const res = await confirmSalesOrder(o.id);
-                                  if (res.ok === false) toast({ title: res.error, variant: "destructive" });
-                                  else toast({ title: t("salesOrders.confirmed") });
-                                }}
-                              >
-                                <CheckCircle className="h-4 w-4" />
-                              </Button>
-                              <Button variant="ghost" size="icon" title={t("common.delete")} onClick={() => setDeleteId(o.id)}>
-                                <Trash2 className="h-4 w-4 text-destructive" />
-                              </Button>
+                              {canEdit && (
+                                <Button variant="ghost" size="icon" asChild title={t("common.edit")}>
+                                  <Link to={`/sales/orders/${o.id}/edit`}>
+                                    <Edit className="h-4 w-4" />
+                                  </Link>
+                                </Button>
+                              )}
+                              {canEdit && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  title={t("salesOrders.confirm")}
+                                  onClick={async () => {
+                                    const res = await confirmSalesOrder(o.id);
+                                    if (res.ok === false) toast({ title: res.error, variant: "destructive" });
+                                    else toast({ title: t("salesOrders.confirmed") });
+                                  }}
+                                >
+                                  <CheckCircle className="h-4 w-4" />
+                                </Button>
+                              )}
+                              {canDelete && (
+                                <Button variant="ghost" size="icon" title={t("common.delete")} onClick={() => setDeleteId(o.id)}>
+                                  <Trash2 className="h-4 w-4 text-destructive" />
+                                </Button>
+                              )}
                             </>
                           )}
-                          {(o.status === "Confirmed" || o.status === "Partially Fulfilled") && (
+                          {canEdit && (o.status === "Confirmed" || o.status === "Partially Fulfilled") && (
                             <Button variant="ghost" size="icon" title={t("salesOrders.fulfill")} onClick={() => openFulfill(o.id)}>
                               <Truck className="h-4 w-4" />
                             </Button>
                           )}
-                          {o.status === "Confirmed" && (
+                          {canDelete && o.status === "Confirmed" && (
                             <Button
                               variant="ghost"
                               size="icon"

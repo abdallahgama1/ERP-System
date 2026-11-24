@@ -1,4 +1,4 @@
-import { asc, desc, eq, ne } from "drizzle-orm";
+import { and, asc, desc, eq, ne } from "drizzle-orm";
 import type { z } from "zod";
 import type {
   createExchangeRateSchema,
@@ -6,15 +6,37 @@ import type {
   updateTaxCodeSchema,
   upsertCurrencySchema,
 } from "@erp/shared";
-import { companySettings, currencies, exchangeRates, taxCodes } from "../../drizzle/schema.ts";
+import {
+  DEFAULT_COMPANY_ID,
+  chartOfAccounts,
+  companies,
+  companySettings,
+  currencies,
+  exchangeRates,
+  taxCodes,
+} from "../../drizzle/schema.ts";
 import { ensureSeededDefaults } from "../auth/permissions.ts";
 import { AppError, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
-import type { RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, type RequestActor } from "./stock-locks.ts";
 
-export async function listTaxCodes(db: AppDatabase) {
-  await ensureSeededDefaults(db);
-  const rows = await db.select().from(taxCodes).orderBy(asc(taxCodes.code));
+function resolveCompanyId(actorOrCompanyId?: RequestActor | string): string {
+  if (typeof actorOrCompanyId === "string") {
+    return actorOrCompanyId || DEFAULT_COMPANY_ID;
+  }
+  return actorCompanyId(actorOrCompanyId);
+}
+
+export async function listTaxCodes(db: AppDatabase, actorOrCompanyId?: RequestActor | string) {
+  const companyId = resolveCompanyId(actorOrCompanyId);
+  if (companyId === DEFAULT_COMPANY_ID) {
+    await ensureSeededDefaults(db);
+  }
+  const rows = await db
+    .select()
+    .from(taxCodes)
+    .where(eq(taxCodes.companyId, companyId))
+    .orderBy(asc(taxCodes.code));
   return rows.map((r) => ({ ...r, rate: num(r.rate) }));
 }
 
@@ -24,17 +46,40 @@ export async function createTaxCode(
   data: z.infer<typeof createTaxCodeSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const dup = await tx.select({ id: taxCodes.id }).from(taxCodes).where(eq(taxCodes.code, data.code)).limit(1);
+    const dup = await tx
+      .select({ id: taxCodes.id })
+      .from(taxCodes)
+      .where(and(eq(taxCodes.companyId, companyId), eq(taxCodes.code, data.code)))
+      .limit(1);
     if (dup.length > 0) throw new AppError(409, `Tax code '${data.code}' already exists`, "DUPLICATE_TAX_CODE");
 
+    if (data.inputAccountId) {
+      const [acct] = await tx
+        .select({ id: chartOfAccounts.id })
+        .from(chartOfAccounts)
+        .where(and(eq(chartOfAccounts.id, data.inputAccountId), eq(chartOfAccounts.companyId, companyId)))
+        .limit(1);
+      if (!acct) throw new AppError(404, "Input tax account not found", "NOT_FOUND");
+    }
+    if (data.outputAccountId) {
+      const [acct] = await tx
+        .select({ id: chartOfAccounts.id })
+        .from(chartOfAccounts)
+        .where(and(eq(chartOfAccounts.id, data.outputAccountId), eq(chartOfAccounts.companyId, companyId)))
+        .limit(1);
+      if (!acct) throw new AppError(404, "Output tax account not found", "NOT_FOUND");
+    }
+
     if (data.isDefault) {
-      await tx.update(taxCodes).set({ isDefault: false });
+      await tx.update(taxCodes).set({ isDefault: false }).where(eq(taxCodes.companyId, companyId));
     }
 
     const [row] = await tx
       .insert(taxCodes)
       .values({
+        companyId,
         code: data.code,
         name: data.name,
         rate: toNumeric(data.rate, 4),
@@ -47,6 +92,7 @@ export async function createTaxCode(
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -67,11 +113,46 @@ export async function updateTaxCode(
   data: z.infer<typeof updateTaxCodeSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [current] = await tx.select().from(taxCodes).where(eq(taxCodes.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(taxCodes)
+      .where(and(eq(taxCodes.id, id), eq(taxCodes.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Tax code not found", "NOT_FOUND");
+
+    if (data.code !== undefined && data.code !== current.code) {
+      const dup = await tx
+        .select({ id: taxCodes.id })
+        .from(taxCodes)
+        .where(and(eq(taxCodes.companyId, companyId), eq(taxCodes.code, data.code), ne(taxCodes.id, id)))
+        .limit(1);
+      if (dup.length > 0) throw new AppError(409, `Tax code '${data.code}' already exists`, "DUPLICATE_TAX_CODE");
+    }
+
+    if (data.inputAccountId) {
+      const [acct] = await tx
+        .select({ id: chartOfAccounts.id })
+        .from(chartOfAccounts)
+        .where(and(eq(chartOfAccounts.id, data.inputAccountId), eq(chartOfAccounts.companyId, companyId)))
+        .limit(1);
+      if (!acct) throw new AppError(404, "Input tax account not found", "NOT_FOUND");
+    }
+    if (data.outputAccountId) {
+      const [acct] = await tx
+        .select({ id: chartOfAccounts.id })
+        .from(chartOfAccounts)
+        .where(and(eq(chartOfAccounts.id, data.outputAccountId), eq(chartOfAccounts.companyId, companyId)))
+        .limit(1);
+      if (!acct) throw new AppError(404, "Output tax account not found", "NOT_FOUND");
+    }
+
     if (data.isDefault) {
-      await tx.update(taxCodes).set({ isDefault: false }).where(ne(taxCodes.id, id));
+      await tx
+        .update(taxCodes)
+        .set({ isDefault: false })
+        .where(and(eq(taxCodes.companyId, companyId), ne(taxCodes.id, id)));
     }
 
     const [row] = await tx
@@ -87,10 +168,11 @@ export async function updateTaxCode(
         ...(data.outputAccountId !== undefined ? { outputAccountId: data.outputAccountId } : {}),
         updatedAt: new Date(),
       })
-      .where(eq(taxCodes.id, id))
+      .where(and(eq(taxCodes.id, id), eq(taxCodes.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -105,13 +187,19 @@ export async function updateTaxCode(
 }
 
 export async function deleteTaxCode(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [current] = await tx.select().from(taxCodes).where(eq(taxCodes.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(taxCodes)
+      .where(and(eq(taxCodes.id, id), eq(taxCodes.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Tax code not found", "NOT_FOUND");
     if (current.isDefault) throw new AppError(400, "Cannot delete default tax code", "DEFAULT_TAX_CODE");
 
-    await tx.delete(taxCodes).where(eq(taxCodes.id, id));
+    await tx.delete(taxCodes).where(and(eq(taxCodes.id, id), eq(taxCodes.companyId, companyId)));
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -124,9 +212,16 @@ export async function deleteTaxCode(db: AppDatabase, actor: RequestActor, id: st
   });
 }
 
-export async function listCurrencies(db: AppDatabase) {
-  await ensureSeededDefaults(db);
-  return db.select().from(currencies).orderBy(asc(currencies.code));
+export async function listCurrencies(db: AppDatabase, actorOrCompanyId?: RequestActor | string) {
+  const companyId = resolveCompanyId(actorOrCompanyId);
+  if (companyId === DEFAULT_COMPANY_ID) {
+    await ensureSeededDefaults(db);
+  }
+  return db
+    .select()
+    .from(currencies)
+    .where(eq(currencies.companyId, companyId))
+    .orderBy(asc(currencies.code));
 }
 
 export async function upsertCurrency(
@@ -135,15 +230,26 @@ export async function upsertCurrency(
   data: z.infer<typeof upsertCurrencySchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     if (data.isBase) {
-      await tx.update(currencies).set({ isBase: false });
-      await tx.update(companySettings).set({ baseCurrency: data.code, updatedAt: new Date() }).where(eq(companySettings.id, 1));
+      await tx.update(currencies).set({ isBase: false }).where(eq(currencies.companyId, companyId));
+      await tx
+        .update(companies)
+        .set({ baseCurrency: data.code, updatedAt: new Date() })
+        .where(eq(companies.id, companyId));
+      if (companyId === DEFAULT_COMPANY_ID) {
+        await tx
+          .update(companySettings)
+          .set({ baseCurrency: data.code, updatedAt: new Date() })
+          .where(eq(companySettings.id, 1));
+      }
     }
 
     const [row] = await tx
       .insert(currencies)
       .values({
+        companyId,
         code: data.code,
         name: data.name,
         symbol: data.symbol,
@@ -152,7 +258,7 @@ export async function upsertCurrency(
         isActive: data.isActive,
       })
       .onConflictDoUpdate({
-        target: currencies.code,
+        target: [currencies.companyId, currencies.code],
         set: {
           name: data.name,
           symbol: data.symbol,
@@ -165,6 +271,7 @@ export async function upsertCurrency(
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -178,8 +285,14 @@ export async function upsertCurrency(
   });
 }
 
-export async function listExchangeRates(db: AppDatabase) {
-  const rows = await db.select().from(exchangeRates).orderBy(desc(exchangeRates.effectiveAt)).limit(200);
+export async function listExchangeRates(db: AppDatabase, actorOrCompanyId?: RequestActor | string) {
+  const companyId = resolveCompanyId(actorOrCompanyId);
+  const rows = await db
+    .select()
+    .from(exchangeRates)
+    .where(eq(exchangeRates.companyId, companyId))
+    .orderBy(desc(exchangeRates.effectiveAt))
+    .limit(200);
   return rows.map((r) => ({ ...r, rate: num(r.rate), effectiveAt: r.effectiveAt.toISOString() }));
 }
 
@@ -189,10 +302,12 @@ export async function createExchangeRate(
   data: z.infer<typeof createExchangeRateSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const [row] = await tx
       .insert(exchangeRates)
       .values({
+        companyId,
         fromCurrency: data.fromCurrency,
         toCurrency: data.toCurrency,
         rate: toNumeric(data.rate, 6),
@@ -202,6 +317,7 @@ export async function createExchangeRate(
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

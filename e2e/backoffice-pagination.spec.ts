@@ -29,6 +29,7 @@ test.describe("R6 Back-Office Offset Pagination & Server-Side Search E2E", () =>
   test("paginates and server-searches across Products, Customers, Vendors, Sales Orders, Purchase Orders, and Vendor Bills and honors R6 API contracts", async ({
     page,
   }) => {
+    test.setTimeout(240_000);
     const pageErrors = attachPageErrorTracker(page);
 
     // 1. Bootstrap admin & get HQ branch
@@ -50,7 +51,7 @@ test.describe("R6 Back-Office Offset Pagination & Server-Side Search E2E", () =>
     let needlePoNumber = "";
     let needleBillNumber = "";
 
-    for (let i = 1; i <= SEED_COUNT; i += 1) {
+    const seedMasterRow = async (i: number) => {
       const pad = String(i).padStart(2, "0");
       const isNeedle = i === NEEDLE_INDEX;
 
@@ -77,42 +78,58 @@ test.describe("R6 Back-Office Offset Pagination & Server-Side Search E2E", () =>
         baseCustomerId = ((await custRes.json()) as { customer: { id: string } }).customer.id;
         baseVendorId = ((await vendRes.json()) as { vendor: { id: string } }).vendor.id;
       }
+    };
+
+    await seedMasterRow(1);
+    for (let start = 2; start <= SEED_COUNT; start += 4) {
+      const batch: Promise<void>[] = [];
+      for (let i = start; i < start + 4 && i <= SEED_COUNT; i += 1) {
+        batch.push(seedMasterRow(i));
+      }
+      await Promise.all(batch);
     }
 
-    for (let i = 1; i <= SEED_COUNT; i += 1) {
-      const isNeedle = i === NEEDLE_INDEX;
-
-      const [soRes, poRes, billRes] = await Promise.all([
-        apiRequest(page, "POST", "/api/sales-orders", {
-          customerId: baseCustomerId,
-          branchId: hqId,
-          status: "Draft",
-          lines: [{ productId: baseProductId, quantity: 1, unitPrice: 30 }],
-        }),
-        apiRequest(page, "POST", "/api/purchase-orders", {
-          vendorId: baseVendorId,
-          branchId: hqId,
-          status: "Draft",
-          lines: [{ productId: baseProductId, quantity: 1, unitCost: 15 }],
-        }),
-        apiRequest(page, "POST", "/api/vendor-bills", {
-          vendorId: baseVendorId,
-          branchId: hqId,
-          dueDate: "2026-12-31",
-          lines: [{ productId: baseProductId, quantity: 1, unitCost: 15 }],
-        }),
-      ]);
-      expect(soRes.status()).toBe(201);
-      expect(poRes.status()).toBe(201);
-      expect(billRes.status()).toBe(201);
-      if (isNeedle) {
-        const so = ((await soRes.json()) as { salesOrder: { soNumber: string } }).salesOrder;
-        const po = ((await poRes.json()) as { purchaseOrder: { poNumber: string } }).purchaseOrder;
-        const bill = ((await billRes.json()) as { bill: { billNumber: string } }).bill;
-        needleSoNumber = so.soNumber;
-        needlePoNumber = po.poNumber;
-        needleBillNumber = bill.billNumber;
+    for (let start = 1; start <= SEED_COUNT; start += 3) {
+      const batch: Promise<void>[] = [];
+      for (let i = start; i < start + 3 && i <= SEED_COUNT; i += 1) {
+        const isNeedle = i === NEEDLE_INDEX;
+        batch.push(
+          (async () => {
+            const [soRes, poRes, billRes] = await Promise.all([
+              apiRequest(page, "POST", "/api/sales-orders", {
+                customerId: baseCustomerId,
+                branchId: hqId,
+                status: "Draft",
+                lines: [{ productId: baseProductId, quantity: 1, unitPrice: 30 }],
+              }),
+              apiRequest(page, "POST", "/api/purchase-orders", {
+                vendorId: baseVendorId,
+                branchId: hqId,
+                status: "Draft",
+                lines: [{ productId: baseProductId, quantity: 1, unitCost: 15 }],
+              }),
+              apiRequest(page, "POST", "/api/vendor-bills", {
+                vendorId: baseVendorId,
+                branchId: hqId,
+                dueDate: "2026-12-31",
+                lines: [{ productId: baseProductId, quantity: 1, unitCost: 15 }],
+              }),
+            ]);
+            expect(soRes.status()).toBe(201);
+            expect(poRes.status()).toBe(201);
+            expect(billRes.status()).toBe(201);
+            if (isNeedle) {
+              const so = ((await soRes.json()) as { salesOrder: { soNumber: string } }).salesOrder;
+              const po = ((await poRes.json()) as { purchaseOrder: { poNumber: string } }).purchaseOrder;
+              const bill = ((await billRes.json()) as { bill: { billNumber: string } }).bill;
+              needleSoNumber = so.soNumber;
+              needlePoNumber = po.poNumber;
+              needleBillNumber = bill.billNumber;
+            }
+          })()
+        );
       }
+      await Promise.all(batch);
     }
 
     const pagesToVerify: PaginatedEndpointSpec[] = [

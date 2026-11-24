@@ -6,12 +6,19 @@ import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useNotifications } from "@/contexts/NotificationsContext";
+import {
+  useNotificationMutations,
+  useNotificationsQuery,
+} from "@/hooks/queries/useNotificationsQueries";
 
 export function NotificationBell() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { notifications, unreadCount, isRead, markRead, markAllRead } = useNotifications();
+  const { data } = useNotificationsQuery({ limit: 20 });
+  const { markRead, markAllRead } = useNotificationMutations();
+
+  const notifications = data?.notifications ?? [];
+  const unreadCount = data?.unreadCount ?? 0;
   const top = notifications.slice(0, 6);
 
   return (
@@ -33,7 +40,13 @@ export function NotificationBell() {
         <DropdownMenuLabel className="flex items-center justify-between gap-2">
           {t("notifications.title", "Notifications")}
           {unreadCount > 0 && (
-            <Button variant="link" size="sm" className="h-auto p-0" onClick={markAllRead}>
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0"
+              onClick={() => markAllRead.mutate(undefined)}
+              disabled={markAllRead.isPending}
+            >
               {t("notifications.markAllRead", "Mark all read")}
             </Button>
           )}
@@ -44,17 +57,19 @@ export function NotificationBell() {
             {t("notifications.empty", "You're all caught up")}
           </p>
         ) : (
-          top.map(n => (
+          top.map((n) => (
             <DropdownMenuItem
               key={n.id}
               className="flex flex-col items-start gap-0.5"
               onSelect={() => {
-                markRead(n.id);
+                if (!n.isRead) {
+                  markRead.mutate(n.id);
+                }
                 if (n.link) navigate(n.link);
               }}
             >
               <span className="flex w-full items-center gap-2 text-sm font-medium">
-                {!isRead(n.id) && <span className="h-2 w-2 shrink-0 rounded-full bg-primary" aria-hidden />}
+                {!n.isRead && <span className="h-2 w-2 shrink-0 rounded-full bg-primary" aria-hidden />}
                 <span className="truncate">{n.title}</span>
               </span>
               <span className="line-clamp-2 text-xs text-muted-foreground">{n.description}</span>

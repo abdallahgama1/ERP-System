@@ -13,9 +13,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { format } from "date-fns";
 import { toast } from "sonner";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useAuth } from "@/contexts/AuthContext";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
+import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
 import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
 import type { TransferStatus } from "@/types";
 
@@ -37,9 +38,10 @@ type Line = {
 
 export default function Transfers() {
   const { t } = useTranslation();
-  const { transfers, branches, products, branchProducts, createTransfer } = useInventory();
+  const { transfers, branches, products, branchProducts, createTransfer } = useInventoryScope({ transfers: true, products: true, directoryBranches: true });
   const { user } = useAuth();
-  const { record } = useAuditLog();
+  const { can } = usePermissions();
+  const { record } = useAuditRecorder();
 
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -112,10 +114,12 @@ export default function Transfers() {
             <p className="text-muted-foreground mt-1">{t("pages.inventoryOps.transfers.description")}</p>
           </div>
         </div>
-        <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4 me-2" />
-          {t("transfers.new", "New Transfer")}
-        </Button>
+        {can("inventory", "create") && (
+          <Button onClick={() => setOpen(true)}>
+            <Plus className="h-4 w-4 me-2" />
+            {t("transfers.new", "New Transfer")}
+          </Button>
+        )}
       </div>
 
       <Card className="p-4">

@@ -8,12 +8,58 @@ export const erpQueryKeys = {
   taxonomy: ["taxonomy"] as const,
   permissions: ["permissions"] as const,
   settings: ["settings"] as const,
+  companySettings: ["settings", "company"] as const,
+  preferences: ["settings", "preferences"] as const,
+  users: ["users"] as const,
   auditLogs: ["auditLogs"] as const,
   notifications: ["notifications"] as const,
+
+  companies: {
+    all: ["companies"] as const,
+    list: () => ["companies", "list"] as const,
+    detail: (id: string) => ["companies", "detail", id] as const,
+    members: (id: string) => ["companies", "members", id] as const,
+  },
+
+  customRoles: {
+    all: ["customRoles"] as const,
+    list: (companyId?: string) => ["customRoles", "list", companyId ?? "active"] as const,
+  },
+
+  mfa: {
+    all: ["mfa"] as const,
+    status: () => ["mfa", "status"] as const,
+  },
+
+  sessionsMgmt: {
+    all: ["sessionsMgmt"] as const,
+    list: () => ["sessionsMgmt", "list"] as const,
+  },
+
+  search: {
+    all: ["search"] as const,
+    query: (q: string, limit = 20) => ["search", { q, limit }] as const,
+  },
+
+  savedViews: {
+    all: ["savedViews"] as const,
+    byResource: (resource?: string) => ["savedViews", resource ?? "all"] as const,
+  },
+
+  attachments: {
+    all: ["attachments"] as const,
+    list: (entityType: string, entityId: string) => ["attachments", entityType, entityId] as const,
+  },
+
+  printTemplates: {
+    all: ["printTemplates"] as const,
+    list: (documentType?: string) => ["printTemplates", "list", documentType ?? "all"] as const,
+  },
 
   inventory: {
     all: ["inventory"] as const,
     products: () => ["inventory", "products"] as const,
+    productsDirectory: (q?: string) => ["inventory", "products", "directory", q ?? ""] as const,
     movements: (branchId?: string, productId?: string) =>
       ["inventory", "movements", { branchId: branchId ?? "all", productId: productId ?? "all" }] as const,
     adjustments: () => ["inventory", "adjustments"] as const,
@@ -29,7 +75,9 @@ export const erpQueryKeys = {
   purchases: {
     all: ["purchases"] as const,
     vendors: () => ["purchases", "vendors"] as const,
+    vendorsDirectory: (q?: string) => ["purchases", "vendors", "directory", q ?? ""] as const,
     orders: () => ["purchases", "orders"] as const,
+    ordersDirectory: () => ["purchases", "orders", "directory"] as const,
     receives: () => ["purchases", "receives"] as const,
     bills: () => ["purchases", "bills"] as const,
     payments: () => ["purchases", "payments"] as const,
@@ -39,7 +87,9 @@ export const erpQueryKeys = {
   sales: {
     all: ["sales"] as const,
     customers: () => ["sales", "customers"] as const,
+    customersDirectory: (q?: string) => ["sales", "customers", "directory", q ?? ""] as const,
     orders: () => ["sales", "orders"] as const,
+    ordersDirectory: () => ["sales", "orders", "directory"] as const,
     invoices: () => ["sales", "invoices"] as const,
     payments: () => ["sales", "payments"] as const,
     returns: () => ["sales", "returns"] as const,
@@ -114,14 +164,47 @@ export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<reado
     case "manufacturing_updated":
       return [erpQueryKeys.manufacturing.all, erpQueryKeys.inventory.all, erpQueryKeys.accounting.all];
     case "branches_updated":
+      return [erpQueryKeys.branches, erpQueryKeys.branchesDirectory, erpQueryKeys.permissions];
     case "users_updated":
-      return [erpQueryKeys.branches, erpQueryKeys.permissions];
+      return [erpQueryKeys.branches, erpQueryKeys.permissions, erpQueryKeys.users, erpQueryKeys.companies.all];
+    case "permissions_updated":
+    case "custom_roles_updated":
+    case "roles_updated":
+      return [erpQueryKeys.permissions, erpQueryKeys.customRoles.all];
+    case "companies_updated":
+      return [
+        erpQueryKeys.companies.all,
+        erpQueryKeys.companySettings,
+        erpQueryKeys.settings,
+        erpQueryKeys.branches,
+        erpQueryKeys.branchesDirectory,
+      ];
     case "taxonomy_updated":
       return [erpQueryKeys.taxonomy];
     case "settings_updated":
-      return [erpQueryKeys.settings, erpQueryKeys.accounting.taxCodes(), erpQueryKeys.accounting.currencies()];
+      return [
+        erpQueryKeys.settings,
+        erpQueryKeys.companySettings,
+        erpQueryKeys.preferences,
+        erpQueryKeys.printTemplates.all,
+        erpQueryKeys.accounting.taxCodes(),
+        erpQueryKeys.accounting.currencies(),
+        erpQueryKeys.companies.all,
+      ];
     case "notifications_updated":
       return [erpQueryKeys.notifications];
+    case "audit_updated":
+      return [erpQueryKeys.auditLogs];
+    case "attachments_updated":
+      return [erpQueryKeys.attachments.all];
+    case "print_templates_updated":
+      return [erpQueryKeys.printTemplates.all];
+    case "saved_views_updated":
+      return [erpQueryKeys.savedViews.all];
+    case "mfa_updated":
+      return [erpQueryKeys.mfa.all];
+    case "sessions_mgmt_updated":
+      return [erpQueryKeys.sessionsMgmt.all];
     case "pos_updated":
       return [erpQueryKeys.pos.all, erpQueryKeys.sales.all, erpQueryKeys.inventory.all, erpQueryKeys.einvoicing.all];
     case "einvoicing_updated":

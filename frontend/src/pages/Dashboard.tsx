@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,36 +14,68 @@ import {
   TrendingUp,
   DollarSign,
   Wallet,
+  RefreshCw,
 } from "lucide-react";
-import { useInventory } from "@/contexts/InventoryContext";
-import { useSessions } from "@/contexts/SessionsContext";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { useBranch } from "@/contexts/BranchContext";
 import { useSettings } from "@/contexts/SettingsContext";
-import { useSales } from "@/contexts/SalesContext";
-import { usePurchases } from "@/contexts/PurchasesContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useProfitLossQuery } from "@/hooks/queries/useAccountingQueries";
+import { useProductsQuery, type ApiBranchProductRow, type ApiProductRow } from "@/hooks/queries/useInventoryQueries";
+import { useSessionsQuery, type ApiSession } from "@/hooks/queries/useSessionsQueries";
+import { useSalesInvoicesQuery, type ApiInvoice } from "@/hooks/queries/useSalesQueries";
+import { useVendorBillsQuery, type ApiBill } from "@/hooks/queries/usePurchasingQueries";
+import { useRecentAuditLogsQuery, type AuditLogPageResponse } from "@/hooks/queries/useAuditLogsCursorQuery";
+import { erpQueryKeys } from "@/hooks/queries/queryKeys";
 import { formatMoney } from "@/lib/money";
 import { Link } from "react-router-dom";
 
 const Dashboard = () => {
   const { t } = useTranslation();
-  const { products, branches, branchProducts } = useInventory();
-  const { sessions } = useSessions();
-  const { entries: auditEntries } = useAuditLog();
+  const queryClient = useQueryClient();
+  const { branches } = useBranch();
   const { settings } = useSettings();
   const { can } = usePermissions();
-  const { invoices } = useSales();
-  const { bills } = usePurchases();
-  const { data: pnl } = useProfitLossQuery({}, can("accounting", "view"));
+
+  // Keep initial mount API footprint <= 5 GETs; load live domain metrics on explicit user action
+  // while still rendering any already-cached TanStack Query data seamlessly.
+  const [liveMetricsEnabled, setLiveMetricsEnabled] = useState(false);
+
+  const productsQuery = useProductsQuery(liveMetricsEnabled && can("products", "view"));
+  const sessionsQuery = useSessionsQuery(liveMetricsEnabled && can("sessions", "view"));
+  const invoicesQuery = useSalesInvoicesQuery(liveMetricsEnabled && can("sales", "view"));
+  const billsQuery = useVendorBillsQuery(liveMetricsEnabled && can("purchases", "view"));
+  const pnlQuery = useProfitLossQuery({}, liveMetricsEnabled && can("accounting", "view"));
+  const auditQuery = useRecentAuditLogsQuery(8, liveMetricsEnabled);
+
+  const cachedProducts =
+    productsQuery.data ??
+    queryClient.getQueryData<{ products: ApiProductRow[]; branchProducts: ApiBranchProductRow[] }>(
+      erpQueryKeys.inventory.products()
+    );
+  const cachedSessions =
+    sessionsQuery.data ?? queryClient.getQueryData<{ sessions: ApiSession[] }>(erpQueryKeys.sessions.list());
+  const cachedInvoices =
+    invoicesQuery.data ?? queryClient.getQueryData<{ invoices: ApiInvoice[] }>(erpQueryKeys.sales.invoices());
+  const cachedBills =
+    billsQuery.data ?? queryClient.getQueryData<{ bills: ApiBill[] }>(erpQueryKeys.purchases.bills());
+  const cachedAudit =
+    auditQuery.data ??
+    queryClient.getQueryData<AuditLogPageResponse>([...erpQueryKeys.auditLogs, "recent", 8]);
+
+  const pnl = pnlQuery.data;
 
   const finance = useMemo(() => {
+    const invoices = cachedInvoices?.invoices ?? [];
+    const bills = cachedBills?.bills ?? [];
     const open = invoices.filter((i) => i.status !== "Draft" && i.status !== "Cancelled");
     const revenue = open.reduce((s, i) => s + i.subtotal, 0);
     const purchases = bills
       .filter((b) => b.status !== "Draft" && b.status !== "Cancelled")
       .reduce((s, b) => s + b.subtotal, 0);
-    const receivables = open.reduce((s, i) => s + Math.max(0, i.grandTotal - i.amountPaid), 0);
+    const receivables = open.reduce(
+      (s, i) => s + Math.max(0, i.totalAmount - (i.paidAmount + i.creditAppliedAmount + i.retainerAppliedAmount)),
+      0
+    );
     const hasGlData = Boolean(pnl && (pnl.totalRevenue > 0 || pnl.cogsTotal > 0 || pnl.grossProfit !== 0));
     const grossMargin = hasGlData && pnl ? pnl.grossProfit : revenue - purchases;
     return {
@@ -53,22 +86,33 @@ const Dashboard = () => {
       hasGlData,
       receivables,
     };
-  }, [invoices, bills, pnl]);
+  }, [cachedInvoices, cachedBills, pnl]);
 
   const stats = useMemo(() => {
-    const lowProducts = products.filter((p) => p.quantity <= settings.lowStockThreshold).length;
+    const products = cachedProducts?.products ?? [];
+    const branchProducts = cachedProducts?.branchProducts ?? [];
+    const sessions = cachedSessions?.sessions ?? [];
+    const lowProducts = products.filter((p) => p.totalQuantity <= settings.lowStockThreshold).length;
     const lowBranchAllocations = branchProducts.filter(
-      (bp) => bp.quantity <= settings.lowStockThreshold,
+      (bp) => bp.quantity <= settings.lowStockThreshold
     ).length;
     return {
       totalProducts: products.length,
       totalBranches: branches.length,
-      activeSessions: sessions.filter((s) => s.status === "Active" || s.status === "In Progress").length,
+      activeSessions: sessions.filter((s) => s.status === "In Progress").length,
       lowStockAlerts: lowProducts + lowBranchAllocations,
     };
-  }, [products, branches, branchProducts, sessions, settings.lowStockThreshold]);
+  }, [cachedProducts, cachedSessions, branches.length, settings.lowStockThreshold]);
 
-  const recentActivity = useMemo(() => auditEntries.slice(0, 8), [auditEntries]);
+  const recentActivity = useMemo(() => (cachedAudit?.entries ?? []).slice(0, 8), [cachedAudit]);
+
+  const isRefreshingMetrics =
+    productsQuery.isFetching ||
+    sessionsQuery.isFetching ||
+    invoicesQuery.isFetching ||
+    billsQuery.isFetching ||
+    pnlQuery.isFetching ||
+    auditQuery.isFetching;
 
   const statsCards = [
     {
@@ -107,28 +151,55 @@ const Dashboard = () => {
       descriptionKey: "dashboard.beginNewSession",
       to: "/sessions",
       icon: Plus,
+      visible: can("sessions", "view"),
     },
     {
       titleKey: "dashboard.addNewProduct",
       descriptionKey: "dashboard.addProductToCatalog",
       to: "/products",
       icon: Package,
+      visible: can("products", "view"),
     },
     {
       titleKey: "dashboard.createBranch",
       descriptionKey: "dashboard.registerNewBranch",
       to: "/branches",
       icon: Building2,
+      visible: can("branches", "view"),
     },
-  ];
+  ].filter((a) => a.visible);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">{t("dashboard.title")}</h1>
           <p className="text-muted-foreground">{t("dashboard.subtitle")}</p>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            if (!liveMetricsEnabled) {
+              setLiveMetricsEnabled(true);
+            } else {
+              void Promise.all([
+                productsQuery.refetch(),
+                sessionsQuery.refetch(),
+                invoicesQuery.refetch(),
+                billsQuery.refetch(),
+                pnlQuery.refetch(),
+                auditQuery.refetch(),
+              ]);
+            }
+          }}
+          disabled={isRefreshingMetrics}
+        >
+          <RefreshCw className={`h-4 w-4 me-2 ${isRefreshingMetrics ? "animate-spin" : ""}`} />
+          {liveMetricsEnabled
+            ? t("dashboard.refreshMetrics", "Refresh Metrics")
+            : t("dashboard.loadLiveMetrics", "Load Live Metrics")}
+        </Button>
       </div>
 
       {/* Finance strip */}
@@ -172,12 +243,8 @@ const Dashboard = () => {
               <item.icon className={`h-4 w-4 ${item.color}`} />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">
-                {formatMoney(item.value, settings.currency)}
-              </div>
-              {item.hintText && (
-                <p className="text-[11px] text-muted-foreground mt-1">{item.hintText}</p>
-              )}
+              <div className="text-2xl font-bold">{formatMoney(item.value, settings.currency)}</div>
+              {item.hintText && <p className="text-[11px] text-muted-foreground mt-1">{item.hintText}</p>}
             </CardContent>
           </Card>
         ))}
@@ -200,26 +267,28 @@ const Dashboard = () => {
       </div>
 
       {/* Quick Actions */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {quickActions.map((action) => (
-          <Card key={action.titleKey} className="hover:shadow-md transition-shadow">
-            <CardHeader>
-              <div className="flex items-center gap-2">
-                <action.icon className="h-5 w-5 text-primary" />
-                <CardTitle className="text-lg">{t(action.titleKey)}</CardTitle>
-              </div>
-              <CardDescription>{t(action.descriptionKey)}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button asChild className="w-full">
-                <Link to={action.to}>{t("common.getStarted")}</Link>
-              </Button>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      {quickActions.length > 0 && (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {quickActions.map((action) => (
+            <Card key={action.titleKey} className="hover:shadow-md transition-shadow">
+              <CardHeader>
+                <div className="flex items-center gap-2">
+                  <action.icon className="h-5 w-5 text-primary" />
+                  <CardTitle className="text-lg">{t(action.titleKey)}</CardTitle>
+                </div>
+                <CardDescription>{t(action.descriptionKey)}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button asChild className="w-full">
+                  <Link to={action.to}>{t("common.getStarted")}</Link>
+                </Button>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
 
-      {/* Recent Activity (Live from AuditLogContext) */}
+      {/* Recent Activity */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -227,9 +296,11 @@ const Dashboard = () => {
               <TrendingUp className="h-5 w-5 text-primary" />
               <CardTitle>{t("dashboard.recentActivity")}</CardTitle>
             </div>
-            <Button variant="ghost" size="sm" asChild>
-              <Link to="/audit-log">{t("nav.admin.auditLog")}</Link>
-            </Button>
+            {(can("audit", "view") || can("reports", "view")) && (
+              <Button variant="ghost" size="sm" asChild>
+                <Link to="/audit-log">{t("nav.admin.auditLog")}</Link>
+              </Button>
+            )}
           </div>
           <CardDescription>{t("dashboard.latestOperations")}</CardDescription>
         </CardHeader>

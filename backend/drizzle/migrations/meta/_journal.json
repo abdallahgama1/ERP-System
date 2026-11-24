@@ -50,6 +50,13 @@
       "when": 1795290754408,
       "tag": "0006_pos_returns_and_scale_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795382484006,
+      "tag": "0007_enterprise_foundation",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import {
   buildOffsetPageInfo,
@@ -15,9 +15,11 @@ import {
   type updatePosTerminalSchema,
 } from "@erp/shared";
 import {
+  DEFAULT_COMPANY_ID,
   branches,
   branchLotBalances,
   branchProducts,
+  companies,
   companySettings,
   customers,
   notifications,
@@ -37,6 +39,7 @@ import {
   taxCodes,
   userBranches,
   userBranchScopes,
+  userCompanies,
   userPosPins,
   userRoles,
   users,
@@ -55,7 +58,47 @@ import {
 } from "./lots-serials.service.ts";
 import { verifyManagerPinOverride } from "./pos-auth.service.ts";
 import { buildBranchScopeCondition, groupByKey } from "./query-helpers.ts";
-import { applyBranchStockMovement, parseOrThrow, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  applyBranchStockMovement,
+  assertBranchInCompany,
+  parseOrThrow,
+  type RequestActor,
+} from "./stock-locks.ts";
+
+async function loadCompanyPosSettings(tx: DbOrTx, companyId: string): Promise<{
+  companyName: string;
+  baseCurrency: string;
+  einvoicingMode: string;
+  taxRegistrationNumber: string;
+}> {
+  const [comp] = await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1);
+  if (companyId === DEFAULT_COMPANY_ID) {
+    const [legacy] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
+    if (!comp && legacy) {
+      return {
+        companyName: legacy.companyName,
+        baseCurrency: legacy.baseCurrency,
+        einvoicingMode: legacy.einvoicingMode,
+        taxRegistrationNumber: legacy.taxRegistrationNumber,
+      };
+    }
+    if (comp && legacy && comp.einvoicingMode === "none" && legacy.einvoicingMode !== "none") {
+      return {
+        companyName: legacy.companyName || comp.name,
+        baseCurrency: legacy.baseCurrency || comp.baseCurrency,
+        einvoicingMode: legacy.einvoicingMode,
+        taxRegistrationNumber: legacy.taxRegistrationNumber || comp.taxRegistrationNumber,
+      };
+    }
+  }
+  return {
+    companyName: comp?.name ?? "Count It Keep It",
+    baseCurrency: comp?.baseCurrency ?? "USD",
+    einvoicingMode: comp?.einvoicingMode ?? "none",
+    taxRegistrationNumber: comp?.taxRegistrationNumber ?? "",
+  };
+}
 
 export interface PosReceiptDto {
   id: string;
@@ -104,9 +147,14 @@ export interface PosReceiptDto {
 }
 
 export async function listPosTerminals(db: AppDatabase, actor: RequestActor, branchId?: string) {
+  const companyId = actorCompanyId(actor);
   if (branchId) assertBranchAccess(actor, branchId);
   const scopeCond = buildBranchScopeCondition(posTerminals.branchId, actor, branchId);
   if (scopeCond === "EMPTY") return [];
+
+  const whereCond = scopeCond
+    ? and(eq(posTerminals.companyId, companyId), scopeCond)
+    : eq(posTerminals.companyId, companyId);
 
   const rows = await db
     .select({
@@ -116,7 +164,7 @@ export async function listPosTerminals(db: AppDatabase, actor: RequestActor, bra
     })
     .from(posTerminals)
     .innerJoin(branches, eq(branches.id, posTerminals.branchId))
-    .where(scopeCond ?? undefined)
+    .where(whereCond)
     .orderBy(asc(posTerminals.code));
 
   const terminalIds = rows.map((r) => r.terminal.id);
@@ -125,7 +173,13 @@ export async function listPosTerminals(db: AppDatabase, actor: RequestActor, bra
       ? await db
           .select()
           .from(posShifts)
-          .where(and(inArray(posShifts.terminalId, terminalIds), eq(posShifts.status, "open")))
+          .where(
+            and(
+              eq(posShifts.companyId, companyId),
+              inArray(posShifts.terminalId, terminalIds),
+              eq(posShifts.status, "open")
+            )
+          )
       : [];
   const openShiftByTerminal = new Map(openShifts.map((s) => [s.terminalId, s]));
 
@@ -148,23 +202,35 @@ export async function createPosTerminal(
   data: z.infer<typeof createPosTerminalSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
   return db.transaction(async (tx) => {
+    await assertBranchInCompany(tx, data.branchId, companyId);
+
     const [existing] = await tx
       .select({ id: posTerminals.id })
       .from(posTerminals)
-      .where(eq(posTerminals.code, data.code.toUpperCase()))
+      .where(and(eq(posTerminals.companyId, companyId), eq(posTerminals.code, data.code.toUpperCase())))
       .limit(1);
     if (existing) {
       throw new AppError(409, `Terminal code '${data.code}' already exists`, "DUPLICATE_TERMINAL_CODE");
     }
 
     let defaultCustomerId = data.defaultCustomerId ?? null;
-    if (!defaultCustomerId) {
+    if (defaultCustomerId) {
+      const [cust] = await tx
+        .select({ id: customers.id })
+        .from(customers)
+        .where(and(eq(customers.id, defaultCustomerId), eq(customers.companyId, companyId)))
+        .limit(1);
+      if (!cust) {
+        throw new AppError(404, "Default customer not found in active company", "NOT_FOUND");
+      }
+    } else {
       const [walkIn] = await tx
         .select({ id: customers.id })
         .from(customers)
-        .where(eq(customers.isWalkIn, true))
+        .where(and(eq(customers.companyId, companyId), eq(customers.isWalkIn, true)))
         .limit(1);
       defaultCustomerId = walkIn?.id ?? null;
     }
@@ -172,6 +238,7 @@ export async function createPosTerminal(
     const [created] = await tx
       .insert(posTerminals)
       .values({
+        companyId,
         branchId: data.branchId,
         code: data.code.toUpperCase(),
         name: data.name,
@@ -183,6 +250,7 @@ export async function createPosTerminal(
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -209,10 +277,43 @@ export async function updatePosTerminal(
   data: z.infer<typeof updatePosTerminalSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [existing] = await tx.select().from(posTerminals).where(eq(posTerminals.id, id)).limit(1);
+    const [existing] = await tx
+      .select()
+      .from(posTerminals)
+      .where(and(eq(posTerminals.id, id), eq(posTerminals.companyId, companyId)))
+      .limit(1);
     if (!existing) throw new AppError(404, "POS terminal not found", "NOT_FOUND");
     assertBranchAccess(actor, existing.branchId);
+
+    if (data.code !== undefined && data.code.toUpperCase() !== existing.code) {
+      const [dup] = await tx
+        .select({ id: posTerminals.id })
+        .from(posTerminals)
+        .where(
+          and(
+            eq(posTerminals.companyId, companyId),
+            eq(posTerminals.code, data.code.toUpperCase()),
+            ne(posTerminals.id, id)
+          )
+        )
+        .limit(1);
+      if (dup) {
+        throw new AppError(409, `Terminal code '${data.code}' already exists`, "DUPLICATE_TERMINAL_CODE");
+      }
+    }
+
+    if (data.defaultCustomerId) {
+      const [cust] = await tx
+        .select({ id: customers.id })
+        .from(customers)
+        .where(and(eq(customers.id, data.defaultCustomerId), eq(customers.companyId, companyId)))
+        .limit(1);
+      if (!cust) {
+        throw new AppError(404, "Default customer not found in active company", "NOT_FOUND");
+      }
+    }
 
     const [updated] = await tx
       .update(posTerminals)
@@ -225,10 +326,11 @@ export async function updatePosTerminal(
         ...(data.etaPosOsVersion !== undefined ? { etaPosOsVersion: data.etaPosOsVersion ?? "" } : {}),
         updatedAt: new Date(),
       })
-      .where(eq(posTerminals.id, id))
+      .where(and(eq(posTerminals.id, id), eq(posTerminals.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -249,20 +351,34 @@ export async function updatePosTerminal(
 }
 
 export async function listPosCashiers(db: AppDatabase, actor: RequestActor, branchId?: string) {
-  if (branchId) assertBranchAccess(actor, branchId);
+  const companyId = actorCompanyId(actor);
+  if (branchId) {
+    assertBranchAccess(actor, branchId);
+    await assertBranchInCompany(db, branchId, companyId);
+  }
 
-  const [allUsers, roleRows, scopeRows, branchRows, pinRows] = await Promise.all([
+  const [allUsers, companyMembers, roleRows, scopeRows, branchRows, pinRows] = await Promise.all([
     db
       .select({ id: users.id, name: users.name, email: users.email, isActive: users.isActive })
       .from(users)
       .where(eq(users.isActive, true))
       .orderBy(asc(users.name)),
+    db
+      .select({ userId: userCompanies.userId, role: userCompanies.role })
+      .from(userCompanies)
+      .where(and(eq(userCompanies.companyId, companyId), eq(userCompanies.isActive, true))),
     db.select().from(userRoles),
     db.select().from(userBranchScopes),
-    db.select().from(userBranches),
+    db
+      .select({ userId: userBranches.userId, branchId: userBranches.branchId })
+      .from(userBranches)
+      .innerJoin(branches, eq(branches.id, userBranches.branchId))
+      .where(eq(branches.companyId, companyId)),
     db.select({ userId: userPosPins.userId }).from(userPosPins),
   ]);
 
+  const companyMemberMap = new Map(companyMembers.map((m) => [m.userId, m.role]));
+  const useMembershipFilter = companyMembers.length > 0 || companyId !== DEFAULT_COMPANY_ID;
   const roleMap = new Map(roleRows.map((r) => [r.userId, r.role]));
   const scopeMap = new Map(scopeRows.map((s) => [s.userId, s.scopeMode]));
   const pinSet = new Set(pinRows.map((p) => p.userId));
@@ -275,8 +391,9 @@ export async function listPosCashiers(db: AppDatabase, actor: RequestActor, bran
 
   return allUsers
     .filter((u) => {
+      if (useMembershipFilter && !companyMemberMap.has(u.id)) return false;
       if (!branchId) return true;
-      const role = roleMap.get(u.id) ?? "user";
+      const role = companyMemberMap.get(u.id) ?? roleMap.get(u.id) ?? "user";
       const scope = role === "admin" ? "all" : (scopeMap.get(u.id) ?? "selected");
       if (scope === "all") return true;
       return branchSetByUser.get(u.id)?.has(branchId) ?? false;
@@ -285,20 +402,36 @@ export async function listPosCashiers(db: AppDatabase, actor: RequestActor, bran
       id: u.id,
       name: u.name,
       email: u.email,
-      role: roleMap.get(u.id) ?? "user",
+      role: companyMemberMap.get(u.id) ?? roleMap.get(u.id) ?? "user",
       hasPin: pinSet.has(u.id),
     }));
 }
 
 export async function getPosCatalog(db: AppDatabase, actor: RequestActor, branchId: string) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, branchId);
+  await assertBranchInCompany(db, branchId, companyId);
 
-  const [prodRows, bpRows, taxRows, custRows, companyRow] = await Promise.all([
-    db.select().from(products).where(eq(products.isActive, true)).orderBy(asc(products.name)),
-    db.select().from(branchProducts).where(eq(branchProducts.branchId, branchId)),
-    db.select().from(taxCodes).where(eq(taxCodes.isActive, true)),
-    db.select().from(customers).where(eq(customers.isActive, true)).orderBy(desc(customers.isWalkIn), asc(customers.name)),
-    db.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1),
+  const [prodRows, bpRows, taxRows, custRows, company] = await Promise.all([
+    db
+      .select()
+      .from(products)
+      .where(and(eq(products.companyId, companyId), eq(products.isActive, true)))
+      .orderBy(asc(products.name)),
+    db
+      .select()
+      .from(branchProducts)
+      .where(and(eq(branchProducts.companyId, companyId), eq(branchProducts.branchId, branchId))),
+    db
+      .select()
+      .from(taxCodes)
+      .where(and(eq(taxCodes.companyId, companyId), eq(taxCodes.isActive, true))),
+    db
+      .select()
+      .from(customers)
+      .where(and(eq(customers.companyId, companyId), eq(customers.isActive, true)))
+      .orderBy(desc(customers.isWalkIn), asc(customers.name)),
+    loadCompanyPosSettings(db, companyId),
   ]);
 
   const bpByProduct = new Map(bpRows.map((bp) => [bp.productId, bp]));
@@ -336,13 +469,12 @@ export async function getPosCatalog(db: AppDatabase, actor: RequestActor, branch
     isWalkIn: c.isWalkIn,
   }));
 
-  const company = companyRow[0];
   return {
     branchId,
-    currency: company?.baseCurrency ?? "USD",
-    einvoicingMode: company?.einvoicingMode ?? "none",
-    companyName: company?.companyName ?? "Count It Keep It",
-    taxRegistrationNumber: company?.taxRegistrationNumber ?? "",
+    currency: company.baseCurrency,
+    einvoicingMode: company.einvoicingMode,
+    companyName: company.companyName,
+    taxRegistrationNumber: company.taxRegistrationNumber,
     syncedAt: new Date().toISOString(),
     products: catalogProducts,
     customers: catalogCustomers,
@@ -377,14 +509,25 @@ function formatShift(s: typeof posShifts.$inferSelect) {
 }
 
 export async function getActiveShift(db: AppDatabase, actor: RequestActor, terminalId: string) {
-  const [terminal] = await db.select().from(posTerminals).where(eq(posTerminals.id, terminalId)).limit(1);
+  const companyId = actorCompanyId(actor);
+  const [terminal] = await db
+    .select()
+    .from(posTerminals)
+    .where(and(eq(posTerminals.id, terminalId), eq(posTerminals.companyId, companyId)))
+    .limit(1);
   if (!terminal) throw new AppError(404, "POS terminal not found", "TERMINAL_NOT_FOUND");
   assertBranchAccess(actor, terminal.branchId);
 
   const [shift] = await db
     .select()
     .from(posShifts)
-    .where(and(eq(posShifts.terminalId, terminalId), eq(posShifts.status, "open")))
+    .where(
+      and(
+        eq(posShifts.companyId, companyId),
+        eq(posShifts.terminalId, terminalId),
+        eq(posShifts.status, "open")
+      )
+    )
     .limit(1);
 
   if (!shift) return null;
@@ -414,11 +557,18 @@ export async function openPosShift(
   data: z.infer<typeof openShiftSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const [terminal] = await tx
       .select()
       .from(posTerminals)
-      .where(and(eq(posTerminals.id, data.terminalId), eq(posTerminals.isActive, true)))
+      .where(
+        and(
+          eq(posTerminals.id, data.terminalId),
+          eq(posTerminals.companyId, companyId),
+          eq(posTerminals.isActive, true)
+        )
+      )
       .limit(1);
     if (!terminal) throw new AppError(404, "POS terminal not found or inactive", "TERMINAL_NOT_FOUND");
     assertBranchAccess(actor, terminal.branchId);
@@ -426,16 +576,23 @@ export async function openPosShift(
     const existingOpen = await tx
       .select({ id: posShifts.id })
       .from(posShifts)
-      .where(and(eq(posShifts.terminalId, terminal.id), eq(posShifts.status, "open")))
+      .where(
+        and(
+          eq(posShifts.companyId, companyId),
+          eq(posShifts.terminalId, terminal.id),
+          eq(posShifts.status, "open")
+        )
+      )
       .limit(1);
     if (existingOpen.length > 0) {
       throw new AppError(409, "An open shift already exists on this terminal", "SHIFT_ALREADY_OPEN");
     }
 
-    const shiftNumber = await nextDocNumber(tx, "SHIFT", "SHF-");
+    const shiftNumber = await nextDocNumber(tx, "SHIFT", "SHF-", undefined, companyId);
     const [created] = await tx
       .insert(posShifts)
       .values({
+        companyId,
         shiftNumber,
         terminalId: terminal.id,
         branchId: terminal.branchId,
@@ -448,6 +605,7 @@ export async function openPosShift(
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -471,6 +629,7 @@ export async function recordShiftCashMovement(
   data: z.infer<typeof shiftCashMovementSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const shiftRows = await tx.execute<{
       id: string;
@@ -478,7 +637,10 @@ export async function recordShiftCashMovement(
       branch_id: string;
       status: string;
       expected_cash: string;
-    }>(sql`SELECT id, shift_number, branch_id, status, expected_cash FROM pos_shifts WHERE id = ${shiftId} FOR UPDATE`);
+    }>(sql`
+      SELECT id, shift_number, branch_id, status, expected_cash
+      FROM pos_shifts WHERE id = ${shiftId} AND company_id = ${companyId} FOR UPDATE
+    `);
     const shift = shiftRows[0];
     if (!shift) throw new AppError(404, "POS shift not found", "SHIFT_NOT_FOUND");
     assertBranchAccess(actor, shift.branch_id);
@@ -503,9 +665,10 @@ export async function recordShiftCashMovement(
     await tx
       .update(posShifts)
       .set({ expectedCash: toNumeric(nextExpected, 4) })
-      .where(eq(posShifts.id, shiftId));
+      .where(and(eq(posShifts.id, shiftId), eq(posShifts.companyId, companyId)));
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -537,6 +700,7 @@ export async function closePosShift(
   data: z.infer<typeof closeShiftSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const shiftRows = await tx.execute<{
       id: string;
@@ -549,7 +713,7 @@ export async function closePosShift(
       total_cash_refunds: string;
     }>(sql`
       SELECT id, shift_number, terminal_id, branch_id, status, opening_float, total_cash_sales, total_cash_refunds
-      FROM pos_shifts WHERE id = ${shiftId} FOR UPDATE
+      FROM pos_shifts WHERE id = ${shiftId} AND company_id = ${companyId} FOR UPDATE
     `);
     const shift = shiftRows[0];
     if (!shift) throw new AppError(404, "POS shift not found", "SHIFT_NOT_FOUND");
@@ -586,12 +750,13 @@ export async function closePosShift(
         notes: data.notes || undefined,
         closedAt,
       })
-      .where(eq(posShifts.id, shiftId))
+      .where(and(eq(posShifts.id, shiftId), eq(posShifts.companyId, companyId)))
       .returning();
 
     if (Math.abs(cashVariance) > 0.005) {
       const absVar = Math.abs(cashVariance);
       await postMappedJournal(tx, {
+        companyId,
         branchId: shift.branch_id,
         entryDate: closedAt,
         sourceType: "pos_shift_close",
@@ -616,6 +781,7 @@ export async function closePosShift(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -646,10 +812,11 @@ export async function executePosCheckoutTx(
     ipAddress?: string;
   } = {}
 ): Promise<PosReceiptDto> {
+  const companyId = actorCompanyId(actor);
   const [terminal] = await tx
     .select()
     .from(posTerminals)
-    .where(eq(posTerminals.id, data.terminalId))
+    .where(and(eq(posTerminals.id, data.terminalId), eq(posTerminals.companyId, companyId)))
     .limit(1);
   if (!terminal) throw new AppError(404, "POS terminal not found", "TERMINAL_NOT_FOUND");
   assertBranchAccess(actor, terminal.branchId);
@@ -672,7 +839,7 @@ export async function executePosCheckoutTx(
   }>(sql`
     SELECT id, shift_number, terminal_id, branch_id, status, expected_cash,
            total_cash_sales, total_card_sales, total_wallet_sales, total_sales_count
-    FROM pos_shifts WHERE id = ${data.shiftId} FOR UPDATE
+    FROM pos_shifts WHERE id = ${data.shiftId} AND company_id = ${companyId} FOR UPDATE
   `);
   let shift = shiftRows[0];
   if (!shift || shift.terminal_id !== terminal.id) {
@@ -698,7 +865,7 @@ export async function executePosCheckoutTx(
       SELECT id, shift_number, terminal_id, branch_id, status, expected_cash,
              total_cash_sales, total_card_sales, total_wallet_sales, total_sales_count
       FROM pos_shifts
-      WHERE terminal_id = ${terminal.id} AND status = 'open'
+      WHERE terminal_id = ${terminal.id} AND company_id = ${companyId} AND status = 'open'
       LIMIT 1
       FOR UPDATE
     `);
@@ -716,22 +883,26 @@ export async function executePosCheckoutTx(
   let customerId = data.customerId ?? terminal.defaultCustomerId ?? null;
   let customerName = "Walk-in Customer";
   if (customerId) {
-    const [cust] = await tx.select().from(customers).where(eq(customers.id, customerId)).limit(1);
+    const [cust] = await tx
+      .select()
+      .from(customers)
+      .where(and(eq(customers.id, customerId), eq(customers.companyId, companyId)))
+      .limit(1);
     if (!cust) throw new AppError(404, "Selected customer not found", "NOT_FOUND");
     customerName = cust.name;
   } else {
     const [walkIn] = await tx
       .select()
       .from(customers)
-      .where(eq(customers.isWalkIn, true))
+      .where(and(eq(customers.companyId, companyId), eq(customers.isWalkIn, true)))
       .limit(1);
     if (!walkIn) throw new AppError(400, "Default walk-in customer is not configured", "WALK_IN_MISSING");
     customerId = walkIn.id;
     customerName = walkIn.name;
   }
 
-  const [company] = await tx.select().from(companySettings).where(eq(companySettings.id, 1)).limit(1);
-  const currency = company?.baseCurrency ?? "USD";
+  const company = await loadCompanyPosSettings(tx, companyId);
+  const currency = company.baseCurrency;
 
   // Deterministic line math (handles inclusive & exclusive VAT)
   let subtotal = 0;
@@ -789,12 +960,13 @@ export async function executePosCheckoutTx(
     throw new AppError(400, "Tendered amount is less than the POS cart grand total", "INSUFFICIENT_TENDER");
   }
 
-  const invoiceNumber = await nextDocNumber(tx, "POS", "POS-");
+  const invoiceNumber = await nextDocNumber(tx, "POS", "POS-", undefined, companyId);
   const invoiceDate = data.offlineCreatedAt ? new Date(data.offlineCreatedAt) : new Date();
 
   const [inv] = await tx
     .insert(salesInvoices)
     .values({
+      companyId,
       invoiceNumber,
       customerId,
       branchId: terminal.branchId,
@@ -823,7 +995,11 @@ export async function executePosCheckoutTx(
   let totalCogsVal = 0;
 
   for (const line of sortedLines) {
-    const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+    const [prod] = await tx
+      .select()
+      .from(products)
+      .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+      .limit(1);
     if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
 
     let unitCostSnapshot = 0;
@@ -856,6 +1032,7 @@ export async function executePosCheckoutTx(
       }
 
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: terminal.branchId,
         productId: line.productId,
         qtyDelta: -line.quantity,
@@ -911,9 +1088,10 @@ export async function executePosCheckoutTx(
     await tx
       .update(salesInvoices)
       .set({ syncStatus: "reconciled_conflict", updatedAt: new Date() })
-      .where(eq(salesInvoices.id, inv.id));
+      .where(and(eq(salesInvoices.id, inv.id), eq(salesInvoices.companyId, companyId)));
 
     await tx.insert(notifications).values({
+      companyId,
       branchId: terminal.branchId,
       type: "pos_sync_conflict",
       title: `POS Offline Sync Conflict (${inv.invoiceNumber})`,
@@ -946,7 +1124,7 @@ export async function executePosCheckoutTx(
       expectedCash: toNumeric(roundCurrency(num(shift.expected_cash) + netCashApplied, 4), 4),
       totalSalesCount: shift.total_sales_count + 1,
     })
-    .where(eq(posShifts.id, targetShiftId));
+    .where(and(eq(posShifts.id, targetShiftId), eq(posShifts.companyId, companyId)));
 
   // Post POS revenue + clearing GL journal
   const glLines: MappedLineSpec[] = [];
@@ -966,6 +1144,7 @@ export async function executePosCheckoutTx(
 
   if (glLines.length >= 2) {
     await postMappedJournal(tx, {
+      companyId,
       branchId: terminal.branchId,
       entryDate: invoiceDate,
       sourceType: "pos_sale",
@@ -979,6 +1158,7 @@ export async function executePosCheckoutTx(
 
   if (totalCogsVal > 0.0001) {
     await postMappedJournal(tx, {
+      companyId,
       branchId: terminal.branchId,
       entryDate: invoiceDate,
       sourceType: "pos_sale",
@@ -993,9 +1173,10 @@ export async function executePosCheckoutTx(
     });
   }
 
-  const einv = await applyInvoiceEInvoiceMetadata(tx, inv.id);
+  const einv = await applyInvoiceEInvoiceMetadata(tx, inv.id, companyId);
 
   await writeAuditLog(tx, {
+    companyId,
     userId: actor.id,
     userName: actor.name,
     userRole: actor.role,
@@ -1074,6 +1255,7 @@ export async function listPosReceipts(
   actor: RequestActor,
   rawQuery: unknown
 ) {
+  const companyId = actorCompanyId(actor);
   const query = parseOrThrow(posReceiptsQuerySchema, rawQuery ?? {}, "Invalid POS receipts query");
   const page = query.page ?? 1;
   const pageSize = query.limit ?? query.pageSize ?? 50;
@@ -1090,7 +1272,10 @@ export async function listPosReceipts(
     };
   }
 
-  const conditions: SQL[] = [eq(salesInvoices.sourceChannel, "pos")];
+  const conditions: SQL[] = [
+    eq(salesInvoices.companyId, companyId),
+    eq(salesInvoices.sourceChannel, "pos"),
+  ];
   if (scopeCond) conditions.push(scopeCond);
   if (query.terminalId) conditions.push(eq(salesInvoices.posTerminalId, query.terminalId));
   if (query.shiftId) conditions.push(eq(salesInvoices.posShiftId, query.shiftId));
@@ -1254,6 +1439,7 @@ export async function getPosReceiptDetail(
   actor: RequestActor,
   invoiceId: string
 ) {
+  const companyId = actorCompanyId(actor);
   const [row] = await db
     .select({
       inv: salesInvoices,
@@ -1263,7 +1449,13 @@ export async function getPosReceiptDetail(
     .from(salesInvoices)
     .leftJoin(customers, eq(customers.id, salesInvoices.customerId))
     .leftJoin(users, eq(users.id, salesInvoices.cashierUserId))
-    .where(and(eq(salesInvoices.id, invoiceId), eq(salesInvoices.sourceChannel, "pos")))
+    .where(
+      and(
+        eq(salesInvoices.id, invoiceId),
+        eq(salesInvoices.companyId, companyId),
+        eq(salesInvoices.sourceChannel, "pos")
+      )
+    )
     .limit(1);
 
   if (!row) {
@@ -1391,6 +1583,7 @@ export async function getPosReceiptDetail(
 async function restoreTrackedStockForPosReturn(
   tx: DbOrTx,
   input: {
+    companyId: string;
     originalInvoiceId: string;
     branchId: string;
     product: typeof products.$inferSelect;
@@ -1412,7 +1605,13 @@ async function restoreTrackedStockForPosReturn(
           const [found] = await tx
             .select({ id: stockLots.id })
             .from(stockLots)
-            .where(and(eq(stockLots.productId, input.product.id), eq(stockLots.lotNumber, alloc.lotNumber.trim())))
+            .where(
+              and(
+                eq(stockLots.companyId, input.companyId),
+                eq(stockLots.productId, input.product.id),
+                eq(stockLots.lotNumber, alloc.lotNumber.trim())
+              )
+            )
             .limit(1);
           lotId = found?.id;
         }
@@ -1421,6 +1620,7 @@ async function restoreTrackedStockForPosReturn(
         await tx
           .insert(branchLotBalances)
           .values({
+            companyId: input.companyId,
             branchId: input.branchId,
             lotId,
             productId: input.product.id,
@@ -1460,6 +1660,7 @@ async function restoreTrackedStockForPosReturn(
       .from(stockMovements)
       .where(
         and(
+          eq(stockMovements.companyId, input.companyId),
           eq(stockMovements.referenceType, "pos_sale"),
           eq(stockMovements.referenceId, input.originalInvoiceId),
           eq(stockMovements.productId, input.product.id)
@@ -1512,6 +1713,7 @@ async function restoreTrackedStockForPosReturn(
           .from(stockSerials)
           .where(
             and(
+              eq(stockSerials.companyId, input.companyId),
               eq(stockSerials.productId, input.product.id),
               inArray(stockSerials.serialNumber, input.serialNumbers)
             )
@@ -1521,6 +1723,7 @@ async function restoreTrackedStockForPosReturn(
           .from(stockSerials)
           .where(
             and(
+              eq(stockSerials.companyId, input.companyId),
               eq(stockSerials.productId, input.product.id),
               eq(stockSerials.soldInvoiceId, input.originalInvoiceId),
               eq(stockSerials.status, "sold")
@@ -1557,6 +1760,7 @@ export async function executePosReturnTx(
     ipAddress?: string;
   } = {}
 ) {
+  const companyId = actorCompanyId(actor);
   let approvedByUserId = options.approvedByUserId ?? null;
   if (!approvedByUserId) {
     const canApproveDirectly =
@@ -1568,6 +1772,7 @@ export async function executePosReturnTx(
       const overrideRes = await verifyManagerPinOverride(tx, {
         pin: input.managerOverridePin,
         terminalId: input.terminalId,
+        companyId,
         action: "refund",
         reason: input.reason,
         requestedByUserId: actor.id,
@@ -1600,7 +1805,7 @@ export async function executePosReturnTx(
   }>(sql`
     SELECT id, invoice_number, branch_id, customer_id, source_channel, currency, eta_document_uuid
     FROM sales_invoices
-    WHERE id = ${input.originalInvoiceId}
+    WHERE id = ${input.originalInvoiceId} AND company_id = ${companyId}
     FOR UPDATE
   `);
   const origInv = invRows[0];
@@ -1612,7 +1817,7 @@ export async function executePosReturnTx(
   const [terminal] = await tx
     .select()
     .from(posTerminals)
-    .where(eq(posTerminals.id, input.terminalId))
+    .where(and(eq(posTerminals.id, input.terminalId), eq(posTerminals.companyId, companyId)))
     .limit(1);
   if (!terminal || terminal.branchId !== origInv.branch_id) {
     throw new AppError(400, "POS terminal does not match receipt branch", "TERMINAL_BRANCH_MISMATCH");
@@ -1633,7 +1838,7 @@ export async function executePosReturnTx(
     SELECT id, shift_number, terminal_id, branch_id, status, expected_cash,
            total_cash_refunds, total_card_refunds, total_wallet_refunds, total_refunds_count
     FROM pos_shifts
-    WHERE id = ${input.shiftId}
+    WHERE id = ${input.shiftId} AND company_id = ${companyId}
     FOR UPDATE
   `);
   const shift = shiftRows[0];
@@ -1726,12 +1931,13 @@ export async function executePosReturnTx(
   });
   const returnGrandTotal = roundCurrency(returnSubtotal + returnTaxTotal, 4);
 
-  const returnNumber = await nextDocNumber(tx, "POSR", "POSR-");
+  const returnNumber = await nextDocNumber(tx, "POSR", "POSR-", undefined, companyId);
   const restockFlag = input.restockItems ?? true;
 
   const [createdReturn] = await tx
     .insert(posReturns)
     .values({
+      companyId,
       returnNumber,
       originalInvoiceId: origInv.id,
       branchId: origInv.branch_id,
@@ -1753,7 +1959,11 @@ export async function executePosReturnTx(
   const insertedReturnLines: Array<typeof posReturnLines.$inferSelect> = [];
 
   for (const line of sortedLines) {
-    const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+    const [prod] = await tx
+      .select()
+      .from(products)
+      .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+      .limit(1);
     if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
 
     const origUnitCost = num(line.origLine.unitCostSnapshot);
@@ -1764,6 +1974,7 @@ export async function executePosReturnTx(
 
     if (shouldRestock) {
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: origInv.branch_id,
         productId: line.productId,
         qtyDelta: line.quantity,
@@ -1781,6 +1992,7 @@ export async function executePosReturnTx(
       });
 
       await restoreTrackedStockForPosReturn(tx, {
+        companyId,
         originalInvoiceId: origInv.id,
         branchId: origInv.branch_id,
         product: prod,
@@ -1841,7 +2053,7 @@ export async function executePosReturnTx(
       totalRefundsCount: shift.total_refunds_count + 1,
       expectedCash: toNumeric(nextExpectedCash, 4),
     })
-    .where(eq(posShifts.id, shift.id));
+    .where(and(eq(posShifts.id, shift.id), eq(posShifts.companyId, companyId)));
 
   // Post balanced reversing GL journal entries
   const currency = origInv.currency || "USD";
@@ -1860,6 +2072,7 @@ export async function executePosReturnTx(
 
   if (glLines.length >= 2) {
     await postMappedJournal(tx, {
+      companyId,
       branchId: origInv.branch_id,
       entryDate: createdReturn.createdAt,
       sourceType: "pos_return",
@@ -1873,6 +2086,7 @@ export async function executePosReturnTx(
 
   if (restockFlag && totalRestockCostVal > 0.0001) {
     await postMappedJournal(tx, {
+      companyId,
       branchId: origInv.branch_id,
       entryDate: createdReturn.createdAt,
       sourceType: "pos_return",
@@ -1887,9 +2101,10 @@ export async function executePosReturnTx(
     });
   }
 
-  const einv = await applyPosReturnEInvoiceMetadata(tx, createdReturn.id);
+  const einv = await applyPosReturnEInvoiceMetadata(tx, createdReturn.id, companyId);
 
   await writeAuditLog(tx, {
+    companyId,
     userId: actor.id,
     userName: actor.name,
     userRole: actor.role,
@@ -1957,6 +2172,7 @@ export async function createPosReturn(
   rawInput: unknown,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   const input = parseOrThrow(posReturnSchema, rawInput, "Invalid POS return payload");
   const canApproveDirectly =
     actor.role === "admin" ||
@@ -1969,6 +2185,7 @@ export async function createPosReturn(
     const overrideRes = await verifyManagerPinOverride(db, {
       pin: input.managerOverridePin,
       terminalId: input.terminalId,
+      companyId,
       action: "refund",
       reason: input.reason,
       requestedByUserId: actor.id,

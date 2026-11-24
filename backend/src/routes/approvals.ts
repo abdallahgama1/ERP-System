@@ -9,18 +9,18 @@ import {
   reviewApprovalRequest,
   upsertApprovalRule,
 } from "../services/approvals.service.ts";
-import { parseOrThrow } from "../services/stock-locks.ts";
+import { actorCompanyId, parseOrThrow } from "../services/stock-locks.ts";
 
 export async function approvalRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/api/approvals/rules", { preHandler: requireAuth }, async () => {
-    const rules = await listApprovalRules(getDb());
+  app.get("/api/approvals/rules", { preHandler: requireAuth }, async (req) => {
+    const rules = await listApprovalRules(getDb(), req.authUser!);
     return { rules };
   });
 
   app.put("/api/approvals/rules", { preHandler: requireRole("admin") }, async (req) => {
     const data = parseOrThrow(upsertApprovalRuleSchema, req.body);
     const rule = await upsertApprovalRule(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("approvals_updated", { entity: "approval_rule", id: rule.id });
+    eventBroadcaster.broadcast("approvals_updated", { entity: "approval_rule", id: rule.id }, actorCompanyId(req.authUser!));
     return { rule };
   });
 
@@ -40,11 +40,12 @@ export async function approvalRoutes(app: FastifyInstance): Promise<void> {
       data.comment,
       req.ip
     );
-    eventBroadcaster.broadcast("approvals_updated", { entity: "approval_request", id });
-    eventBroadcaster.broadcast("inventory_updated", { source: "approval" });
-    eventBroadcaster.broadcast("purchases_updated", { source: "approval" });
-    eventBroadcaster.broadcast("accounting_updated", { source: "approval" });
-    eventBroadcaster.broadcast("notifications_updated", { source: "approval" });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("approvals_updated", { entity: "approval_request", id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { source: "approval" }, companyId);
+    eventBroadcaster.broadcast("purchases_updated", { source: "approval" }, companyId);
+    eventBroadcaster.broadcast("accounting_updated", { source: "approval" }, companyId);
+    eventBroadcaster.broadcast("notifications_updated", { source: "approval" }, companyId);
     return { request };
   });
 }

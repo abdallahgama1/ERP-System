@@ -7,6 +7,7 @@ import { AppError } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { requireAuth } from "../middleware/auth.ts";
 import { buildKeysetCondition, parseCursorOrThrow } from "../services/query-helpers.ts";
+import { actorCompanyId } from "../services/stock-locks.ts";
 
 const batchReadSchema = z.object({
   ids: z.array(z.string().uuid()).optional(),
@@ -15,6 +16,7 @@ const batchReadSchema = z.object({
 export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/notifications", { preHandler: requireAuth }, async (req) => {
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
     const query = req.query as { cursor?: string; limit?: string };
     const limit = Math.min(200, Math.max(1, Number.parseInt(query.limit ?? "100", 10) || 100));
@@ -27,7 +29,10 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
           ? or(isNull(notifications.branchId), inArray(notifications.branchId, actor.branchIds))
           : isNull(notifications.branchId);
 
-    const conds: SQL[] = [or(isNull(notifications.userId), eq(notifications.userId, actor.id))!];
+    const conds: SQL[] = [
+      eq(notifications.companyId, companyId),
+      or(isNull(notifications.userId), eq(notifications.userId, actor.id))!,
+    ];
     if (branchFilter) conds.push(branchFilter);
     if (cursor) conds.push(buildKeysetCondition(notifications.createdAt, notifications.id, cursor, "desc"));
 
@@ -85,10 +90,15 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/notifications/:id/read", { preHandler: requireAuth }, async (req) => {
     const id = (req.params as { id: string }).id;
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
     const now = new Date();
 
-    const [exists] = await db.select({ id: notifications.id }).from(notifications).where(eq(notifications.id, id)).limit(1);
+    const [exists] = await db
+      .select({ id: notifications.id })
+      .from(notifications)
+      .where(and(eq(notifications.id, id), eq(notifications.companyId, companyId)))
+      .limit(1);
     if (!exists) throw new AppError(404, "Notification not found", "NOT_FOUND");
 
     await db
@@ -105,17 +115,34 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/notifications/read-all", { preHandler: requireAuth }, async (req) => {
     const parsed = batchReadSchema.safeParse(req.body ?? {});
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
     const now = new Date();
 
     const ids =
       parsed.success && parsed.data.ids?.length
-        ? parsed.data.ids
+        ? (
+            await db
+              .select({ id: notifications.id })
+              .from(notifications)
+              .where(
+                and(
+                  eq(notifications.companyId, companyId),
+                  inArray(notifications.id, parsed.data.ids),
+                  or(isNull(notifications.userId), eq(notifications.userId, actor.id))
+                )
+              )
+          ).map((n) => n.id)
         : (
             await db
               .select({ id: notifications.id })
               .from(notifications)
-              .where(or(isNull(notifications.userId), eq(notifications.userId, actor.id)))
+              .where(
+                and(
+                  eq(notifications.companyId, companyId),
+                  or(isNull(notifications.userId), eq(notifications.userId, actor.id))
+                )
+              )
               .limit(200)
           ).map((n) => n.id);
 
@@ -135,8 +162,16 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/notifications/:id/dismiss", { preHandler: requireAuth }, async (req) => {
     const id = (req.params as { id: string }).id;
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
     const now = new Date();
+
+    const [exists] = await db
+      .select({ id: notifications.id })
+      .from(notifications)
+      .where(and(eq(notifications.id, id), eq(notifications.companyId, companyId)))
+      .limit(1);
+    if (!exists) throw new AppError(404, "Notification not found", "NOT_FOUND");
 
     await db
       .insert(notificationUserStates)

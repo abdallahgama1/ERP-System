@@ -40,9 +40,8 @@ describe.skipIf(!testDbUrl)("R6 Back-Office Offset Pagination & Server-Side Sear
       throw new Error(`Refusing to run destructive integration tests against '${activeDb}' instead of '${expectedDb}'`);
     }
 
-    await db.execute(
-      sql`TRUNCATE TABLE einvoice_submissions, pos_return_lines, pos_returns, pos_tenders, pos_shift_cash_movements, pos_shifts, pos_terminals, user_pos_pins, idempotency_keys, notification_user_states, notifications, work_order_materials, work_orders, bom_components, bills_of_materials, stock_movement_allocations, stock_serials, branch_lot_balances, stock_lots, approval_requests, approval_rules, journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs, credit_note_applications, retainer_applications, retainer_invoices, sales_return_lines, sales_returns, received_payment_allocations, received_payments, sales_invoice_lines, sales_invoices, sales_order_lines, sales_orders, purchase_return_lines, purchase_returns, payment_made_allocations, payments_made, vendor_bill_lines, vendor_bills, purchase_receive_lines, purchase_receives, purchase_order_lines, purchase_orders, stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions, stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments, stock_movements, branch_products, products, taxonomy_items, customers, vendors, document_sequences, company_settings, user_preferences, password_reset_tokens, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE`
-    );
+    const { resetTestDatabase } = await import("../helpers/db-reset.ts");
+    await resetTestDatabase(db);
 
     const adminSignup = await app.inject({
       method: "POST",

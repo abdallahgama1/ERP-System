@@ -14,11 +14,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
+import { usePermissions } from "@/contexts/PermissionsContext";
 
 const PurchaseReceives = () => {
   const { t } = useTranslation();
-  const { purchaseOrders, receives } = usePurchases();
+  const { can } = usePermissions();
+  const canCreate = can("purchases", "create");
+  const { purchaseOrders, receives } = usePurchasingScope({ purchaseOrders: true, receives: true, vendors: true, products: true });
   const [searchTerm, setSearchTerm] = useState("");
 
   const receivablePOs = purchaseOrders.filter(
@@ -79,12 +82,14 @@ const PurchaseReceives = () => {
                       </Badge>
                     </TableCell>
                     <TableCell className="text-end">
-                      <Button asChild size="sm">
-                        <Link to={`/purchases/receives/new?poId=${po.id}`}>
-                          <Package className="me-2 h-4 w-4" />
-                          {t("purchaseReceives.receiveItems")}
-                        </Link>
-                      </Button>
+                      {canCreate && (
+                        <Button asChild size="sm">
+                          <Link to={`/purchases/receives/new?poId=${po.id}`}>
+                            <Package className="me-2 h-4 w-4" />
+                            {t("purchaseReceives.receiveItems")}
+                          </Link>
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -104,7 +109,7 @@ const PurchaseReceives = () => {
           <p className="mt-2 text-center text-muted-foreground max-w-sm">
             {t("purchaseReceives.noReceivesDescription")}
           </p>
-          {receivablePOs.length > 0 && (
+          {receivablePOs.length > 0 && canCreate && (
             <Button className="mt-6" asChild>
               <Link to={`/purchases/receives/new?poId=${receivablePOs[0].id}`}>
                 <Plus className="me-2 h-4 w-4" />

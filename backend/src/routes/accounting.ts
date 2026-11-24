@@ -33,7 +33,7 @@ import {
   updateGlMapping,
 } from "../services/gl.service.ts";
 import { normalizeVoidReason } from "../services/query-helpers.ts";
-import { parseOrThrow } from "../services/stock-locks.ts";
+import { actorCompanyId, parseOrThrow } from "../services/stock-locks.ts";
 import {
   createExchangeRate,
   createTaxCode,
@@ -47,14 +47,14 @@ import {
 
 export async function accountingRoutes(app: FastifyInstance): Promise<void> {
   // ---------------- Chart of Accounts ----------------
-  app.get("/api/accounting/accounts", { preHandler: requirePermission("accounting", "view") }, async () => {
-    return { accounts: await listAccounts(getDb()) };
+  app.get("/api/accounting/accounts", { preHandler: requirePermission("accounting", "view") }, async (req) => {
+    return { accounts: await listAccounts(getDb(), req.authUser!) };
   });
 
   app.post("/api/accounting/accounts", { preHandler: requirePermission("accounting", "create") }, async (req, reply) => {
     const data = parseOrThrow(createAccountSchema, req.body, "Invalid account data");
     const account = await createAccount(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("accounting_updated", { accountId: account.id });
+    eventBroadcaster.broadcast("accounting_updated", { accountId: account.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ account });
   });
 
@@ -62,19 +62,19 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     const id = (req.params as { id: string }).id;
     const data = parseOrThrow(updateAccountSchema, req.body, "Invalid account update");
     const account = await updateAccount(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("accounting_updated", { accountId: id });
+    eventBroadcaster.broadcast("accounting_updated", { accountId: id }, actorCompanyId(req.authUser!));
     return { account };
   });
 
   // ---------------- GL Account Mappings ----------------
-  app.get("/api/accounting/mappings", { preHandler: requirePermission("accounting", "view") }, async () => {
-    return { mappings: await listGlMappings(getDb()) };
+  app.get("/api/accounting/mappings", { preHandler: requirePermission("accounting", "view") }, async (req) => {
+    return { mappings: await listGlMappings(getDb(), req.authUser!) };
   });
 
   app.put("/api/accounting/mappings", { preHandler: requirePermission("accounting", "edit") }, async (req) => {
     const data = parseOrThrow(updateGlMappingSchema, req.body, "Invalid GL mapping");
     const mapping = await updateGlMapping(getDb(), req.authUser!, data.mappingKey, data.accountId, req.ip);
-    eventBroadcaster.broadcast("accounting_updated");
+    eventBroadcaster.broadcast("accounting_updated", {}, actorCompanyId(req.authUser!));
     return { mapping };
   });
 
@@ -99,7 +99,7 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     const data = parseOrThrow(createJournalEntrySchema, req.body, "Invalid journal entry");
     if (data.branchId) assertBranchAccess(req.authUser!, data.branchId);
     const entry = await createManualJournal(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("accounting_updated", { entryId: entry.id });
+    eventBroadcaster.broadcast("accounting_updated", { entryId: entry.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ entry });
   });
 
@@ -109,37 +109,40 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     async (req) => {
       const id = (req.params as { id: string }).id;
       const actor = req.authUser!;
+      const companyId = actorCompanyId(actor);
       const reason = normalizeVoidReason(req.body);
       const db = getDb();
-      const reversal = await db.transaction(async (tx) => reverseSingleJournalEntry(tx, id, actor.id, reason));
-      eventBroadcaster.broadcast("accounting_updated", { entryId: reversal.id });
+      const reversal = await db.transaction(async (tx) =>
+        reverseSingleJournalEntry(tx, id, actor.id, reason, companyId)
+      );
+      eventBroadcaster.broadcast("accounting_updated", { entryId: reversal.id }, companyId);
       return { reversal };
     }
   );
 
   // ---------------- Fiscal Years & Periods ----------------
-  app.get("/api/accounting/fiscal-years", { preHandler: requirePermission("accounting", "view") }, async () => {
-    return { fiscalYears: await listFiscalYearsWithPeriods(getDb()) };
+  app.get("/api/accounting/fiscal-years", { preHandler: requirePermission("accounting", "view") }, async (req) => {
+    return { fiscalYears: await listFiscalYearsWithPeriods(getDb(), req.authUser!) };
   });
 
   app.post("/api/accounting/fiscal-years", { preHandler: requirePermission("accounting", "create") }, async (req, reply) => {
     const data = parseOrThrow(createFiscalYearSchema, req.body, "Invalid fiscal year");
     const fiscalYear = await createFiscalYear(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("accounting_updated", { fiscalYearId: fiscalYear.id });
+    eventBroadcaster.broadcast("accounting_updated", { fiscalYearId: fiscalYear.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ fiscalYear });
   });
 
   app.post("/api/accounting/periods/:id/lock", { preHandler: requirePermission("accounting", "approve") }, async (req) => {
     const id = (req.params as { id: string }).id;
     const period = await setFiscalPeriodLock(getDb(), req.authUser!, id, true, req.ip);
-    eventBroadcaster.broadcast("accounting_updated", { periodId: id });
+    eventBroadcaster.broadcast("accounting_updated", { periodId: id }, actorCompanyId(req.authUser!));
     return { period };
   });
 
   app.post("/api/accounting/periods/:id/unlock", { preHandler: requirePermission("accounting", "approve") }, async (req) => {
     const id = (req.params as { id: string }).id;
     const period = await setFiscalPeriodLock(getDb(), req.authUser!, id, false, req.ip);
-    eventBroadcaster.broadcast("accounting_updated", { periodId: id });
+    eventBroadcaster.broadcast("accounting_updated", { periodId: id }, actorCompanyId(req.authUser!));
     return { period };
   });
 
@@ -177,14 +180,14 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---------------- Tax Codes ----------------
-  app.get("/api/tax-codes", { preHandler: requireAuth }, async () => {
-    return { taxCodes: await listTaxCodes(getDb()) };
+  app.get("/api/tax-codes", { preHandler: requireAuth }, async (req) => {
+    return { taxCodes: await listTaxCodes(getDb(), req.authUser!) };
   });
 
   app.post("/api/tax-codes", { preHandler: requirePermission("settings", "edit") }, async (req, reply) => {
     const data = parseOrThrow(createTaxCodeSchema, req.body, "Invalid tax code");
     const taxCode = await createTaxCode(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("settings_updated", { taxCodeId: taxCode.id });
+    eventBroadcaster.broadcast("settings_updated", { taxCodeId: taxCode.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ taxCode });
   });
 
@@ -192,35 +195,38 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     const id = (req.params as { id: string }).id;
     const data = parseOrThrow(updateTaxCodeSchema, req.body, "Invalid tax code update");
     const taxCode = await updateTaxCode(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("settings_updated", { taxCodeId: id });
+    eventBroadcaster.broadcast("settings_updated", { taxCodeId: id }, actorCompanyId(req.authUser!));
     return { taxCode };
   });
 
   app.delete("/api/tax-codes/:id", { preHandler: requirePermission("settings", "edit") }, async (req) => {
     const id = (req.params as { id: string }).id;
     await deleteTaxCode(getDb(), req.authUser!, id, req.ip);
-    eventBroadcaster.broadcast("settings_updated", { taxCodeId: id });
+    eventBroadcaster.broadcast("settings_updated", { taxCodeId: id }, actorCompanyId(req.authUser!));
     return { ok: true };
   });
 
   // ---------------- Currencies & FX Rates ----------------
-  app.get("/api/currencies", { preHandler: requireAuth }, async () => {
+  app.get("/api/currencies", { preHandler: requireAuth }, async (req) => {
     const db = getDb();
-    const [currencyList, rates] = await Promise.all([listCurrencies(db), listExchangeRates(db)]);
+    const [currencyList, rates] = await Promise.all([
+      listCurrencies(db, req.authUser!),
+      listExchangeRates(db, req.authUser!),
+    ]);
     return { currencies: currencyList, exchangeRates: rates };
   });
 
   app.put("/api/currencies", { preHandler: requirePermission("settings", "edit") }, async (req) => {
     const data = parseOrThrow(upsertCurrencySchema, req.body, "Invalid currency");
     const currency = await upsertCurrency(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("settings_updated", { currency: currency.code });
+    eventBroadcaster.broadcast("settings_updated", { currency: currency.code }, actorCompanyId(req.authUser!));
     return { currency };
   });
 
   app.post("/api/currencies/rates", { preHandler: requirePermission("settings", "edit") }, async (req, reply) => {
     const data = parseOrThrow(createExchangeRateSchema, req.body, "Invalid FX rate");
     const rate = await createExchangeRate(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("settings_updated", { rateId: rate.id });
+    eventBroadcaster.broadcast("settings_updated", { rateId: rate.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ rate });
   });
 }

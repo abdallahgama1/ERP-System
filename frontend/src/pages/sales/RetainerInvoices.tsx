@@ -11,8 +11,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
-import { useSales } from "@/contexts/SalesContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
@@ -36,8 +37,12 @@ export default function RetainerInvoices() {
   const {
     customers, invoices, retainers, retainerAvailable, createRetainer, sendRetainer,
     recordRetainerPayment, applyRetainerToInvoice, cancelRetainer, deleteRetainer, invoiceBalance,
-  } = useSales();
+  } = useSalesScope({ customers: true, invoices: true, retainers: true });
   const { user } = useAuth();
+  const { can } = usePermissions();
+  const canCreate = can("sales", "create");
+  const canEdit = can("sales", "edit");
+  const canDelete = can("sales", "delete");
   const { toast } = useToast();
 
   const [open, setOpen] = useState(false);
@@ -95,10 +100,12 @@ export default function RetainerInvoices() {
             {t("sales.retainers.subtitle", "Invoice money up front and draw it down against later invoices.")}
           </p>
         </div>
-        <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4 me-2" />
-          {t("sales.retainers.new", "New Retainer")}
-        </Button>
+        {canCreate && (
+          <Button onClick={() => setOpen(true)}>
+            <Plus className="h-4 w-4 me-2" />
+            {t("sales.retainers.new", "New Retainer")}
+          </Button>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -124,7 +131,9 @@ export default function RetainerInvoices() {
               <p className="text-muted-foreground">
                 {t("sales.retainers.empty", "No retainers yet. Create one to take an advance from a customer.")}
               </p>
-              <Button onClick={() => setOpen(true)}>{t("sales.retainers.new", "New Retainer")}</Button>
+              {canCreate && (
+                <Button onClick={() => setOpen(true)}>{t("sales.retainers.new", "New Retainer")}</Button>
+              )}
             </div>
           ) : (
             <Table>
@@ -158,27 +167,27 @@ export default function RetainerInvoices() {
                     </TableCell>
                     <TableCell className="text-end">
                       <div className="flex justify-end gap-1 flex-wrap">
-                        {r.status === "Draft" && (
+                        {canEdit && r.status === "Draft" && (
                           <Button variant="outline" size="sm" onClick={() => guard(sendRetainer(r.id), t("sales.retainers.sent", "Retainer sent"))}>
                             <Send className="h-3.5 w-3.5 me-1" />{t("sales.retainers.send", "Send")}
                           </Button>
                         )}
-                        {r.status !== "Draft" && r.status !== "Cancelled" && r.amountPaid < r.amount - 0.005 && (
+                        {canEdit && r.status !== "Draft" && r.status !== "Cancelled" && r.amountPaid < r.amount - 0.005 && (
                           <Button variant="outline" size="sm" onClick={() => { setPayFor(r); setPayAmount((r.amount - r.amountPaid).toFixed(2)); }}>
                             {t("sales.retainers.recordPayment", "Record payment")}
                           </Button>
                         )}
-                        {retainerAvailable(r) > 0 && (
+                        {canEdit && retainerAvailable(r) > 0 && (
                           <Button variant="outline" size="sm" onClick={() => { setApplyFor(r); setApplyAmount(retainerAvailable(r).toFixed(2)); }}>
                             {t("sales.retainers.apply", "Apply")}
                           </Button>
                         )}
-                        {r.status !== "Cancelled" && r.amountPaid === 0 && r.amountApplied === 0 && (
+                        {canEdit && r.status !== "Cancelled" && r.amountPaid === 0 && r.amountApplied === 0 && (
                           <Button variant="ghost" size="sm" onClick={() => guard(cancelRetainer(r.id), t("sales.retainers.cancelled", "Retainer cancelled"))}>
                             <Ban className="h-3.5 w-3.5" />
                           </Button>
                         )}
-                        {r.status === "Draft" && r.amountPaid === 0 && r.amountApplied === 0 && (
+                        {canDelete && r.status === "Draft" && r.amountPaid === 0 && r.amountApplied === 0 && (
                           <Button variant="ghost" size="sm" onClick={() => setPendingDelete(r)}>
                             <Trash2 className="h-3.5 w-3.5 text-destructive" />
                           </Button>

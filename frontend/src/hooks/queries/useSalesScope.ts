@@ -1,7 +1,9 @@
-import React, { createContext, useCallback, useContext, useMemo, ReactNode } from "react";
+import { useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
-import { erpQueryKeys } from "@/hooks/queries/queryKeys";
+import { useBranch } from "@/contexts/BranchContext";
+import { erpQueryKeys } from "./queryKeys";
+import { useProductsQuery } from "./useInventoryQueries";
 import {
   useCustomersQuery,
   useReceivedPaymentsQuery,
@@ -9,15 +11,7 @@ import {
   useSalesInvoicesQuery,
   useSalesOrdersQuery,
   useSalesReturnsQuery,
-  type ApiCustomer,
-  type ApiInvoice,
-  type ApiReceivedPayment,
-  type ApiRetainer,
-  type ApiSalesOrder,
-  type ApiSalesReturn,
-} from "@/hooks/queries/useSalesQueries";
-import { useBranch } from "./BranchContext";
-import { useInventory } from "./InventoryContext";
+} from "./useSalesQueries";
 import type {
   Customer,
   Invoice,
@@ -31,6 +25,16 @@ import type {
   SalesReturnDisposition,
   SalesReturnReason,
 } from "@/types";
+
+export interface SalesScopeOptions {
+  customers?: boolean;
+  salesOrders?: boolean;
+  invoices?: boolean;
+  receivedPayments?: boolean;
+  salesReturns?: boolean;
+  retainers?: boolean;
+  products?: boolean;
+}
 
 type CustomerInput = Omit<Customer, "id" | "createdAt" | "updatedAt">;
 
@@ -98,100 +102,29 @@ const daysFromTerms = (terms: "NET15" | "NET30" | "COD"): number =>
 const termsFromDays = (days: number): "NET15" | "NET30" | "COD" =>
   days <= 0 ? "COD" : days <= 15 ? "NET15" : "NET30";
 
-interface SalesContextType {
-  customers: Customer[];
-  getCustomer: (id: string) => Customer | undefined;
-  addCustomer: (data: CustomerInput) => Promise<string | null>;
-  updateCustomer: (id: string, data: CustomerInput) => Promise<string | null>;
-  deleteCustomer: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  customerReceivables: (customerId: string) => number;
-
-  salesOrders: SalesOrder[];
-  getSalesOrder: (id: string) => SalesOrder | undefined;
-  nextSoNumber: () => string;
-  createSalesOrder: (data: SalesOrderInput) => Promise<{ ok: true; order: SalesOrder } | { ok: false; error: string }>;
-  updateSalesOrder: (
-    id: string,
-    data: SalesOrderInput
-  ) => Promise<{ ok: true } | { ok: false; error: string }>;
-  deleteSalesOrder: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  confirmSalesOrder: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  cancelSalesOrder: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  fulfillSalesOrder: (
-    id: string,
-    lines: Array<{ itemId: string; qty: number }>
-  ) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  invoices: Invoice[];
-  nextInvoiceNo: () => string;
-  invoiceBalance: (invoice: Invoice) => number;
-  createInvoice: (data: InvoiceInput) => Promise<{ ok: true; invoice: Invoice } | { ok: false; error: string }>;
-  sendInvoice: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  cancelInvoice: (id: string, reason?: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  deleteInvoice: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  recordInvoicePayment: (id: string, amount: number) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  receivedPayments: ReceivedPayment[];
-  nextReceiptNo: () => string;
-  createReceivedPayment: (
-    input: ReceivedPaymentInput
-  ) => Promise<{ ok: true; payment: ReceivedPayment } | { ok: false; error: string }>;
-  voidReceivedPayment: (id: string, reason: string, actor?: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  customerCredit: (customerId: string) => number;
-
-  salesReturns: SalesReturn[];
-  nextReturnNo: () => string;
-  returnedQtyForInvoice: (invoiceId: string) => Record<string, number>;
-  createSalesReturn: (
-    input: SalesReturnInput
-  ) => Promise<{ ok: true; salesReturn: SalesReturn } | { ok: false; error: string }>;
-  creditNoteBalance: (ret: SalesReturn) => number;
-  applyCreditNoteToInvoice: (
-    returnId: string,
-    invoiceId: string,
-    amount: number
-  ) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  retainers: RetainerInvoice[];
-  nextRetainerNo: () => string;
-  retainerAvailable: (r: RetainerInvoice) => number;
-  createRetainer: (
-    input: RetainerInput
-  ) => Promise<{ ok: true; retainer: RetainerInvoice } | { ok: false; error: string }>;
-  sendRetainer: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  cancelRetainer: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  deleteRetainer: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  recordRetainerPayment: (id: string, amount: number) => Promise<{ ok: true } | { ok: false; error: string }>;
-  applyRetainerToInvoice: (
-    retainerId: string,
-    invoiceId: string,
-    amount: number
-  ) => Promise<{ ok: true } | { ok: false; error: string }>;
-
-  refreshSales: () => Promise<void>;
-}
-
-const SalesContext = createContext<SalesContextType | undefined>(undefined);
-
-export function SalesProvider({ children }: { children: ReactNode }) {
+export function useSalesScope(options: SalesScopeOptions = {}) {
   const queryClient = useQueryClient();
-  const { activeBranchId } = useBranch();
-  const { products, branches, refreshInventory } = useInventory();
+  const { branches: shellBranches, activeBranchId } = useBranch();
 
-  const customersQuery = useCustomersQuery();
-  const salesOrdersQuery = useSalesOrdersQuery();
-  const invoicesQuery = useSalesInvoicesQuery();
-  const paymentsQuery = useReceivedPaymentsQuery();
-  const returnsQuery = useSalesReturnsQuery();
-  const retainersQuery = useRetainerInvoicesQuery();
+  const customersQuery = useCustomersQuery(Boolean(options.customers));
+  const salesOrdersQuery = useSalesOrdersQuery(Boolean(options.salesOrders));
+  const invoicesQuery = useSalesInvoicesQuery(Boolean(options.invoices));
+  const paymentsQuery = useReceivedPaymentsQuery(Boolean(options.receivedPayments));
+  const returnsQuery = useSalesReturnsQuery(Boolean(options.salesReturns));
+  const retainersQuery = useRetainerInvoicesQuery(Boolean(options.retainers));
+  const productsQuery = useProductsQuery(Boolean(options.products));
 
-  const loadAll = useCallback(async () => {
+  const refreshSales = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: erpQueryKeys.sales.all });
   }, [queryClient]);
 
+  const refreshInventory = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: erpQueryKeys.inventory.all });
+  }, [queryClient]);
+
   const { customers, salesOrders, invoices, receivedPayments, salesReturns, retainers } = useMemo(() => {
-    const prodMap = new Map(products.map((p) => [p.productId, p]));
-    const brMap = new Map(branches.map((b) => [b.branchId, b]));
+    const prodMap = new Map((productsQuery.data?.products ?? []).map((p) => [p.id, p]));
+    const brMap = new Map(shellBranches.map((b) => [b.id, b]));
     const rawCustomers = customersQuery.data?.customers ?? [];
     const custMap = new Map(rawCustomers.map((c) => [c.id, c]));
 
@@ -222,7 +155,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
       customerId: so.customerId,
       customerName: custMap.get(so.customerId)?.name ?? "",
       branchId: so.branchId,
-      branchName: brMap.get(so.branchId)?.branch_name ?? "",
+      branchName: brMap.get(so.branchId)?.name ?? "",
       orderDate: so.orderDate.slice(0, 10),
       expectedShipDate: (so.expectedShipmentDate ?? so.orderDate).slice(0, 10),
       status: so.status,
@@ -237,8 +170,8 @@ export function SalesProvider({ children }: { children: ReactNode }) {
         return {
           id: l.id,
           productId: l.productId,
-          product_name: p?.product_name ?? "",
-          product_sku: p?.product_sku ?? "",
+          product_name: p?.name ?? "",
+          product_sku: p?.sku ?? "",
           quantity: l.quantity,
           fulfilledQty: l.invoicedQty,
           unitPrice: l.unitPrice,
@@ -257,7 +190,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
       customerId: inv.customerId,
       customerName: custMap.get(inv.customerId)?.name ?? "",
       branchId: inv.branchId,
-      branchName: brMap.get(inv.branchId)?.branch_name ?? "",
+      branchName: brMap.get(inv.branchId)?.name ?? "",
       salesOrderId: inv.soId ?? undefined,
       soNumber: inv.soId ? soNumMap.get(inv.soId) : undefined,
       invoiceDate: inv.invoiceDate.slice(0, 10),
@@ -283,8 +216,8 @@ export function SalesProvider({ children }: { children: ReactNode }) {
         return {
           id: l.id,
           productId: l.productId ?? "",
-          product_name: p?.product_name ?? l.description ?? "",
-          product_sku: p?.product_sku ?? "",
+          product_name: p?.name ?? l.description ?? "",
+          product_sku: p?.sku ?? "",
           quantity: l.quantity,
           unitPrice: l.unitPrice,
           taxPercent: l.taxRate,
@@ -327,7 +260,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
       invoiceId: sr.invoiceId ?? undefined,
       invoiceNumber: sr.invoiceId ? invNumMap.get(sr.invoiceId) : undefined,
       branchId: sr.branchId,
-      branchName: brMap.get(sr.branchId)?.branch_name ?? "",
+      branchName: brMap.get(sr.branchId)?.name ?? "",
       returnDate: sr.returnDate.slice(0, 10),
       reason: sr.reason,
       creditTotal: sr.totalAmount,
@@ -339,8 +272,8 @@ export function SalesProvider({ children }: { children: ReactNode }) {
         return {
           id: l.id,
           productId: l.productId,
-          product_name: p?.product_name ?? "",
-          product_sku: p?.product_sku ?? "",
+          product_name: p?.name ?? "",
+          product_sku: p?.sku ?? "",
           returnQty: l.quantity,
           unitPrice: l.unitPrice,
           taxPercent: l.taxRate,
@@ -375,8 +308,8 @@ export function SalesProvider({ children }: { children: ReactNode }) {
       retainers: mappedRetainers,
     };
   }, [
-    products,
-    branches,
+    productsQuery.data,
+    shellBranches,
     customersQuery.data,
     salesOrdersQuery.data,
     invoicesQuery.data,
@@ -388,9 +321,11 @@ export function SalesProvider({ children }: { children: ReactNode }) {
   const resolveBranchId = useCallback(
     (preferred?: string) =>
       preferred ||
-      (activeBranchId !== "all" ? activeBranchId : (branches.find((b) => b.isDefault)?.branchId ?? branches[0]?.branchId)) ||
+      (activeBranchId !== "all"
+        ? activeBranchId
+        : (shellBranches.find((b) => b.isDefault)?.id ?? shellBranches[0]?.id)) ||
       "",
-    [activeBranchId, branches]
+    [activeBranchId, shellBranches]
   );
 
   const invoiceBalance = useCallback(
@@ -401,8 +336,8 @@ export function SalesProvider({ children }: { children: ReactNode }) {
 
   const getCustomer = useCallback((id: string) => customers.find((c) => c.id === id), [customers]);
 
-  const addCustomer = useCallback<SalesContextType["addCustomer"]>(
-    async (data) => {
+  const addCustomer = useCallback(
+    async (data: CustomerInput): Promise<string | null> => {
       try {
         await apiRequest("/api/customers", {
           method: "POST",
@@ -420,17 +355,17 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             notes: data.notes ?? "",
           },
         });
-        await loadAll();
+        await refreshSales();
         return null;
       } catch (err) {
         return err instanceof Error ? err.message : "Failed to add customer";
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const updateCustomer = useCallback<SalesContextType["updateCustomer"]>(
-    async (id, data) => {
+  const updateCustomer = useCallback(
+    async (id: string, data: CustomerInput): Promise<string | null> => {
       try {
         await apiRequest(`/api/customers/${id}`, {
           method: "PUT",
@@ -448,26 +383,26 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             notes: data.notes ?? "",
           },
         });
-        await loadAll();
+        await refreshSales();
         return null;
       } catch (err) {
         return err instanceof Error ? err.message : "Failed to update customer";
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const deleteCustomer = useCallback<SalesContextType["deleteCustomer"]>(
-    async (id) => {
+  const deleteCustomer = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/customers/${id}`, { method: "DELETE" });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to delete customer" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
   const customerReceivables = useCallback(
@@ -481,8 +416,8 @@ export function SalesProvider({ children }: { children: ReactNode }) {
   const getSalesOrder = useCallback((id: string) => salesOrders.find((o) => o.id === id), [salesOrders]);
   const nextSoNumber = useCallback(() => `SO-${String(salesOrders.length + 1).padStart(4, "0")}`, [salesOrders.length]);
 
-  const createSalesOrder = useCallback<SalesContextType["createSalesOrder"]>(
-    async (data) => {
+  const createSalesOrder = useCallback(
+    async (data: SalesOrderInput): Promise<{ ok: true; order: SalesOrder } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ salesOrder: { id: string; soNumber: string; createdAt: string; updatedAt: string } }>(
           "/api/sales-orders",
@@ -505,7 +440,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshSales();
         const subtotal = data.items.reduce((s, i) => s + i.quantity * i.unitPrice, 0);
         const totalTax = data.items.reduce((s, i) => s + (i.quantity * i.unitPrice * i.taxPercent) / 100, 0);
         return {
@@ -526,11 +461,11 @@ export function SalesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create sales order" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const updateSalesOrder = useCallback<SalesContextType["updateSalesOrder"]>(
-    async (id, data) => {
+  const updateSalesOrder = useCallback(
+    async (id: string, data: SalesOrderInput): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/sales-orders/${id}`, {
           method: "PUT",
@@ -550,74 +485,74 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             })),
           },
         });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to update sales order" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const deleteSalesOrder = useCallback<SalesContextType["deleteSalesOrder"]>(
-    async (id) => {
+  const deleteSalesOrder = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/sales-orders/${id}`, { method: "DELETE" });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to delete sales order" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const confirmSalesOrder = useCallback<SalesContextType["confirmSalesOrder"]>(
-    async (id) => {
+  const confirmSalesOrder = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/sales-orders/${id}/confirm`, { method: "POST" });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to confirm sales order" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const cancelSalesOrder = useCallback<SalesContextType["cancelSalesOrder"]>(
-    async (id) => {
+  const cancelSalesOrder = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/sales-orders/${id}/cancel`, { method: "POST" });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to cancel sales order" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const fulfillSalesOrder = useCallback<SalesContextType["fulfillSalesOrder"]>(
-    async (id, lines) => {
+  const fulfillSalesOrder = useCallback(
+    async (id: string, lines: Array<{ itemId: string; qty: number }>): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/sales-orders/${id}/fulfill`, {
           method: "POST",
           body: { lines },
         });
-        await Promise.all([loadAll(), refreshInventory()]);
+        await Promise.all([refreshSales(), refreshInventory()]);
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to fulfill sales order" };
       }
     },
-    [loadAll, refreshInventory]
+    [refreshSales, refreshInventory]
   );
 
   const nextInvoiceNo = useCallback(() => `INV-${String(invoices.length + 1).padStart(4, "0")}`, [invoices.length]);
 
-  const createInvoice = useCallback<SalesContextType["createInvoice"]>(
-    async (data) => {
+  const createInvoice = useCallback(
+    async (data: InvoiceInput): Promise<{ ok: true; invoice: Invoice } | { ok: false; error: string }> => {
       const linkedSo = data.salesOrderId ? salesOrders.find((o) => o.id === data.salesOrderId) : undefined;
       const branchId = resolveBranchId(data.branchId ?? linkedSo?.branchId);
       try {
@@ -645,7 +580,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await Promise.all([loadAll(), refreshInventory()]);
+        await Promise.all([refreshSales(), refreshInventory()]);
         const subtotal = data.items.reduce((s, i) => s + i.quantity * i.unitPrice, 0);
         const totalTax = data.items.reduce((s, i) => s + (i.quantity * i.unitPrice * i.taxPercent) / 100, 0);
         return {
@@ -679,40 +614,40 @@ export function SalesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create invoice" };
       }
     },
-    [salesOrders, resolveBranchId, loadAll, refreshInventory]
+    [salesOrders, resolveBranchId, refreshSales, refreshInventory]
   );
 
-  const sendInvoice = useCallback<SalesContextType["sendInvoice"]>(
-    async (id) => {
+  const sendInvoice = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/sales-invoices/${id}/send`, { method: "POST" });
-        await Promise.all([loadAll(), refreshInventory()]);
+        await Promise.all([refreshSales(), refreshInventory()]);
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to send invoice" };
       }
     },
-    [loadAll, refreshInventory]
+    [refreshSales, refreshInventory]
   );
 
-  const cancelInvoice = useCallback<SalesContextType["cancelInvoice"]>(
-    async (id, reason = "Voided by user") => {
+  const cancelInvoice = useCallback(
+    async (id: string, reason = "Voided by user"): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/sales-invoices/${id}/void`, {
           method: "POST",
           body: { reason },
         });
-        await Promise.all([loadAll(), refreshInventory()]);
+        await Promise.all([refreshSales(), refreshInventory()]);
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to void invoice" };
       }
     },
-    [loadAll, refreshInventory]
+    [refreshSales, refreshInventory]
   );
 
-  const deleteInvoice = useCallback<SalesContextType["deleteInvoice"]>(
-    async (id) => cancelInvoice(id, "Voided by user"),
+  const deleteInvoice = useCallback(
+    async (id: string) => cancelInvoice(id, "Voided by user"),
     [cancelInvoice]
   );
 
@@ -721,8 +656,10 @@ export function SalesProvider({ children }: { children: ReactNode }) {
     [receivedPayments.length]
   );
 
-  const createReceivedPayment = useCallback<SalesContextType["createReceivedPayment"]>(
-    async (input) => {
+  const createReceivedPayment = useCallback(
+    async (
+      input: ReceivedPaymentInput
+    ): Promise<{ ok: true; payment: ReceivedPayment } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ payment: { id: string; paymentNumber: string; createdAt: string } }>(
           "/api/received-payments",
@@ -740,7 +677,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshSales();
         const allocSum = input.allocations.reduce((s, a) => s + a.amount, 0);
         return {
           ok: true,
@@ -768,11 +705,11 @@ export function SalesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to record payment" };
       }
     },
-    [activeBranchId, customers, invoices, loadAll]
+    [activeBranchId, customers, invoices, refreshSales]
   );
 
-  const recordInvoicePayment = useCallback<SalesContextType["recordInvoicePayment"]>(
-    async (id, amount) => {
+  const recordInvoicePayment = useCallback(
+    async (id: string, amount: number): Promise<{ ok: true } | { ok: false; error: string }> => {
       const inv = invoices.find((i) => i.id === id);
       if (!inv) return { ok: false, error: "Invoice not found" };
       const res = await createReceivedPayment({
@@ -787,20 +724,20 @@ export function SalesProvider({ children }: { children: ReactNode }) {
     [invoices, createReceivedPayment]
   );
 
-  const voidReceivedPayment = useCallback<SalesContextType["voidReceivedPayment"]>(
-    async (id, reason) => {
+  const voidReceivedPayment = useCallback(
+    async (id: string, reason: string, _actor?: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/received-payments/${id}/void`, {
           method: "POST",
           body: { reason },
         });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to void payment" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
   const customerCredit = useCallback(
@@ -834,8 +771,10 @@ export function SalesProvider({ children }: { children: ReactNode }) {
     [salesReturns]
   );
 
-  const createSalesReturn = useCallback<SalesContextType["createSalesReturn"]>(
-    async (input) => {
+  const createSalesReturn = useCallback(
+    async (
+      input: SalesReturnInput
+    ): Promise<{ ok: true; salesReturn: SalesReturn } | { ok: false; error: string }> => {
       const restockItems = input.items.some((i) => i.disposition === "restock");
       try {
         const res = await apiRequest<{
@@ -858,7 +797,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             })),
           },
         });
-        await Promise.all([loadAll(), refreshInventory()]);
+        await Promise.all([refreshSales(), refreshInventory()]);
         return {
           ok: true,
           salesReturn: {
@@ -869,7 +808,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             customerName: customers.find((c) => c.id === input.customerId)?.displayName ?? "",
             invoiceId: input.invoiceId,
             branchId: input.branchId,
-            branchName: branches.find((b) => b.branchId === input.branchId)?.branch_name ?? "",
+            branchName: shellBranches.find((b) => b.id === input.branchId)?.name ?? "",
             returnDate: input.returnDate,
             reason: input.reason,
             items: [],
@@ -883,7 +822,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create sales return" };
       }
     },
-    [customers, branches, loadAll, refreshInventory]
+    [customers, shellBranches, refreshSales, refreshInventory]
   );
 
   const creditNoteBalance = useCallback(
@@ -891,20 +830,20 @@ export function SalesProvider({ children }: { children: ReactNode }) {
     []
   );
 
-  const applyCreditNoteToInvoice = useCallback<SalesContextType["applyCreditNoteToInvoice"]>(
-    async (returnId, invoiceId, amount) => {
+  const applyCreditNoteToInvoice = useCallback(
+    async (returnId: string, invoiceId: string, amount: number): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/sales-returns/${returnId}/apply`, {
           method: "POST",
           body: { invoiceId, amount },
         });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to apply credit note" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
   const nextRetainerNo = useCallback(
@@ -917,8 +856,10 @@ export function SalesProvider({ children }: { children: ReactNode }) {
     []
   );
 
-  const createRetainer = useCallback<SalesContextType["createRetainer"]>(
-    async (input) => {
+  const createRetainer = useCallback(
+    async (
+      input: RetainerInput
+    ): Promise<{ ok: true; retainer: RetainerInvoice } | { ok: false; error: string }> => {
       try {
         const res = await apiRequest<{ retainer: { id: string; retainerNumber: string; createdAt: string } }>(
           "/api/retainer-invoices",
@@ -934,7 +875,7 @@ export function SalesProvider({ children }: { children: ReactNode }) {
             },
           }
         );
-        await loadAll();
+        await refreshSales();
         return {
           ok: true,
           retainer: {
@@ -956,177 +897,121 @@ export function SalesProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to create retainer" };
       }
     },
-    [activeBranchId, customers, loadAll]
+    [activeBranchId, customers, refreshSales]
   );
 
-  const sendRetainer = useCallback<SalesContextType["sendRetainer"]>(
-    async (id) => {
+  const sendRetainer = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/retainer-invoices/${id}/send`, { method: "POST" });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to send retainer" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const cancelRetainer = useCallback<SalesContextType["cancelRetainer"]>(
-    async (id) => {
+  const cancelRetainer = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/retainer-invoices/${id}/cancel`, { method: "POST" });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to cancel retainer" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const deleteRetainer = useCallback<SalesContextType["deleteRetainer"]>(
-    async (id) => {
+  const deleteRetainer = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/retainer-invoices/${id}`, { method: "DELETE" });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to delete retainer" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const recordRetainerPayment = useCallback<SalesContextType["recordRetainerPayment"]>(
-    async (id) => {
+  const recordRetainerPayment = useCallback(
+    async (id: string, _amount?: number): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/retainer-invoices/${id}/record-payment`, { method: "POST" });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to record retainer payment" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const applyRetainerToInvoice = useCallback<SalesContextType["applyRetainerToInvoice"]>(
-    async (retainerId, invoiceId, amount) => {
+  const applyRetainerToInvoice = useCallback(
+    async (retainerId: string, invoiceId: string, amount: number): Promise<{ ok: true } | { ok: false; error: string }> => {
       try {
         await apiRequest(`/api/retainer-invoices/${retainerId}/apply`, {
           method: "POST",
           body: { invoiceId, amount },
         });
-        await loadAll();
+        await refreshSales();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : "Failed to apply retainer" };
       }
     },
-    [loadAll]
+    [refreshSales]
   );
 
-  const value = useMemo<SalesContextType>(
-    () => ({
-      customers,
-      getCustomer,
-      addCustomer,
-      updateCustomer,
-      deleteCustomer,
-      customerReceivables,
-      salesOrders,
-      getSalesOrder,
-      nextSoNumber,
-      createSalesOrder,
-      updateSalesOrder,
-      deleteSalesOrder,
-      confirmSalesOrder,
-      cancelSalesOrder,
-      fulfillSalesOrder,
-      invoices,
-      nextInvoiceNo,
-      invoiceBalance,
-      createInvoice,
-      sendInvoice,
-      cancelInvoice,
-      deleteInvoice,
-      recordInvoicePayment,
-      receivedPayments,
-      nextReceiptNo,
-      createReceivedPayment,
-      voidReceivedPayment,
-      customerCredit,
-      salesReturns,
-      nextReturnNo,
-      returnedQtyForInvoice,
-      createSalesReturn,
-      creditNoteBalance,
-      applyCreditNoteToInvoice,
-      retainers,
-      nextRetainerNo,
-      retainerAvailable,
-      createRetainer,
-      sendRetainer,
-      cancelRetainer,
-      deleteRetainer,
-      recordRetainerPayment,
-      applyRetainerToInvoice,
-      refreshSales: loadAll,
-    }),
-    [
-      customers,
-      getCustomer,
-      addCustomer,
-      updateCustomer,
-      deleteCustomer,
-      customerReceivables,
-      salesOrders,
-      getSalesOrder,
-      nextSoNumber,
-      createSalesOrder,
-      updateSalesOrder,
-      deleteSalesOrder,
-      confirmSalesOrder,
-      cancelSalesOrder,
-      fulfillSalesOrder,
-      invoices,
-      nextInvoiceNo,
-      invoiceBalance,
-      createInvoice,
-      sendInvoice,
-      cancelInvoice,
-      deleteInvoice,
-      recordInvoicePayment,
-      receivedPayments,
-      nextReceiptNo,
-      createReceivedPayment,
-      voidReceivedPayment,
-      customerCredit,
-      salesReturns,
-      nextReturnNo,
-      returnedQtyForInvoice,
-      createSalesReturn,
-      creditNoteBalance,
-      applyCreditNoteToInvoice,
-      retainers,
-      nextRetainerNo,
-      retainerAvailable,
-      createRetainer,
-      sendRetainer,
-      cancelRetainer,
-      deleteRetainer,
-      recordRetainerPayment,
-      applyRetainerToInvoice,
-      loadAll,
-    ]
-  );
-
-  return <SalesContext.Provider value={value}>{children}</SalesContext.Provider>;
-}
-
-export function useSales() {
-  const ctx = useContext(SalesContext);
-  if (!ctx) throw new Error("useSales must be used within a SalesProvider");
-  return ctx;
+  return {
+    customers,
+    getCustomer,
+    addCustomer,
+    updateCustomer,
+    deleteCustomer,
+    customerReceivables,
+    salesOrders,
+    getSalesOrder,
+    nextSoNumber,
+    createSalesOrder,
+    updateSalesOrder,
+    deleteSalesOrder,
+    confirmSalesOrder,
+    cancelSalesOrder,
+    fulfillSalesOrder,
+    invoices,
+    nextInvoiceNo,
+    invoiceBalance,
+    createInvoice,
+    sendInvoice,
+    cancelInvoice,
+    deleteInvoice,
+    recordInvoicePayment,
+    receivedPayments,
+    nextReceiptNo,
+    createReceivedPayment,
+    voidReceivedPayment,
+    customerCredit,
+    salesReturns,
+    nextReturnNo,
+    returnedQtyForInvoice,
+    createSalesReturn,
+    creditNoteBalance,
+    applyCreditNoteToInvoice,
+    retainers,
+    nextRetainerNo,
+    retainerAvailable,
+    createRetainer,
+    sendRetainer,
+    cancelRetainer,
+    deleteRetainer,
+    recordRetainerPayment,
+    applyRetainerToInvoice,
+    refreshSales,
+  };
 }

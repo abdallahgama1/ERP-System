@@ -9,6 +9,7 @@ declare module "fastify" {
   interface FastifyRequest {
     authUser: AuthUser | null;
     authSessionId: string | null;
+    activeCompanyId: string | null;
     terminalSessionOwnerId: string | null;
     posTerminalId: string | null;
     isTerminalLocked: boolean;
@@ -39,6 +40,7 @@ export async function attachAuthHook(req: FastifyRequest): Promise<void> {
   if (!token) {
     req.authUser = null;
     req.authSessionId = null;
+    req.activeCompanyId = null;
     req.terminalSessionOwnerId = null;
     req.posTerminalId = null;
     req.isTerminalLocked = false;
@@ -48,12 +50,14 @@ export async function attachAuthHook(req: FastifyRequest): Promise<void> {
     const resolved = await getAuthenticatedSession(token);
     req.authUser = resolved?.user ?? null;
     req.authSessionId = resolved?.sessionId ?? null;
+    req.activeCompanyId = resolved?.user.activeCompanyId ?? null;
     req.terminalSessionOwnerId = resolved?.terminalSessionOwnerId ?? null;
     req.posTerminalId = resolved?.posTerminalId ?? null;
     req.isTerminalLocked = resolved?.isTerminalLocked ?? false;
   } catch {
     req.authUser = null;
     req.authSessionId = null;
+    req.activeCompanyId = null;
     req.terminalSessionOwnerId = null;
     req.posTerminalId = null;
     req.isTerminalLocked = false;

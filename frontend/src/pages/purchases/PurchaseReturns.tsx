@@ -30,8 +30,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
@@ -42,7 +43,8 @@ const REASONS: PurchaseReturnReason[] = ["damaged", "wrong_item", "expired", "qu
 export default function PurchaseReturns() {
   const { t } = useTranslation();
   const { settings } = useSettings();
-  const { receives, purchaseReturns, createPurchaseReturn, returnedQtyForReceive } = usePurchases();
+  const { can } = usePermissions();
+  const { receives, purchaseReturns, createPurchaseReturn, returnedQtyForReceive } = usePurchasingScope({ receives: true, purchaseReturns: true, vendors: true, purchaseOrders: true, products: true });
   const { user } = useAuth();
   const { toast } = useToast();
 
@@ -111,10 +113,12 @@ export default function PurchaseReturns() {
             {t("pages.purchases.purchaseReturns.description", "Debit notes returned to vendors against a Goods Receipt.")}
           </p>
         </div>
-        <Button onClick={() => setDialogOpen(true)} disabled={receives.length === 0}>
-          <Plus className="me-2 h-4 w-4" />
-          New Return
-        </Button>
+        {can("purchases", "create") && (
+          <Button onClick={() => setDialogOpen(true)} disabled={receives.length === 0}>
+            <Plus className="me-2 h-4 w-4" />
+            New Return
+          </Button>
+        )}
       </div>
 
       <Card>

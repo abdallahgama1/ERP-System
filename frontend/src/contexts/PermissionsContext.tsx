@@ -1,4 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { UNSAFE_LocationContext } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   APP_ROLES,
   DEFAULT_PERMISSION_MATRIX,
@@ -11,6 +13,7 @@ import {
 } from "@erp/shared";
 import { apiRequest } from "@/lib/api-client";
 import { useAuth } from "@/contexts/AuthContext";
+import { erpQueryKeys } from "@/hooks/queries/queryKeys";
 
 export { APP_ROLES, DEFAULT_PERMISSION_MATRIX as DEFAULT_ROLE_MATRIX, PERMISSION_ACTIONS, PERMISSION_MODULES };
 export type { AppRole, PermissionAction, PermissionModule, RolePermissionMatrix };
@@ -31,31 +34,52 @@ const PermissionsContext = createContext<PermissionsContextType | undefined>(und
 
 export function PermissionsProvider({ children }: { children: React.ReactNode }) {
   const { user, refreshUser } = useAuth();
+  const queryClient = useQueryClient();
+  const locationCtx = useContext(UNSAFE_LocationContext);
+  const pathname =
+    locationCtx?.location?.pathname ?? (typeof window !== "undefined" ? window.location.pathname : "/");
+  const isRolesRoute = pathname === "/roles" || pathname.startsWith("/roles/");
+
   const role: AppRole = user?.role ?? "user";
-  const [matrix, setMatrix] = useState<RolePermissionMatrix>(() => structuredClone(DEFAULT_ROLE_MATRIX));
-  const [isLoading, setIsLoading] = useState(false);
+  const [matrixOverride, setMatrixOverride] = useState<RolePermissionMatrix | null>(null);
+
+  const shouldFetchMatrix = Boolean(user) && (isRolesRoute || !user?.permissions);
+
+  const matrixQuery = useQuery({
+    queryKey: erpQueryKeys.permissions,
+    queryFn: () => apiRequest<{ matrix: RolePermissionMatrix }>("/api/roles/permissions"),
+    enabled: shouldFetchMatrix,
+    staleTime: 60_000,
+  });
+
+  useEffect(() => {
+    setMatrixOverride(null);
+  }, [user?.id, user?.activeCompanyId]);
+
+  const matrix = useMemo<RolePermissionMatrix>(() => {
+    if (matrixOverride) return matrixOverride;
+    if (matrixQuery.data?.matrix) return matrixQuery.data.matrix;
+    return structuredClone(DEFAULT_ROLE_MATRIX);
+  }, [matrixOverride, matrixQuery.data]);
 
   const reloadMatrix = useCallback(async () => {
     if (!user) {
-      setMatrix(structuredClone(DEFAULT_ROLE_MATRIX));
+      setMatrixOverride(null);
       return;
     }
-    setIsLoading(true);
     try {
-      const res = await apiRequest<{ matrix: RolePermissionMatrix }>("/api/roles/permissions");
+      const res = await queryClient.fetchQuery({
+        queryKey: erpQueryKeys.permissions,
+        queryFn: () => apiRequest<{ matrix: RolePermissionMatrix }>("/api/roles/permissions"),
+        staleTime: 0,
+      });
       if (res.matrix) {
-        setMatrix(res.matrix);
+        setMatrixOverride(res.matrix);
       }
     } catch {
       // Fall back to default matrix if server matrix cannot be loaded
-    } finally {
-      setIsLoading(false);
     }
-  }, [user]);
-
-  useEffect(() => {
-    void reloadMatrix();
-  }, [reloadMatrix]);
+  }, [user, queryClient]);
 
   const can = useCallback(
     (module: PermissionModule, action: PermissionAction = "view"): boolean => {
@@ -69,19 +93,20 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
 
   const persistMatrix = useCallback(
     async (next: RolePermissionMatrix, prev: RolePermissionMatrix) => {
-      setMatrix(next);
+      setMatrixOverride(next);
       try {
         await apiRequest<{ ok: boolean }>("/api/roles/permissions", {
           method: "PUT",
           body: { matrix: next },
         });
+        queryClient.setQueryData(erpQueryKeys.permissions, { matrix: next });
         await refreshUser();
       } catch (err) {
-        setMatrix(prev);
+        setMatrixOverride(prev);
         throw err;
       }
     },
-    [refreshUser]
+    [queryClient, refreshUser]
   );
 
   const setPermission = useCallback(
@@ -99,6 +124,8 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
     const next = structuredClone(DEFAULT_ROLE_MATRIX);
     await persistMatrix(next, prev);
   }, [matrix, persistMatrix]);
+
+  const isLoading = Boolean(user) && shouldFetchMatrix && matrixQuery.isLoading;
 
   const value = useMemo(
     () => ({ role, matrix, isLoading, can, setPermission, resetMatrix, reloadMatrix }),

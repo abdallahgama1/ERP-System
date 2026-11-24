@@ -34,9 +34,18 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
       AUTH_COOKIE_SECRET: ${AUTH_COOKIE_SECRET:?Set AUTH_COOKIE_SECRET to a 32+ char random string}
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-erp_session}
       SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
       COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-local}
+      STORAGE_LOCAL_DIR: ${STORAGE_LOCAL_DIR:-/app/uploads}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_SECURE: ${SMTP_SECURE:-false}
@@ -51,6 +60,8 @@ services:
       ETA_CLIENT_SECRET: ${ETA_CLIENT_SECRET:-}
       ETA_ID_BASE_URL: ${ETA_ID_BASE_URL:-https://id.preprod.eta.gov.eg}
       ETA_API_BASE_URL: ${ETA_API_BASE_URL:-https://api.preprod.invoicing.eta.gov.eg}
+    volumes:
+      - erp_uploads:/app/uploads
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/api/health/live >/dev/null || exit 1"]
       interval: 30s
@@ -71,3 +82,4 @@ services:
 
 volumes:
   erp_pgdata:
+  erp_uploads:

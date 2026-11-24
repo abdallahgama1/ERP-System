@@ -27,8 +27,8 @@ import { VendorCombobox } from "@/components/purchases/VendorCombobox";
 import { ProductSelector } from "@/components/purchases/ProductSelector";
 import { downloadPurchaseOrderPdf, printPurchaseOrder } from "@/lib/pdf/purchaseOrderPdf";
 import type { Vendor, PurchaseOrder, PurchaseOrderItem, Product } from "@/types";
-import { usePurchases } from "@/contexts/PurchasesContext";
-import { useInventory } from "@/contexts/InventoryContext";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 
@@ -48,8 +48,8 @@ const PurchaseOrderForm = () => {
   const navigate = useNavigate();
   const { orderId } = useParams();
   const { toast } = useToast();
-  const { vendors, purchaseOrders, createPurchaseOrder, updatePurchaseOrder, nextPoNumber } = usePurchases();
-  const { products } = useInventory();
+  const { vendors, purchaseOrders, createPurchaseOrder, updatePurchaseOrder, nextPoNumber } = usePurchasingScope({ vendors: true, purchaseOrders: true, products: true });
+  const { products } = useInventoryScope({ products: true });
   const { settings, taxCodes } = useSettings();
   const defaultTaxRate = useMemo(
     () => (taxCodes.find((tc) => tc.isDefault && tc.isActive) ?? taxCodes.find((tc) => tc.isActive))?.rate ?? 15,

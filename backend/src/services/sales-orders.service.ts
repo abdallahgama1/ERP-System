@@ -24,11 +24,21 @@ import { assertBranchAccess } from "../middleware/auth.ts";
 import { assertCustomerCreditLimit } from "./credit-limit.service.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { groupByKey, listBranchScopedPaginated, parseOffsetQueryOrThrow } from "./query-helpers.ts";
-import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  applyBranchStockMovement,
+  assertBranchInCompany,
+  type RequestActor,
+} from "./stock-locks.ts";
 
-export async function listCustomers(db: AppDatabase, rawQuery?: Record<string, unknown>) {
+export async function listCustomers(
+  db: AppDatabase,
+  actor: RequestActor,
+  rawQuery?: Record<string, unknown>
+) {
+  const companyId = actorCompanyId(actor);
   const query = parseOffsetQueryOrThrow(customersListQuerySchema, rawQuery);
-  const conds: SQL[] = [];
+  const conds: SQL[] = [eq(customers.companyId, companyId)];
   const term = resolveSearchTerm(query);
   if (term) {
     const pattern = `%${term}%`;
@@ -43,7 +53,7 @@ export async function listCustomers(db: AppDatabase, rawQuery?: Record<string, u
       )!
     );
   }
-  const whereClause = conds.length > 0 ? and(...conds) : undefined;
+  const whereClause = and(...conds);
 
   const [{ total }] = await db
     .select({ total: sql<number>`count(*)::int` })
@@ -80,12 +90,23 @@ export async function createCustomer(
   data: z.infer<typeof customerSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   const row = await db.transaction(async (tx) => {
-    const code = data.code || (await nextDocNumber(tx, "CUST", "CUS-"));
+    const code = data.code || (await nextDocNumber(tx, "CUST", "CUS-", null, companyId));
+    const dup = await tx
+      .select({ id: customers.id })
+      .from(customers)
+      .where(and(eq(customers.companyId, companyId), eq(customers.code, code)))
+      .limit(1);
+    if (dup.length > 0) {
+      throw new AppError(409, `Customer code '${code}' already exists`, "DUPLICATE_CODE");
+    }
+
     const [inserted] = await tx
       .insert(customers)
       .values({
         ...data,
+        companyId,
         code,
         creditLimit:
           data.creditLimit === null || data.creditLimit === undefined
@@ -95,6 +116,7 @@ export async function createCustomer(
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -117,9 +139,24 @@ export async function updateCustomer(
   data: Partial<z.infer<typeof customerSchema>>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   const row = await db.transaction(async (tx) => {
-    const [current] = await tx.select().from(customers).where(eq(customers.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(customers)
+      .where(and(eq(customers.id, id), eq(customers.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Customer not found", "NOT_FOUND");
+    if (data.code && data.code !== current.code) {
+      const dup = await tx
+        .select({ id: customers.id })
+        .from(customers)
+        .where(and(eq(customers.companyId, companyId), eq(customers.code, data.code)))
+        .limit(1);
+      if (dup.length > 0) {
+        throw new AppError(409, `Customer code '${data.code}' already exists`, "DUPLICATE_CODE");
+      }
+    }
     const [updated] = await tx
       .update(customers)
       .set({
@@ -132,10 +169,11 @@ export async function updateCustomer(
               : toNumeric(data.creditLimit, 4),
         updatedAt: new Date(),
       })
-      .where(eq(customers.id, id))
+      .where(and(eq(customers.id, id), eq(customers.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -152,29 +190,35 @@ export async function updateCustomer(
 }
 
 export async function deleteCustomer(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [current] = await tx.select().from(customers).where(eq(customers.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(customers)
+      .where(and(eq(customers.id, id), eq(customers.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Customer not found", "NOT_FOUND");
 
     const [{ soC }] = await tx
       .select({ soC: sql<number>`count(*)::int` })
       .from(salesOrders)
-      .where(eq(salesOrders.customerId, id));
+      .where(and(eq(salesOrders.companyId, companyId), eq(salesOrders.customerId, id)));
     const [{ invC }] = await tx
       .select({ invC: sql<number>`count(*)::int` })
       .from(salesInvoices)
-      .where(eq(salesInvoices.customerId, id));
+      .where(and(eq(salesInvoices.companyId, companyId), eq(salesInvoices.customerId, id)));
     const [{ payC }] = await tx
       .select({ payC: sql<number>`count(*)::int` })
       .from(receivedPayments)
-      .where(eq(receivedPayments.customerId, id));
+      .where(and(eq(receivedPayments.companyId, companyId), eq(receivedPayments.customerId, id)));
 
     if (soC > 0 || invC > 0 || payC > 0) {
       throw new AppError(409, "Cannot delete customer with existing orders, invoices, or payments", "CUSTOMER_IN_USE");
     }
 
-    await tx.delete(customers).where(eq(customers.id, id));
+    await tx.delete(customers).where(and(eq(customers.id, id), eq(customers.companyId, companyId)));
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -207,6 +251,7 @@ export async function listSalesOrders(
   actor: RequestActor,
   rawQuery?: Record<string, unknown>
 ) {
+  const companyId = actorCompanyId(actor);
   const query = parseOffsetQueryOrThrow(salesOrdersListQuerySchema, rawQuery);
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
@@ -225,7 +270,7 @@ export async function listSalesOrders(
     const matchedCustomers = await db
       .select({ id: customers.id })
       .from(customers)
-      .where(ilike(customers.name, pattern));
+      .where(and(eq(customers.companyId, companyId), ilike(customers.name, pattern)));
     const customerIds = matchedCustomers.map((c) => c.id);
     if (customerIds.length > 0) {
       extraConditions.push(
@@ -305,18 +350,39 @@ export async function createSalesOrder(
   data: z.infer<typeof salesOrderSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const soNumber = await nextDocNumber(tx, "SO", "SO-");
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const [cust] = await tx
+      .select({ id: customers.id })
+      .from(customers)
+      .where(and(eq(customers.id, data.customerId), eq(customers.companyId, companyId)))
+      .limit(1);
+    if (!cust) throw new AppError(404, "Customer not found", "NOT_FOUND");
+
+    const uniqueProdIds = Array.from(new Set(data.lines.map((l) => l.productId)));
+    if (uniqueProdIds.length > 0) {
+      const validProds = await tx
+        .select({ id: products.id })
+        .from(products)
+        .where(and(eq(products.companyId, companyId), inArray(products.id, uniqueProdIds)));
+      if (validProds.length !== uniqueProdIds.length) {
+        throw new AppError(404, "One or more products not found in active company", "NOT_FOUND");
+      }
+    }
+
+    const soNumber = await nextDocNumber(tx, "SO", "SO-", null, companyId);
     const { subtotal, taxTotal, computed } = summarizePriceLines(data.lines);
     if (data.status === "Confirmed") {
-      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal);
+      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal, null, companyId);
     }
 
     const [so] = await tx
       .insert(salesOrders)
       .values({
+        companyId,
         soNumber,
         customerId: data.customerId,
         branchId: data.branchId,
@@ -349,6 +415,7 @@ export async function createSalesOrder(
     );
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -371,18 +438,43 @@ export async function updateSalesOrder(
   data: z.infer<typeof salesOrderSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const [current] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(salesOrders)
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Sales order not found", "NOT_FOUND");
+    assertBranchAccess(actor, current.branchId);
     if (current.status !== "Draft") {
       throw new AppError(400, "Only Draft sales orders can be edited", "IMMUTABLE_DOCUMENT");
     }
 
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const [cust] = await tx
+      .select({ id: customers.id })
+      .from(customers)
+      .where(and(eq(customers.id, data.customerId), eq(customers.companyId, companyId)))
+      .limit(1);
+    if (!cust) throw new AppError(404, "Customer not found", "NOT_FOUND");
+
+    const uniqueProdIds = Array.from(new Set(data.lines.map((l) => l.productId)));
+    if (uniqueProdIds.length > 0) {
+      const validProds = await tx
+        .select({ id: products.id })
+        .from(products)
+        .where(and(eq(products.companyId, companyId), inArray(products.id, uniqueProdIds)));
+      if (validProds.length !== uniqueProdIds.length) {
+        throw new AppError(404, "One or more products not found in active company", "NOT_FOUND");
+      }
+    }
+
     const { subtotal, taxTotal, computed } = summarizePriceLines(data.lines);
     if (data.status === "Confirmed") {
-      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal, id);
+      await assertCustomerCreditLimit(tx, data.customerId, subtotal + taxTotal, id, companyId);
     }
     const [so] = await tx
       .update(salesOrders)
@@ -400,7 +492,7 @@ export async function updateSalesOrder(
         notes: data.notes,
         updatedAt: new Date(),
       })
-      .where(eq(salesOrders.id, id))
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
       .returning();
 
     await tx.delete(salesOrderLines).where(eq(salesOrderLines.soId, id));
@@ -420,6 +512,7 @@ export async function updateSalesOrder(
     );
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -436,20 +529,26 @@ export async function updateSalesOrder(
 }
 
 export async function confirmSalesOrder(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [so] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).limit(1);
+    const [so] = await tx
+      .select()
+      .from(salesOrders)
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
+      .limit(1);
     if (!so) throw new AppError(404, "Sales order not found", "NOT_FOUND");
     assertBranchAccess(actor, so.branchId);
     if (so.status !== "Draft") throw new AppError(400, "Only Draft sales orders can be confirmed", "INVALID_STATUS");
-    await assertCustomerCreditLimit(tx, so.customerId, num(so.totalAmount), id);
+    await assertCustomerCreditLimit(tx, so.customerId, num(so.totalAmount), id, companyId);
 
     const [res] = await tx
       .update(salesOrders)
       .set({ status: "Confirmed", updatedAt: new Date() })
-      .where(eq(salesOrders.id, id))
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -471,8 +570,13 @@ export async function fulfillSalesOrder(
   data: z.infer<typeof fulfillSalesOrderSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [so] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).limit(1);
+    const [so] = await tx
+      .select()
+      .from(salesOrders)
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
+      .limit(1);
     if (!so) throw new AppError(404, "Sales order not found", "NOT_FOUND");
     assertBranchAccess(actor, so.branchId);
     if (so.status === "Cancelled" || so.status === "Closed") {
@@ -495,8 +599,13 @@ export async function fulfillSalesOrder(
         throw new AppError(400, "Fulfill quantity exceeds remaining ordered quantity", "EXCEEDS_ORDERED");
       }
 
-      const [prod] = await tx.select().from(products).where(eq(products.id, match.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, match.productId), eq(products.companyId, companyId)))
+        .limit(1);
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: so.branchId,
         productId: match.productId,
         qtyDelta: -reqLine.qty,
@@ -519,6 +628,7 @@ export async function fulfillSalesOrder(
 
     if (totalCogsVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: so.branchId,
         sourceType: "sales_order_fulfill",
         sourceId: so.id,
@@ -538,10 +648,11 @@ export async function fulfillSalesOrder(
     const [res] = await tx
       .update(salesOrders)
       .set({ status: allFulfilled ? "Fulfilled" : "Partially Fulfilled", updatedAt: new Date() })
-      .where(eq(salesOrders.id, id))
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -557,8 +668,13 @@ export async function fulfillSalesOrder(
 }
 
 export async function cancelSalesOrder(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [so] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).limit(1);
+    const [so] = await tx
+      .select()
+      .from(salesOrders)
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
+      .limit(1);
     if (!so) throw new AppError(404, "Sales order not found", "NOT_FOUND");
     assertBranchAccess(actor, so.branchId);
     if (so.status === "Fulfilled" || so.status === "Closed") {
@@ -568,10 +684,11 @@ export async function cancelSalesOrder(db: AppDatabase, actor: RequestActor, id:
     const [res] = await tx
       .update(salesOrders)
       .set({ status: "Cancelled", updatedAt: new Date() })
-      .where(eq(salesOrders.id, id))
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -587,11 +704,16 @@ export async function cancelSalesOrder(db: AppDatabase, actor: RequestActor, id:
 }
 
 export async function deleteSalesOrder(db: AppDatabase, actor: RequestActor, id: string) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [so] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).limit(1);
+    const [so] = await tx
+      .select()
+      .from(salesOrders)
+      .where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)))
+      .limit(1);
     if (!so) throw new AppError(404, "Sales order not found", "NOT_FOUND");
     assertBranchAccess(actor, so.branchId);
     if (so.status !== "Draft") throw new AppError(400, "Only Draft sales orders can be deleted", "IMMUTABLE_DOCUMENT");
-    await tx.delete(salesOrders).where(eq(salesOrders.id, id));
+    await tx.delete(salesOrders).where(and(eq(salesOrders.id, id), eq(salesOrders.companyId, companyId)));
   });
 }

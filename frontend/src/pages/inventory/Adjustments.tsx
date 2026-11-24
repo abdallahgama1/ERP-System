@@ -25,18 +25,20 @@ import {
 } from "@/components/ui/select";
 import { format } from "date-fns";
 import { toast } from "sonner";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useAuth } from "@/contexts/AuthContext";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
+import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
 import type { AdjustmentReason } from "@/types";
 
 const REASONS: AdjustmentReason[] = ["recount", "damage", "theft", "expiry", "correction", "other"];
 
 export default function Adjustments() {
   const { t } = useTranslation();
-  const { adjustments, branches, products, branchProducts, createAdjustment } = useInventory();
+  const { adjustments, branches, products, branchProducts, createAdjustment } = useInventoryScope({ adjustments: true, products: true });
   const { user } = useAuth();
-  const { record } = useAuditLog();
+  const { can } = usePermissions();
+  const { record } = useAuditRecorder();
 
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -115,10 +117,12 @@ export default function Adjustments() {
             <p className="text-muted-foreground mt-1">{t("pages.inventoryOps.adjustments.description")}</p>
           </div>
         </div>
-        <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4 me-2" />
-          {t("adjustments.new", "New Adjustment")}
-        </Button>
+        {can("inventory", "create") && (
+          <Button onClick={() => setOpen(true)}>
+            <Plus className="h-4 w-4 me-2" />
+            {t("adjustments.new", "New Adjustment")}
+          </Button>
+        )}
       </div>
 
       <Card className="p-4">

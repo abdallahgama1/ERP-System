@@ -14,8 +14,16 @@ import {
 } from "@/components/ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { useToast } from "@/hooks/use-toast";
-import { useTaxonomy, TaxonomyItem, TaxonomyKind } from "@/contexts/TaxonomyContext";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
+import { ApiError } from "@/lib/api-client";
+import { mapApiProduct, useProductsDirectoryQuery } from "@/hooks/queries/useInventoryQueries";
+import {
+  computeTaxonomyUsageCount,
+  useTaxonomyMutations,
+  useTaxonomyQuery,
+  type TaxonomyItem,
+  type TaxonomyKind,
+} from "@/hooks/queries/useTaxonomyQueries";
 
 interface TaxonomyManagerProps {
   kind: TaxonomyKind;
@@ -35,44 +43,62 @@ export function TaxonomyManager({
 }: TaxonomyManagerProps) {
   const { t } = useTranslation();
   const { toast } = useToast();
-  const { list, addItem, updateItem, removeItem, usageCount } = useTaxonomy();
-  const { record } = useAuditLog();
+  const { can } = usePermissions();
+  const canCreate = can("taxonomy", "create");
+  const canEdit = can("taxonomy", "edit");
+  const canDelete = can("taxonomy", "delete");
+  const taxonomyQuery = useTaxonomyQuery();
+  const { createTaxonomyItem, updateTaxonomyItem, deleteTaxonomyItem } = useTaxonomyMutations();
+  const productsQuery = useProductsDirectoryQuery(undefined, withUsage);
 
-  const items = list(kind);
+  const items = useMemo(() => taxonomyQuery.data?.[kind] ?? [], [taxonomyQuery.data, kind]);
+  const mappedProducts = useMemo(
+    () => (productsQuery.data?.products ?? []).map(mapApiProduct),
+    [productsQuery.data]
+  );
+
   const [search, setSearch] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<TaxonomyItem | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
+  const usageCount = (item: TaxonomyItem) =>
+    computeTaxonomyUsageCount(kind, item.name, mappedProducts, item.code);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return items;
     return items.filter(
-      i => i.name.toLowerCase().includes(q) || (i.code ?? "").toLowerCase().includes(q)
+      (i) => i.name.toLowerCase().includes(q) || (i.code ?? "").toLowerCase().includes(q)
     );
   }, [items, search]);
 
-  const openAdd = () => { setEditing(null); setForm(emptyForm); setDialogOpen(true); };
+  const openAdd = () => {
+    setEditing(null);
+    setForm(emptyForm);
+    setDialogOpen(true);
+  };
   const openEdit = (item: TaxonomyItem) => {
     setEditing(item);
     setForm({ name: item.name, code: item.code ?? "", description: item.description ?? "" });
     setDialogOpen(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const payload = {
-      name: form.name.trim(),
-      code: withCode ? form.code.trim() : undefined,
-      description: form.description.trim() || undefined,
-    };
-    if (!payload.name) {
+    const name = form.name.trim();
+    const code = withCode ? form.code.trim() : undefined;
+    const desc = form.description.trim() || undefined;
+    if (!name) {
       toast({ title: t("taxonomy.nameRequired", "Name is required"), variant: "destructive" });
       return;
     }
-    const error = editing ? updateItem(kind, editing.id, payload) : addItem(kind, payload);
-    if (error === "duplicate") {
+
+    const isDuplicate = items.some(
+      (i) => i.id !== editing?.id && i.name.trim().toLowerCase() === name.toLowerCase()
+    );
+    if (isDuplicate) {
       toast({
         title: t("taxonomy.duplicate", "Already exists"),
         description: t("taxonomy.duplicateDescription", "Another entry already uses this name."),
@@ -80,17 +106,37 @@ export function TaxonomyManager({
       });
       return;
     }
-    record("settings", editing ? "taxonomy.update" : "taxonomy.create", {
-      entity: kind, entityId: editing?.id, meta: { name: payload.name },
-    });
-    toast({ title: editing ? t("taxonomy.updated", "Entry updated") : t("taxonomy.created", "Entry created") });
-    setDialogOpen(false);
-    setEditing(null);
-    setForm(emptyForm);
+
+    try {
+      if (editing) {
+        await updateTaxonomyItem.mutateAsync({ id: editing.id, name, code, description: desc });
+        toast({ title: t("taxonomy.updated", "Entry updated") });
+      } else {
+        await createTaxonomyItem.mutateAsync({ kind, name, code, description: desc });
+        toast({ title: t("taxonomy.created", "Entry created") });
+      }
+      setDialogOpen(false);
+      setEditing(null);
+      setForm(emptyForm);
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 409 || err.code === "DUPLICATE_TAXONOMY")) {
+        toast({
+          title: t("taxonomy.duplicate", "Already exists"),
+          description: t("taxonomy.duplicateDescription", "Another entry already uses this name."),
+          variant: "destructive",
+        });
+        return;
+      }
+      toast({
+        title: t("common.error", "Error"),
+        description: err instanceof Error ? err.message : undefined,
+        variant: "destructive",
+      });
+    }
   };
 
   const handleDeleteClick = (item: TaxonomyItem) => {
-    const used = usageCount(kind, item.name);
+    const used = usageCount(item);
     if (used > 0) {
       toast({
         title: t("taxonomy.cannotDelete", "Cannot delete"),
@@ -105,18 +151,23 @@ export function TaxonomyManager({
     setDeleteId(item.id);
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (!deleteId) return;
-    const item = items.find(i => i.id === deleteId);
-    const error = removeItem(kind, deleteId);
-    if (error) {
-      toast({ title: t("taxonomy.cannotDelete", "Cannot delete"), variant: "destructive" });
-    } else {
-      record("settings", "taxonomy.delete", { entity: kind, entityId: deleteId, meta: { name: item?.name } });
+    try {
+      await deleteTaxonomyItem.mutateAsync(deleteId);
       toast({ title: t("taxonomy.deleted", "Entry deleted") });
+    } catch (err) {
+      toast({
+        title: t("taxonomy.cannotDelete", "Cannot delete"),
+        description: err instanceof Error ? err.message : undefined,
+        variant: "destructive",
+      });
+    } finally {
+      setDeleteId(null);
     }
-    setDeleteId(null);
   };
+
+  const isSaving = createTaxonomyItem.isPending || updateTaxonomyItem.isPending;
 
   return (
     <div className="space-y-6">
@@ -125,10 +176,12 @@ export function TaxonomyManager({
           <h1 className="text-3xl font-bold tracking-tight">{title}</h1>
           <p className="text-muted-foreground">{description}</p>
         </div>
-        <Button onClick={openAdd}>
-          <Plus className="me-2 h-4 w-4" />
-          {t("taxonomy.addEntry", "Add entry")}
-        </Button>
+        {canCreate && (
+          <Button onClick={openAdd}>
+            <Plus className="me-2 h-4 w-4" />
+            {t("taxonomy.addEntry", "Add entry")}
+          </Button>
+        )}
       </div>
 
       <Card>
@@ -147,7 +200,7 @@ export function TaxonomyManager({
               className="ps-9"
               placeholder={t("common.search", "Search")}
               value={search}
-              onChange={e => setSearch(e.target.value)}
+              onChange={(e) => setSearch(e.target.value)}
             />
           </div>
 
@@ -159,7 +212,7 @@ export function TaxonomyManager({
                   ? t("taxonomy.empty", "Nothing here yet.")
                   : t("taxonomy.noResults", "No matches for your search.")}
               </p>
-              {items.length === 0 && (
+              {items.length === 0 && canCreate && (
                 <Button onClick={openAdd}>
                   <Plus className="me-2 h-4 w-4" />
                   {t("taxonomy.addEntry", "Add entry")}
@@ -178,24 +231,28 @@ export function TaxonomyManager({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map(item => (
+                {filtered.map((item) => (
                   <TableRow key={item.id}>
                     <TableCell className="font-medium">{item.name}</TableCell>
                     {withCode && <TableCell className="text-muted-foreground">{item.code || "—"}</TableCell>}
                     <TableCell className="text-muted-foreground">{item.description || "—"}</TableCell>
                     {withUsage && (
                       <TableCell className="text-end">
-                        <Badge variant="secondary">{usageCount(kind, item.name)}</Badge>
+                        <Badge variant="secondary">{usageCount(item)}</Badge>
                       </TableCell>
                     )}
                     <TableCell className="text-end">
                       <div className="flex justify-end gap-1">
-                        <Button variant="ghost" size="icon" onClick={() => openEdit(item)} aria-label={t("common.edit", "Edit")}>
-                          <Edit className="h-4 w-4" />
-                        </Button>
-                        <Button variant="ghost" size="icon" onClick={() => handleDeleteClick(item)} aria-label={t("common.delete", "Delete")}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        {canEdit && (
+                          <Button variant="ghost" size="icon" onClick={() => openEdit(item)} aria-label={t("common.edit", "Edit")}>
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {canDelete && (
+                          <Button variant="ghost" size="icon" onClick={() => handleDeleteClick(item)} aria-label={t("common.delete", "Delete")}>
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -217,26 +274,41 @@ export function TaxonomyManager({
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="tx-name">{t("taxonomy.name", "Name")}</Label>
-              <Input id="tx-name" value={form.name} maxLength={80}
-                onChange={e => setForm({ ...form, name: e.target.value })} required />
+              <Input
+                id="tx-name"
+                value={form.name}
+                maxLength={80}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                required
+              />
             </div>
             {withCode && (
               <div className="space-y-2">
                 <Label htmlFor="tx-code">{t("taxonomy.code", "Code")}</Label>
-                <Input id="tx-code" value={form.code} maxLength={12}
-                  onChange={e => setForm({ ...form, code: e.target.value })} />
+                <Input
+                  id="tx-code"
+                  value={form.code}
+                  maxLength={12}
+                  onChange={(e) => setForm({ ...form, code: e.target.value })}
+                />
               </div>
             )}
             <div className="space-y-2">
               <Label htmlFor="tx-desc">{t("taxonomy.description", "Description")}</Label>
-              <Input id="tx-desc" value={form.description} maxLength={160}
-                onChange={e => setForm({ ...form, description: e.target.value })} />
+              <Input
+                id="tx-desc"
+                value={form.description}
+                maxLength={160}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+              />
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 {t("common.cancel", "Cancel")}
               </Button>
-              <Button type="submit">{t("common.save", "Save")}</Button>
+              <Button type="submit" disabled={isSaving}>
+                {t("common.save", "Save")}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>
@@ -244,9 +316,9 @@ export function TaxonomyManager({
 
       <ConfirmDeleteDialog
         open={deleteId !== null}
-        onOpenChange={open => !open && setDeleteId(null)}
+        onOpenChange={(open) => !open && setDeleteId(null)}
         onConfirm={confirmDelete}
-        itemName={items.find(i => i.id === deleteId)?.name}
+        itemName={items.find((i) => i.id === deleteId)?.name}
       />
     </div>
   );

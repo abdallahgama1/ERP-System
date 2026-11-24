@@ -10,9 +10,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useSales } from "@/contexts/SalesContext";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
@@ -30,9 +31,10 @@ export default function SalesReturns() {
   const {
     customers, invoices, salesReturns, createSalesReturn, creditNoteBalance,
     applyCreditNoteToInvoice, returnedQtyForInvoice, invoiceBalance,
-  } = useSales();
-  const { branches } = useInventory();
+  } = useSalesScope({ customers: true, invoices: true, salesReturns: true, products: true });
+  const { branches } = useInventoryScope();
   const { user } = useAuth();
+  const { can } = usePermissions();
   const { toast } = useToast();
 
   const [open, setOpen] = useState(false);
@@ -137,10 +139,12 @@ export default function SalesReturns() {
             {t("sales.salesReturns.subtitle", "Take goods back, restock or write them off, and issue a credit note.")}
           </p>
         </div>
-        <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4 me-2" />
-          {t("sales.salesReturns.new", "New Return")}
-        </Button>
+        {can("sales", "create") && (
+          <Button onClick={() => setOpen(true)}>
+            <Plus className="h-4 w-4 me-2" />
+            {t("sales.salesReturns.new", "New Return")}
+          </Button>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -166,7 +170,9 @@ export default function SalesReturns() {
               <p className="text-muted-foreground">
                 {t("sales.salesReturns.empty", "No returns yet. Create one against a sent invoice.")}
               </p>
-              <Button onClick={() => setOpen(true)}>{t("sales.salesReturns.new", "New Return")}</Button>
+              {can("sales", "create") && (
+                <Button onClick={() => setOpen(true)}>{t("sales.salesReturns.new", "New Return")}</Button>
+              )}
             </div>
           ) : (
             <Table>
@@ -197,14 +203,16 @@ export default function SalesReturns() {
                         : <Badge>{t("sales.salesReturns.fullyApplied", "Applied")}</Badge>}
                     </TableCell>
                     <TableCell className="text-end">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={creditNoteBalance(r) <= 0}
-                        onClick={() => { setApplyFor(r); setApplyAmount(creditNoteBalance(r).toFixed(2)); }}
-                      >
-                        {t("sales.salesReturns.applyCredit", "Apply credit")}
-                      </Button>
+                      {can("sales", "edit") && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={creditNoteBalance(r) <= 0}
+                          onClick={() => { setApplyFor(r); setApplyAmount(creditNoteBalance(r).toFixed(2)); }}
+                        >
+                          {t("sales.salesReturns.applyCredit", "Apply credit")}
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}

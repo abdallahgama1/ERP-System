@@ -27,8 +27,9 @@ import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { downloadPurchaseOrderPdf, printPurchaseOrder } from "@/lib/pdf/purchaseOrderPdf";
 import type { PurchaseOrder, PurchaseOrderStatus } from "@/types";
 import { useBranch } from "@/contexts/BranchContext";
-import { useInventory } from "@/contexts/InventoryContext";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 
@@ -36,9 +37,13 @@ const PurchaseOrders = () => {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { settings } = useSettings();
+  const { can } = usePermissions();
+  const canCreate = can("purchases", "create");
+  const canEdit = can("purchases", "edit");
+  const canDelete = can("purchases", "delete");
   const { activeBranchId } = useBranch();
-  const { products, branches } = useInventory();
-  const { purchaseOrders, vendors, deletePurchaseOrder, cancelPurchaseOrder } = usePurchases();
+  const { products, branches } = useInventoryScope({ products: true });
+  const { purchaseOrders, vendors, deletePurchaseOrder, cancelPurchaseOrder } = usePurchasingScope({ purchaseOrders: true, vendors: true, products: true });
   const [searchTerm, setSearchTerm] = useState("");
   const [page, setPage] = useState(1);
   const [deletePoId, setDeletePoId] = useState<string | null>(null);
@@ -144,12 +149,14 @@ const PurchaseOrders = () => {
           <h1 className="text-3xl font-bold tracking-tight">{t("purchaseOrders.title")}</h1>
           <p className="text-muted-foreground">{t("purchaseOrders.description")}</p>
         </div>
-        <Button asChild>
-          <Link to="/purchases/orders/new">
-            <Plus className="me-2 h-4 w-4" />
-            {t("purchaseOrders.createPO")}
-          </Link>
-        </Button>
+        {canCreate && (
+          <Button asChild>
+            <Link to="/purchases/orders/new">
+              <Plus className="me-2 h-4 w-4" />
+              {t("purchaseOrders.createPO")}
+            </Link>
+          </Button>
+        )}
       </div>
 
       {purchaseOrders.length === 0 && (purchaseOrdersPage?.pageInfo?.total ?? 0) === 0 && !searchTerm.trim() ? (
@@ -161,12 +168,14 @@ const PurchaseOrders = () => {
           <p className="mt-2 text-center text-muted-foreground max-w-sm">
             {t("purchaseOrders.noOrdersDescription")}
           </p>
-          <Button className="mt-6" asChild>
-            <Link to="/purchases/orders/new">
-              <Plus className="me-2 h-4 w-4" />
-              {t("purchaseOrders.createFirstPO")}
-            </Link>
-          </Button>
+          {canCreate && (
+            <Button className="mt-6" asChild>
+              <Link to="/purchases/orders/new">
+                <Plus className="me-2 h-4 w-4" />
+                {t("purchaseOrders.createFirstPO")}
+              </Link>
+            </Button>
+          )}
         </Card>
       ) : (
         <Card>
@@ -257,7 +266,7 @@ const PurchaseOrders = () => {
                               </DropdownMenuContent>
                             </DropdownMenu>
                           )}
-                          {po.status === "Draft" && (
+                          {canEdit && po.status === "Draft" && (
                             <Button
                               variant="ghost"
                               size="icon"
@@ -269,7 +278,7 @@ const PurchaseOrders = () => {
                               </Link>
                             </Button>
                           )}
-                          {po.status === "Draft" && (
+                          {canDelete && po.status === "Draft" && (
                             <Button
                               variant="ghost"
                               size="icon"
@@ -279,7 +288,7 @@ const PurchaseOrders = () => {
                               <Trash2 className="h-4 w-4 text-destructive" />
                             </Button>
                           )}
-                          {po.status === "Issued" && po.items.every((i) => i.receivedQty === 0) && (
+                          {canDelete && po.status === "Issued" && po.items.every((i) => i.receivedQty === 0) && (
                             <Button
                               variant="ghost"
                               size="icon"

@@ -1,5 +1,5 @@
 import { buildApp } from "./app.ts";
-import { DEV_COOKIE_SECRET_PLACEHOLDER, env } from "./config.ts";
+import { DEV_COOKIE_SECRET_PLACEHOLDER, env, resolveMfaEncryptionKey } from "./config.ts";
 import { checkDatabaseConnection, closeDatabase, getDb, isDatabaseConfigured } from "./db/index.ts";
 import { createModuleLogger } from "./logging/logger.ts";
 import { flushBackendSentry, initBackendSentry } from "./observability/sentry.ts";
@@ -19,6 +19,17 @@ async function start(): Promise<void> {
     throw new Error(
       "AUTH_COOKIE_SECRET must be set to a random string of at least 32 characters when NODE_ENV=production."
     );
+  }
+  if (env.NODE_ENV === "production") {
+    resolveMfaEncryptionKey();
+    if (
+      env.STORAGE_DRIVER === "s3" &&
+      (!env.S3_BUCKET || !env.S3_ACCESS_KEY_ID || !env.S3_SECRET_ACCESS_KEY)
+    ) {
+      throw new Error(
+        "S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY must be set when STORAGE_DRIVER=s3 in production."
+      );
+    }
   }
 
   initBackendSentry();

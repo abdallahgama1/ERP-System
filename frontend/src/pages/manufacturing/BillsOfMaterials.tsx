@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { useBomsQuery, useCreateBomMutation } from "@/hooks/queries/useManufacturingQueries";
@@ -31,7 +31,7 @@ interface DraftComponentLine {
 
 export default function BillsOfMaterials() {
   const { t } = useTranslation();
-  const { products } = useInventory();
+  const { products } = useInventoryScope({ products: true });
   const { can } = usePermissions();
   const { settings } = useSettings();
   const { toast } = useToast();

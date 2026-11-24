@@ -40,7 +40,7 @@ import {
   updatePosTerminal,
 } from "../services/pos.service.ts";
 import { syncOfflinePosBatch } from "../services/pos-sync.service.ts";
-import { parseOrThrow } from "../services/stock-locks.ts";
+import { actorCompanyId, parseOrThrow } from "../services/stock-locks.ts";
 
 export async function posRoutes(app: FastifyInstance): Promise<void> {
   const pinRateLimit =
@@ -58,7 +58,7 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/pos/terminals", { preHandler: requirePermission("pos", "edit") }, async (req, reply) => {
     const data = parseOrThrow(createPosTerminalSchema, req.body, "Invalid POS terminal payload");
     const terminal = await createPosTerminal(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("pos_updated", { terminalId: terminal.id });
+    eventBroadcaster.broadcast("pos_updated", { terminalId: terminal.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ terminal });
   });
 
@@ -66,7 +66,7 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const data = parseOrThrow(updatePosTerminalSchema, req.body, "Invalid POS terminal update");
     const terminal = await updatePosTerminal(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("pos_updated", { terminalId: id });
+    eventBroadcaster.broadcast("pos_updated", { terminalId: id }, actorCompanyId(req.authUser!));
     return { terminal };
   });
 
@@ -115,6 +115,7 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
       return switchCashierByPin(getDb(), {
         sessionId: req.authSessionId,
         terminalId: targetTerminalId,
+        companyId: actorCompanyId(req.authUser!),
         pin: data.pin,
         cashierId: data.userId,
         ipAddress: req.ip,
@@ -136,7 +137,7 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/pos/shifts/open", { preHandler: requirePermission("pos", "create") }, async (req, reply) => {
     const data = parseOrThrow(openShiftSchema, req.body, "Invalid shift open payload");
     const shift = await openPosShift(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("pos_updated", { shiftId: shift.id });
+    eventBroadcaster.broadcast("pos_updated", { shiftId: shift.id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ shift });
   });
 
@@ -144,7 +145,7 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const data = parseOrThrow(shiftCashMovementSchema, req.body, "Invalid cash movement payload");
     const movement = await recordShiftCashMovement(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("pos_updated", { shiftId: id });
+    eventBroadcaster.broadcast("pos_updated", { shiftId: id }, actorCompanyId(req.authUser!));
     return reply.status(201).send({ movement });
   });
 
@@ -152,8 +153,9 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const data = parseOrThrow(closeShiftSchema, req.body, "Invalid shift close payload");
     const shift = await closePosShift(getDb(), req.authUser!, id, data, req.ip);
-    eventBroadcaster.broadcast("pos_updated", { shiftId: id });
-    eventBroadcaster.broadcast("accounting_updated", { shiftId: id });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("pos_updated", { shiftId: id }, companyId);
+    eventBroadcaster.broadcast("accounting_updated", { shiftId: id }, companyId);
     return { shift };
   });
 
@@ -161,10 +163,11 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/pos/checkout", { preHandler: requirePermission("pos", "create") }, async (req, reply) => {
     const data = parseOrThrow(posCheckoutSchema, req.body, "Invalid POS checkout payload");
     const receipt = await createPosCheckout(getDb(), req.authUser!, data, req.ip);
-    eventBroadcaster.broadcast("pos_updated", { invoiceId: receipt.id });
-    eventBroadcaster.broadcast("sales_updated", { invoiceId: receipt.id });
-    eventBroadcaster.broadcast("inventory_updated", { invoiceId: receipt.id });
-    eventBroadcaster.broadcast("accounting_updated", { invoiceId: receipt.id });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("pos_updated", { invoiceId: receipt.id }, companyId);
+    eventBroadcaster.broadcast("sales_updated", { invoiceId: receipt.id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { invoiceId: receipt.id }, companyId);
+    eventBroadcaster.broadcast("accounting_updated", { invoiceId: receipt.id }, companyId);
     return reply.status(201).send({ receipt });
   });
 
@@ -175,11 +178,12 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
       (r) => r.status === "synced" || r.status === "reconciled_conflict"
     ).length;
     if (syncedCount > 0) {
-      eventBroadcaster.broadcast("pos_updated", { syncedCount });
-      eventBroadcaster.broadcast("sales_updated", { syncedCount });
-      eventBroadcaster.broadcast("inventory_updated", { syncedCount });
-      eventBroadcaster.broadcast("accounting_updated", { syncedCount });
-      eventBroadcaster.broadcast("notifications_updated", { syncedCount });
+      const companyId = actorCompanyId(req.authUser!);
+      eventBroadcaster.broadcast("pos_updated", { syncedCount }, companyId);
+      eventBroadcaster.broadcast("sales_updated", { syncedCount }, companyId);
+      eventBroadcaster.broadcast("inventory_updated", { syncedCount }, companyId);
+      eventBroadcaster.broadcast("accounting_updated", { syncedCount }, companyId);
+      eventBroadcaster.broadcast("notifications_updated", { syncedCount }, companyId);
     }
     return response;
   });
@@ -192,6 +196,7 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
       pin: data.pin,
       managerUserId: data.managerUserId,
       terminalId: data.terminalId ?? req.posTerminalId ?? undefined,
+      companyId: actorCompanyId(actor),
       action: data.action,
       reason: data.reason,
       requestedByUserId: actor.id,
@@ -227,10 +232,11 @@ export async function posRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/api/pos/returns", { preHandler: requirePermission("pos", "create") }, async (req, reply) => {
     const result = await createPosReturn(getDb(), req.authUser!, req.body, req.ip);
-    eventBroadcaster.broadcast("pos_updated", { posReturnId: result.posReturn.id });
-    eventBroadcaster.broadcast("sales_updated", { posReturnId: result.posReturn.id });
-    eventBroadcaster.broadcast("inventory_updated", { posReturnId: result.posReturn.id });
-    eventBroadcaster.broadcast("accounting_updated", { posReturnId: result.posReturn.id });
+    const companyId = actorCompanyId(req.authUser!);
+    eventBroadcaster.broadcast("pos_updated", { posReturnId: result.posReturn.id }, companyId);
+    eventBroadcaster.broadcast("sales_updated", { posReturnId: result.posReturn.id }, companyId);
+    eventBroadcaster.broadcast("inventory_updated", { posReturnId: result.posReturn.id }, companyId);
+    eventBroadcaster.broadcast("accounting_updated", { posReturnId: result.posReturn.id }, companyId);
     return reply.status(201).send(result);
   });
 }

@@ -1,7 +1,7 @@
 import type { ZodType, ZodTypeDef } from "zod";
 import { computeWmac, roundCurrency, type AppRole, type BranchScopeMode } from "@erp/shared";
 import { eq, sql } from "drizzle-orm";
-import { branchProducts, stockMovements, type MovementType } from "../../drizzle/schema.ts";
+import { branches, branchProducts, DEFAULT_COMPANY_ID, stockMovements, type MovementType } from "../../drizzle/schema.ts";
 import type { DbOrTx } from "../auth/permissions.ts";
 import { AppError, num, toNumeric } from "../db/helpers.ts";
 
@@ -11,8 +11,28 @@ export interface RequestActor {
   id: string;
   name: string;
   role: AppRole;
+  activeCompanyId?: string;
   branchScopeMode: BranchScopeMode;
   branchIds: string[];
+}
+
+export function actorCompanyId(actor?: Pick<RequestActor, "activeCompanyId"> | null): string {
+  return actor?.activeCompanyId || DEFAULT_COMPANY_ID;
+}
+
+export async function assertBranchInCompany(
+  tx: DbOrTx,
+  branchId: string,
+  companyId: string
+): Promise<void> {
+  const [row] = await tx
+    .select({ id: branches.id, companyId: branches.companyId })
+    .from(branches)
+    .where(eq(branches.id, branchId))
+    .limit(1);
+  if (!row || row.companyId !== companyId) {
+    throw new AppError(404, "Branch not found in active company", "NOT_FOUND");
+  }
 }
 
 export function parseOrThrow<TOut>(
@@ -35,16 +55,29 @@ export async function lockBranchProduct(
   tx: DbOrTx,
   branchId: string,
   productId: string,
-  fallbackCost = 0
+  fallbackCost = 0,
+  companyId?: string
 ): Promise<{
   id: string;
+  companyId: string;
   qtyOnHand: number;
   qtyReserved: number;
   avgCost: number;
 }> {
+  let effectiveCompanyId = companyId;
+  if (!effectiveCompanyId) {
+    const [b] = await tx
+      .select({ companyId: branches.companyId })
+      .from(branches)
+      .where(eq(branches.id, branchId))
+      .limit(1);
+    effectiveCompanyId = b?.companyId ?? DEFAULT_COMPANY_ID;
+  }
+
   await tx
     .insert(branchProducts)
     .values({
+      companyId: effectiveCompanyId,
       branchId,
       productId,
       qtyOnHand: "0",
@@ -55,11 +88,12 @@ export async function lockBranchProduct(
 
   const rows = await tx.execute<{
     id: string;
+    company_id: string;
     qty_on_hand: string;
     qty_reserved: string;
     avg_cost: string;
   }>(sql`
-    SELECT id, qty_on_hand, qty_reserved, avg_cost
+    SELECT id, company_id, qty_on_hand, qty_reserved, avg_cost
     FROM branch_products
     WHERE branch_id = ${branchId} AND product_id = ${productId}
     FOR UPDATE
@@ -72,6 +106,7 @@ export async function lockBranchProduct(
 
   return {
     id: row.id,
+    companyId: row.company_id || effectiveCompanyId,
     qtyOnHand: num(row.qty_on_hand),
     qtyReserved: num(row.qty_reserved),
     avgCost: num(row.avg_cost),
@@ -79,6 +114,7 @@ export async function lockBranchProduct(
 }
 
 export interface StockChangeInput {
+  companyId?: string;
   branchId: string;
   productId: string;
   qtyDelta: number;
@@ -114,7 +150,7 @@ export async function applyBranchStockMovement(
   totalValueDelta: number;
 }> {
   const fallback = input.fallbackCost ?? input.unitCostForWmac ?? 0;
-  const bp = await lockBranchProduct(tx, input.branchId, input.productId, fallback);
+  const bp = await lockBranchProduct(tx, input.branchId, input.productId, fallback, input.companyId);
   const previousQty = bp.qtyOnHand;
   const rawNewQty = previousQty + input.qtyDelta;
 
@@ -159,6 +195,7 @@ export async function applyBranchStockMovement(
   const [movementRow] = await tx
     .insert(stockMovements)
     .values({
+      companyId: input.companyId ?? bp.companyId,
       branchId: input.branchId,
       productId: input.productId,
       movementType: input.movementType,

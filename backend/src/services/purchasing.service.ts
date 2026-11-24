@@ -32,11 +32,21 @@ import {
   listBranchScopedPaginated,
   parseOffsetQueryOrThrow,
 } from "./query-helpers.ts";
-import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  applyBranchStockMovement,
+  assertBranchInCompany,
+  type RequestActor,
+} from "./stock-locks.ts";
 
-export async function listVendors(db: AppDatabase, rawQuery?: Record<string, unknown>) {
+export async function listVendors(
+  db: AppDatabase,
+  actor: RequestActor,
+  rawQuery?: Record<string, unknown>
+) {
+  const companyId = actorCompanyId(actor);
   const query = parseOffsetQueryOrThrow(vendorsListQuerySchema, rawQuery);
-  const conds: SQL[] = [];
+  const conds: SQL[] = [eq(vendors.companyId, companyId)];
   const term = resolveSearchTerm(query);
   if (term) {
     const pattern = `%${term}%`;
@@ -51,7 +61,7 @@ export async function listVendors(db: AppDatabase, rawQuery?: Record<string, unk
       )!
     );
   }
-  const whereClause = conds.length > 0 ? and(...conds) : undefined;
+  const whereClause = and(...conds);
 
   const [{ total }] = await db
     .select({ total: sql<number>`count(*)::int` })
@@ -84,10 +94,21 @@ export async function createVendor(
   data: z.infer<typeof vendorSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const code = data.code || (await nextDocNumber(tx, "VEND", "VEN-"));
-    const [row] = await tx.insert(vendors).values({ ...data, code }).returning();
+    const code = data.code || (await nextDocNumber(tx, "VEND", "VEN-", null, companyId));
+    const dup = await tx
+      .select({ id: vendors.id })
+      .from(vendors)
+      .where(and(eq(vendors.companyId, companyId), eq(vendors.code, code)))
+      .limit(1);
+    if (dup.length > 0) {
+      throw new AppError(409, `Vendor code '${code}' already exists`, "DUPLICATE_CODE");
+    }
+
+    const [row] = await tx.insert(vendors).values({ ...data, companyId, code }).returning();
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -108,15 +129,31 @@ export async function updateVendor(
   data: Partial<z.infer<typeof vendorSchema>>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [current] = await tx.select().from(vendors).where(eq(vendors.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(vendors)
+      .where(and(eq(vendors.id, id), eq(vendors.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Vendor not found", "NOT_FOUND");
+    if (data.code && data.code !== current.code) {
+      const dup = await tx
+        .select({ id: vendors.id })
+        .from(vendors)
+        .where(and(eq(vendors.companyId, companyId), eq(vendors.code, data.code)))
+        .limit(1);
+      if (dup.length > 0) {
+        throw new AppError(409, `Vendor code '${data.code}' already exists`, "DUPLICATE_CODE");
+      }
+    }
     const [row] = await tx
       .update(vendors)
       .set({ ...data, updatedAt: new Date() })
-      .where(eq(vendors.id, id))
+      .where(and(eq(vendors.id, id), eq(vendors.companyId, companyId)))
       .returning();
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -131,29 +168,35 @@ export async function updateVendor(
 }
 
 export async function deleteVendor(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [current] = await tx.select().from(vendors).where(eq(vendors.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(vendors)
+      .where(and(eq(vendors.id, id), eq(vendors.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Vendor not found", "NOT_FOUND");
 
     const [{ poC }] = await tx
       .select({ poC: sql<number>`count(*)::int` })
       .from(purchaseOrders)
-      .where(eq(purchaseOrders.vendorId, id));
+      .where(and(eq(purchaseOrders.companyId, companyId), eq(purchaseOrders.vendorId, id)));
     const [{ billC }] = await tx
       .select({ billC: sql<number>`count(*)::int` })
       .from(vendorBills)
-      .where(eq(vendorBills.vendorId, id));
+      .where(and(eq(vendorBills.companyId, companyId), eq(vendorBills.vendorId, id)));
     const [{ payC }] = await tx
       .select({ payC: sql<number>`count(*)::int` })
       .from(paymentsMade)
-      .where(eq(paymentsMade.vendorId, id));
+      .where(and(eq(paymentsMade.companyId, companyId), eq(paymentsMade.vendorId, id)));
 
     if (poC > 0 || billC > 0 || payC > 0) {
       throw new AppError(409, "Cannot delete vendor with existing orders, bills, or payments", "VENDOR_IN_USE");
     }
 
-    await tx.delete(vendors).where(eq(vendors.id, id));
+    await tx.delete(vendors).where(and(eq(vendors.id, id), eq(vendors.companyId, companyId)));
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -186,6 +229,7 @@ export async function listPurchaseOrders(
   actor: RequestActor,
   rawQuery?: Record<string, unknown>
 ) {
+  const companyId = actorCompanyId(actor);
   const query = parseOffsetQueryOrThrow(purchaseOrdersListQuerySchema, rawQuery);
   if (query.branchId) {
     assertBranchAccess(actor, query.branchId);
@@ -204,7 +248,7 @@ export async function listPurchaseOrders(
     const matchedVendors = await db
       .select({ id: vendors.id })
       .from(vendors)
-      .where(ilike(vendors.name, pattern));
+      .where(and(eq(vendors.companyId, companyId), ilike(vendors.name, pattern)));
     const vendorIds = matchedVendors.map((v) => v.id);
     if (vendorIds.length > 0) {
       extraConditions.push(
@@ -283,18 +327,39 @@ export async function createPurchaseOrder(
   data: z.infer<typeof poSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const poNumber = await nextDocNumber(tx, "PO", "PO-");
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const [vend] = await tx
+      .select({ id: vendors.id })
+      .from(vendors)
+      .where(and(eq(vendors.id, data.vendorId), eq(vendors.companyId, companyId)))
+      .limit(1);
+    if (!vend) throw new AppError(404, "Vendor not found", "NOT_FOUND");
+
+    const uniqueProdIds = Array.from(new Set(data.lines.map((l) => l.productId)));
+    if (uniqueProdIds.length > 0) {
+      const validProds = await tx
+        .select({ id: products.id })
+        .from(products)
+        .where(and(eq(products.companyId, companyId), inArray(products.id, uniqueProdIds)));
+      if (validProds.length !== uniqueProdIds.length) {
+        throw new AppError(404, "One or more products not found in active company", "NOT_FOUND");
+      }
+    }
+
+    const poNumber = await nextDocNumber(tx, "PO", "PO-", null, companyId);
     const { subtotal, taxTotal, computed } = summarizeCostLines(data.lines);
     const totalAmount = subtotal + taxTotal;
     const needsApproval =
-      data.status === "Issued" && Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount));
+      data.status === "Issued" && Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount, companyId));
 
     const [po] = await tx
       .insert(purchaseOrders)
       .values({
+        companyId,
         poNumber,
         vendorId: data.vendorId,
         branchId: data.branchId,
@@ -339,6 +404,7 @@ export async function createPurchaseOrder(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -361,19 +427,44 @@ export async function updatePurchaseOrder(
   data: z.infer<typeof poSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const [current] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(purchaseOrders)
+      .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Purchase order not found", "NOT_FOUND");
+    assertBranchAccess(actor, current.branchId);
     if (current.status !== "Draft") {
       throw new AppError(400, "Only Draft purchase orders can be edited", "IMMUTABLE_DOCUMENT");
+    }
+
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const [vend] = await tx
+      .select({ id: vendors.id })
+      .from(vendors)
+      .where(and(eq(vendors.id, data.vendorId), eq(vendors.companyId, companyId)))
+      .limit(1);
+    if (!vend) throw new AppError(404, "Vendor not found", "NOT_FOUND");
+
+    const uniqueProdIds = Array.from(new Set(data.lines.map((l) => l.productId)));
+    if (uniqueProdIds.length > 0) {
+      const validProds = await tx
+        .select({ id: products.id })
+        .from(products)
+        .where(and(eq(products.companyId, companyId), inArray(products.id, uniqueProdIds)));
+      if (validProds.length !== uniqueProdIds.length) {
+        throw new AppError(404, "One or more products not found in active company", "NOT_FOUND");
+      }
     }
 
     const { subtotal, taxTotal, computed } = summarizeCostLines(data.lines);
     const totalAmount = subtotal + taxTotal;
     const needsApproval =
-      data.status === "Issued" && Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount));
+      data.status === "Issued" && Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount, companyId));
 
     const [po] = await tx
       .update(purchaseOrders)
@@ -392,7 +483,7 @@ export async function updatePurchaseOrder(
         notes: data.notes,
         updatedAt: new Date(),
       })
-      .where(eq(purchaseOrders.id, id))
+      .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)))
       .returning();
 
     await tx.delete(purchaseOrderLines).where(eq(purchaseOrderLines.poId, id));
@@ -423,6 +514,7 @@ export async function updatePurchaseOrder(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -439,19 +531,24 @@ export async function updatePurchaseOrder(
 }
 
 export async function issuePurchaseOrder(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [po] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
+    const [po] = await tx
+      .select()
+      .from(purchaseOrders)
+      .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)))
+      .limit(1);
     if (!po) throw new AppError(404, "Purchase order not found", "NOT_FOUND");
     assertBranchAccess(actor, po.branchId);
     if (po.status !== "Draft") throw new AppError(400, "Only Draft POs can be issued", "INVALID_STATUS");
     const totalAmount = num(po.totalAmount);
-    const needsApproval = Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount));
+    const needsApproval = Boolean(await checkApprovalRequired(tx, "purchase_order", totalAmount, companyId));
 
     if (needsApproval) {
       const [pendingPo] = await tx
         .update(purchaseOrders)
         .set({ approvalStatus: "pending", updatedAt: new Date() })
-        .where(eq(purchaseOrders.id, id))
+        .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)))
         .returning();
       await createApprovalRequest(tx, {
         entityType: "purchase_order",
@@ -468,9 +565,10 @@ export async function issuePurchaseOrder(db: AppDatabase, actor: RequestActor, i
     const [res] = await tx
       .update(purchaseOrders)
       .set({ status: "Issued", updatedAt: new Date() })
-      .where(eq(purchaseOrders.id, id))
+      .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)))
       .returning();
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -486,8 +584,13 @@ export async function issuePurchaseOrder(db: AppDatabase, actor: RequestActor, i
 }
 
 export async function cancelPurchaseOrder(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [po] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
+    const [po] = await tx
+      .select()
+      .from(purchaseOrders)
+      .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)))
+      .limit(1);
     if (!po) throw new AppError(404, "Purchase order not found", "NOT_FOUND");
     assertBranchAccess(actor, po.branchId);
     if (po.status === "Closed" || po.status === "Partially Received") {
@@ -497,9 +600,10 @@ export async function cancelPurchaseOrder(db: AppDatabase, actor: RequestActor, 
     const [res] = await tx
       .update(purchaseOrders)
       .set({ status: "Cancelled", updatedAt: new Date() })
-      .where(eq(purchaseOrders.id, id))
+      .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)))
       .returning();
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -515,14 +619,19 @@ export async function cancelPurchaseOrder(db: AppDatabase, actor: RequestActor, 
 }
 
 export async function deletePurchaseOrder(db: AppDatabase, actor: RequestActor, id: string) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [po] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
+    const [po] = await tx
+      .select()
+      .from(purchaseOrders)
+      .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)))
+      .limit(1);
     if (!po) throw new AppError(404, "Purchase order not found", "NOT_FOUND");
     assertBranchAccess(actor, po.branchId);
     if (po.status !== "Draft") {
       throw new AppError(400, "Only Draft POs can be deleted", "IMMUTABLE_DOCUMENT");
     }
-    await tx.delete(purchaseOrders).where(eq(purchaseOrders.id, id));
+    await tx.delete(purchaseOrders).where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.companyId, companyId)));
   });
 }
 
@@ -561,14 +670,33 @@ export async function createPurchaseReceive(
   data: z.infer<typeof receiveSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const receiveNumber = await nextDocNumber(tx, "PRCV", "RCV-");
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const [vend] = await tx
+      .select({ id: vendors.id })
+      .from(vendors)
+      .where(and(eq(vendors.id, data.vendorId), eq(vendors.companyId, companyId)))
+      .limit(1);
+    if (!vend) throw new AppError(404, "Vendor not found", "NOT_FOUND");
+
+    if (data.poId) {
+      const [po] = await tx
+        .select({ id: purchaseOrders.id })
+        .from(purchaseOrders)
+        .where(and(eq(purchaseOrders.id, data.poId), eq(purchaseOrders.companyId, companyId)))
+        .limit(1);
+      if (!po) throw new AppError(404, "Purchase order not found", "NOT_FOUND");
+    }
+
+    const receiveNumber = await nextDocNumber(tx, "PRCV", "RCV-", null, companyId);
 
     const [rcv] = await tx
       .insert(purchaseReceives)
       .values({
+        companyId,
         receiveNumber,
         poId: data.poId ?? null,
         vendorId: data.vendorId,
@@ -584,10 +712,15 @@ export async function createPurchaseReceive(
     let totalReceiveVal = 0;
 
     for (const line of sortedLines) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+        .limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
 
       const moved = await applyBranchStockMovement(tx, {
+        companyId,
         branchId: data.branchId,
         productId: line.productId,
         qtyDelta: line.quantity,
@@ -603,6 +736,7 @@ export async function createPurchaseReceive(
         actorId: actor.id,
       });
       await receiveTrackedStock(tx, {
+        companyId,
         product: prod,
         branchId: data.branchId,
         quantity: line.quantity,
@@ -650,6 +784,7 @@ export async function createPurchaseReceive(
 
     if (totalReceiveVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: data.branchId,
         entryDate: rcv.receiveDate,
         sourceType: "purchase_receive",
@@ -677,10 +812,11 @@ export async function createPurchaseReceive(
           status: allClosed ? "Closed" : anyReceived ? "Partially Received" : "Issued",
           updatedAt: new Date(),
         })
-        .where(eq(purchaseOrders.id, data.poId));
+        .where(and(eq(purchaseOrders.id, data.poId), eq(purchaseOrders.companyId, companyId)));
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

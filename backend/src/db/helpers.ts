@@ -1,5 +1,6 @@
+import { AUDIT_SENSITIVE_FIELDS } from "@erp/shared";
 import { eq, sql } from "drizzle-orm";
-import { auditLogs, documentSequences } from "../../drizzle/schema.ts";
+import { auditLogs, DEFAULT_COMPANY_ID, documentSequences } from "../../drizzle/schema.ts";
 import type { DbOrTx } from "../auth/permissions.ts";
 import { getRequestContext } from "../logging/logger.ts";
 
@@ -32,8 +33,10 @@ export async function nextDocNumber(
   tx: DbOrTx,
   docType: string,
   defaultPrefix?: string,
-  branchId?: string | null
+  branchId?: string | null,
+  companyId: string = DEFAULT_COMPANY_ID
 ): Promise<string> {
+  const effectiveCompanyId = companyId || DEFAULT_COMPANY_ID;
   const scopeKey = branchId ? `branch:${branchId}` : "company";
   const rows = await tx.execute<{
     id: string;
@@ -43,7 +46,7 @@ export async function nextDocNumber(
   }>(sql`
     SELECT id, prefix, next_number, padding
     FROM document_sequences
-    WHERE doc_type = ${docType} AND scope_key = ${scopeKey}
+    WHERE company_id = ${effectiveCompanyId} AND doc_type = ${docType} AND scope_key = ${scopeKey}
     FOR UPDATE
   `);
 
@@ -53,6 +56,7 @@ export async function nextDocNumber(
     const [inserted] = await tx
       .insert(documentSequences)
       .values({
+        companyId: effectiveCompanyId,
         docType,
         scopeKey,
         branchId: branchId ?? null,
@@ -75,7 +79,7 @@ export async function nextDocNumber(
     }>(sql`
       SELECT id, prefix, next_number, padding
       FROM document_sequences
-      WHERE doc_type = ${docType} AND scope_key = ${scopeKey}
+      WHERE company_id = ${effectiveCompanyId} AND doc_type = ${docType} AND scope_key = ${scopeKey}
       FOR UPDATE
     `);
     if (!retryRows[0]) {
@@ -93,7 +97,141 @@ export async function nextDocNumber(
   return `${seq.prefix}${String(assigned).padStart(seq.padding, "0")}`;
 }
 
+const toSnakeLower = (key: string): string =>
+  key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+
+const SENSITIVE_AUDIT_KEY_SET = new Set<string>(
+  AUDIT_SENSITIVE_FIELDS.flatMap((field) => [field.toLowerCase(), toSnakeLower(field)])
+);
+
+export function isSensitiveAuditKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  const snake = toSnakeLower(key);
+  if (SENSITIVE_AUDIT_KEY_SET.has(lower) || SENSITIVE_AUDIT_KEY_SET.has(snake)) {
+    return true;
+  }
+  return (
+    /password/.test(snake) ||
+    /(?:^|_)pin(?:$|_|hash|code)/.test(snake) ||
+    /pos_?pin/.test(snake) ||
+    /secret/.test(snake) ||
+    /(?:^|_)tokens?(?:$|_)/.test(snake) ||
+    /^recovery_codes?/.test(snake) ||
+    /^eta_client/.test(snake) ||
+    /^smtp_pass/.test(snake) ||
+    /^s3_secret/.test(snake)
+  );
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || value instanceof Date) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+export function scrubSensitiveAuditData(
+  value: unknown,
+  seen = new WeakSet<object>(),
+  depth = 0
+): unknown {
+  if (value === null || value === undefined) return value;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "bigint") return String(value);
+  if (typeof value !== "object") return value;
+  if (depth >= 16) return "[MAX_DEPTH]";
+  if (seen.has(value)) return "[CIRCULAR]";
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => scrubSensitiveAuditData(item, seen, depth + 1));
+    }
+
+    const source = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(source)) {
+      if (val === undefined) continue;
+      if (isSensitiveAuditKey(key)) {
+        out[key] = "[REDACTED]";
+      } else {
+        out[key] = scrubSensitiveAuditData(val, seen, depth + 1);
+      }
+    }
+    return out;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function canonicalAuditValue(value: unknown, seen = new WeakSet<object>(), depth = 0): unknown {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "bigint") return String(value);
+  if (typeof value !== "object") return value;
+  if (depth >= 16) return "[MAX_DEPTH]";
+  if (seen.has(value)) return "[CIRCULAR]";
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => canonicalAuditValue(item, seen, depth + 1));
+    }
+    const sorted: Record<string, unknown> = {};
+    const record = value as Record<string, unknown>;
+    for (const key of Object.keys(record).sort()) {
+      const val = record[key];
+      if (val !== undefined) {
+        sorted[key] = canonicalAuditValue(val, seen, depth + 1);
+      }
+    }
+    return sorted;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+export function computeAuditDiff(
+  before: Record<string, unknown> | null | undefined,
+  after: Record<string, unknown> | null | undefined
+): {
+  beforeJson: Record<string, unknown> | null;
+  afterJson: Record<string, unknown> | null;
+  changedFields: string[];
+} {
+  const beforeRecord = before && isPlainRecord(before) ? before : null;
+  const afterRecord = after && isPlainRecord(after) ? after : null;
+
+  const beforeJson = beforeRecord ? (scrubSensitiveAuditData(beforeRecord) as Record<string, unknown>) : null;
+  const afterJson = afterRecord ? (scrubSensitiveAuditData(afterRecord) as Record<string, unknown>) : null;
+
+  let changedFields: string[] = [];
+  if (beforeRecord && afterRecord) {
+    const allKeys = new Set<string>([...Object.keys(beforeRecord), ...Object.keys(afterRecord)]);
+    changedFields = Array.from(allKeys)
+      .filter((key) => {
+        const prev = beforeRecord[key];
+        const next = afterRecord[key];
+        if (prev === undefined && next === undefined) return false;
+        return JSON.stringify(canonicalAuditValue(prev)) !== JSON.stringify(canonicalAuditValue(next));
+      })
+      .sort();
+  } else if (afterJson) {
+    changedFields = Object.keys(afterJson).sort();
+  } else if (beforeJson) {
+    changedFields = Object.keys(beforeJson).sort();
+  }
+
+  return {
+    beforeJson,
+    afterJson,
+    changedFields,
+  };
+}
+
 export interface AuditWriteInput {
+  companyId?: string | null;
   userId?: string | null;
   userName: string;
   userRole?: string | null;
@@ -103,13 +241,21 @@ export interface AuditWriteInput {
   entityId: string;
   entityLabel?: string | null;
   details?: Record<string, unknown>;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  beforeJson?: Record<string, unknown> | null;
+  afterJson?: Record<string, unknown> | null;
   ipAddress?: string | null;
 }
 
 export async function writeAuditLog(tx: DbOrTx, input: AuditWriteInput): Promise<void> {
   const ctx = getRequestContext();
-  const details = ctx?.reqId ? { reqId: ctx.reqId, ...(input.details ?? {}) } : (input.details ?? {});
+  const rawDetails = ctx?.reqId ? { reqId: ctx.reqId, ...(input.details ?? {}) } : (input.details ?? {});
+  const details = scrubSensitiveAuditData(rawDetails) as Record<string, unknown>;
+  const diff = computeAuditDiff(input.before ?? input.beforeJson, input.after ?? input.afterJson);
+
   await tx.insert(auditLogs).values({
+    companyId: input.companyId || DEFAULT_COMPANY_ID,
     userId: input.userId ?? null,
     userName: input.userName,
     userRole: input.userRole ?? null,
@@ -119,6 +265,9 @@ export async function writeAuditLog(tx: DbOrTx, input: AuditWriteInput): Promise
     entityId: input.entityId,
     entityLabel: input.entityLabel ?? null,
     details,
+    beforeJson: diff.beforeJson,
+    afterJson: diff.afterJson,
+    changedFields: diff.changedFields,
     ipAddress: input.ipAddress ?? null,
   });
 }

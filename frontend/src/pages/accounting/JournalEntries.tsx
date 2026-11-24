@@ -24,11 +24,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
-import { TablePagination } from "@/components/TablePagination";
+import { EnterpriseDataTable, type EnterpriseColumn } from "@/components/EnterpriseDataTable";
+import { AttachmentsPanel } from "@/components/AttachmentsPanel";
 import {
   useAccountingMutations,
   useAccountsQuery,
@@ -62,7 +63,7 @@ export default function JournalEntries() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { can } = usePermissions();
-  const { branches } = useInventory();
+  const { branches } = useInventoryScope();
   const { settings } = useSettings();
 
   const [branchFilter, setBranchFilter] = useState<string>("all");
@@ -278,56 +279,74 @@ export default function JournalEntries() {
           </div>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
-            <p className="py-8 text-center text-muted-foreground">{t("common.loading")}</p>
-          ) : filteredEntries.length === 0 ? (
-            <p className="py-8 text-center text-muted-foreground">{t("common.noResults")}</p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("accounting.journals.entryNumber", "Entry #")}</TableHead>
-                  <TableHead>{t("common.date", "Date")}</TableHead>
-                  <TableHead>{t("accounting.journals.source", "Source")}</TableHead>
-                  <TableHead>{t("accounting.journals.memo", "Memo")}</TableHead>
-                  <TableHead>{t("common.branch", "Branch")}</TableHead>
-                  <TableHead className="text-end">{t("common.amount", "Amount")}</TableHead>
-                  <TableHead>{t("common.status")}</TableHead>
-                  <TableHead className="w-20" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredEntries.map((entry) => (
-                  <TableRow
-                    key={entry.id}
-                    className="cursor-pointer"
-                    onClick={() => setSelectedEntry(entry)}
-                  >
-                    <TableCell className="font-mono font-medium">{entry.entryNumber}</TableCell>
-                    <TableCell className="whitespace-nowrap">
-                      {new Date(entry.entryDate).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{entry.sourceType}</Badge>
-                    </TableCell>
-                    <TableCell>
+          <EnterpriseDataTable
+            data={filteredEntries}
+            columns={
+              [
+                {
+                  id: "entryNumber",
+                  header: t("accounting.journals.entryNumber", "Entry #"),
+                  hideable: false,
+                  sortable: true,
+                  cell: (entry) => <span className="font-mono font-medium">{entry.entryNumber}</span>,
+                },
+                {
+                  id: "entryDate",
+                  header: t("common.date", "Date"),
+                  sortable: true,
+                  cell: (entry) => (
+                    <span className="whitespace-nowrap">{new Date(entry.entryDate).toLocaleDateString()}</span>
+                  ),
+                },
+                {
+                  id: "sourceType",
+                  header: t("accounting.journals.source", "Source"),
+                  cell: (entry) => <Badge variant="outline">{entry.sourceType}</Badge>,
+                },
+                {
+                  id: "memo",
+                  header: t("accounting.journals.memo", "Memo"),
+                  cell: (entry) => (
+                    <div>
                       <div className="font-medium">{entry.memo}</div>
                       {entry.referenceNumber && (
                         <div className="text-xs text-muted-foreground">{entry.referenceNumber}</div>
                       )}
-                    </TableCell>
-                    <TableCell>
-                      {entry.branchId ? branchById.get(entry.branchId) ?? "—" : t("common.all", "HQ / General")}
-                    </TableCell>
-                    <TableCell className="text-end font-mono font-medium">
+                    </div>
+                  ),
+                },
+                {
+                  id: "branch",
+                  header: t("common.branch", "Branch"),
+                  cell: (entry) =>
+                    entry.branchId ? branchById.get(entry.branchId) ?? "—" : t("common.all", "HQ / General"),
+                },
+                {
+                  id: "amount",
+                  header: t("common.amount", "Amount"),
+                  align: "end",
+                  cell: (entry) => (
+                    <span className="font-mono font-medium">
                       {formatMoney(entryTotalDebit(entry), settings.currency)}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={entry.status === "reversed" ? "destructive" : "secondary"}>
-                        {t(`accounting.journals.statuses.${entry.status}`, entry.status)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()} className="text-end">
+                    </span>
+                  ),
+                },
+                {
+                  id: "status",
+                  header: t("common.status"),
+                  cell: (entry) => (
+                    <Badge variant={entry.status === "reversed" ? "destructive" : "secondary"}>
+                      {t(`accounting.journals.statuses.${entry.status}`, entry.status)}
+                    </Badge>
+                  ),
+                },
+                {
+                  id: "actions",
+                  header: "",
+                  hideable: false,
+                  align: "end",
+                  cell: (entry) => (
+                    <div onClick={(e) => e.stopPropagation()} className="flex justify-end">
                       {canEdit && entry.status === "posted" && (
                         <Button
                           variant="ghost"
@@ -342,13 +361,22 @@ export default function JournalEntries() {
                           <RotateCcw className="h-4 w-4 text-destructive" />
                         </Button>
                       )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-          <TablePagination pageInfo={pageInfo} onPageChange={setPage} />
+                    </div>
+                  ),
+                },
+              ] satisfies EnterpriseColumn<JournalEntryDto>[]
+            }
+            getRowId={(entry) => entry.id}
+            isLoading={isLoading}
+            emptyMessage={t("common.noResults")}
+            selectable
+            savedViewsResource="journal-entries"
+            exportResource="journal-entries"
+            pageInfo={pageInfo}
+            onPageChange={setPage}
+            onRowClick={(entry) => setSelectedEntry(entry)}
+            testId="journal-entries-table"
+          />
         </CardContent>
       </Card>
 
@@ -400,6 +428,7 @@ export default function JournalEntries() {
                   })}
                 </TableBody>
               </Table>
+              <AttachmentsPanel entityType="journal_entry" entityId={selectedEntry.id} className="mt-4" />
             </>
           )}
         </DialogContent>

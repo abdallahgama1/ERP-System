@@ -6,14 +6,16 @@ import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
 import { requireAuth, requirePermission } from "../middleware/auth.ts";
+import { actorCompanyId } from "../services/stock-locks.ts";
 
 export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/api/taxonomy", { preHandler: requireAuth }, async () => {
+  app.get("/api/taxonomy", { preHandler: requireAuth }, async (req) => {
+    const companyId = actorCompanyId(req.authUser!);
     const db = getDb();
     const rows = await db
       .select()
       .from(taxonomyItems)
-      .where(eq(taxonomyItems.isActive, true))
+      .where(and(eq(taxonomyItems.companyId, companyId), eq(taxonomyItems.isActive, true)))
       .orderBy(asc(taxonomyItems.name));
 
     return { items: rows };
@@ -26,6 +28,7 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
 
     const created = await db.transaction(async (tx) => {
@@ -34,6 +37,7 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
         .from(taxonomyItems)
         .where(
           and(
+            eq(taxonomyItems.companyId, companyId),
             eq(taxonomyItems.kind, parsed.data.kind),
             sql`lower(${taxonomyItems.name}) = lower(${parsed.data.name})`
           )
@@ -47,6 +51,7 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
       const [row] = await tx
         .insert(taxonomyItems)
         .values({
+          companyId,
           kind: parsed.data.kind,
           name: parsed.data.name,
           description: parsed.data.description,
@@ -57,6 +62,7 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
         .returning();
 
       await writeAuditLog(tx, {
+        companyId,
         userId: actor.id,
         userName: actor.name,
         userRole: actor.role,
@@ -70,7 +76,7 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
       return row;
     });
 
-    eventBroadcaster.broadcast("taxonomy_updated", { id: created.id });
+    eventBroadcaster.broadcast("taxonomy_updated", { id: created.id }, companyId);
     return reply.status(201).send({ item: created });
   });
 
@@ -82,10 +88,15 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
 
     const updated = await db.transaction(async (tx) => {
-      const [current] = await tx.select().from(taxonomyItems).where(eq(taxonomyItems.id, id)).limit(1);
+      const [current] = await tx
+        .select()
+        .from(taxonomyItems)
+        .where(and(eq(taxonomyItems.id, id), eq(taxonomyItems.companyId, companyId)))
+        .limit(1);
       if (!current) {
         throw new AppError(404, "Taxonomy item not found", "NOT_FOUND");
       }
@@ -97,6 +108,7 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
           .from(taxonomyItems)
           .where(
             and(
+              eq(taxonomyItems.companyId, companyId),
               eq(taxonomyItems.kind, current.kind),
               sql`lower(${taxonomyItems.name}) = lower(${nextName})`
             )
@@ -116,32 +128,33 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
           color: parsed.data.color ?? current.color,
           updatedAt: new Date(),
         })
-        .where(eq(taxonomyItems.id, id))
+        .where(and(eq(taxonomyItems.id, id), eq(taxonomyItems.companyId, companyId)))
         .returning();
 
-      // Propagate rename cleanly onto referenced catalog products
+      // Propagate rename cleanly onto referenced catalog products in the active company
       if (nextName !== current.name) {
         if (current.kind === "brand") {
           await tx
             .update(products)
             .set({ brand: nextName, updatedAt: new Date() })
-            .where(sql`lower(${products.brand}) = lower(${current.name})`);
+            .where(and(eq(products.companyId, companyId), sql`lower(${products.brand}) = lower(${current.name})`));
         } else if (current.kind === "category") {
           await tx
             .update(products)
             .set({ category: nextName, updatedAt: new Date() })
-            .where(sql`lower(${products.category}) = lower(${current.name})`);
+            .where(and(eq(products.companyId, companyId), sql`lower(${products.category}) = lower(${current.name})`));
         } else if (current.kind === "unit") {
           const oldKey = current.symbol || current.name;
           const newKey = row.symbol || row.name;
           await tx
             .update(products)
             .set({ unit: newKey, updatedAt: new Date() })
-            .where(sql`lower(${products.unit}) = lower(${oldKey})`);
+            .where(and(eq(products.companyId, companyId), sql`lower(${products.unit}) = lower(${oldKey})`));
         }
       }
 
       await writeAuditLog(tx, {
+        companyId,
         userId: actor.id,
         userName: actor.name,
         userRole: actor.role,
@@ -156,17 +169,22 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
       return row;
     });
 
-    eventBroadcaster.broadcast("taxonomy_updated", { id: updated.id });
+    eventBroadcaster.broadcast("taxonomy_updated", { id: updated.id }, companyId);
     return { item: updated };
   });
 
   app.delete("/api/taxonomy/:id", { preHandler: requirePermission("taxonomy", "delete") }, async (req) => {
     const id = (req.params as { id: string }).id;
     const actor = req.authUser!;
+    const companyId = actorCompanyId(actor);
     const db = getDb();
 
     await db.transaction(async (tx) => {
-      const [current] = await tx.select().from(taxonomyItems).where(eq(taxonomyItems.id, id)).limit(1);
+      const [current] = await tx
+        .select()
+        .from(taxonomyItems)
+        .where(and(eq(taxonomyItems.id, id), eq(taxonomyItems.companyId, companyId)))
+        .limit(1);
       if (!current) {
         throw new AppError(404, "Taxonomy item not found", "NOT_FOUND");
       }
@@ -176,20 +194,20 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
         const [{ c }] = await tx
           .select({ c: sql<number>`count(*)::int` })
           .from(products)
-          .where(sql`lower(${products.brand}) = lower(${current.name})`);
+          .where(and(eq(products.companyId, companyId), sql`lower(${products.brand}) = lower(${current.name})`));
         refCount = c;
       } else if (current.kind === "category") {
         const [{ c }] = await tx
           .select({ c: sql<number>`count(*)::int` })
           .from(products)
-          .where(sql`lower(${products.category}) = lower(${current.name})`);
+          .where(and(eq(products.companyId, companyId), sql`lower(${products.category}) = lower(${current.name})`));
         refCount = c;
       } else if (current.kind === "unit") {
         const unitKey = current.symbol || current.name;
         const [{ c }] = await tx
           .select({ c: sql<number>`count(*)::int` })
           .from(products)
-          .where(sql`lower(${products.unit}) = lower(${unitKey})`);
+          .where(and(eq(products.companyId, companyId), sql`lower(${products.unit}) = lower(${unitKey})`));
         refCount = c;
       }
 
@@ -201,9 +219,10 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
         );
       }
 
-      await tx.delete(taxonomyItems).where(eq(taxonomyItems.id, id));
+      await tx.delete(taxonomyItems).where(and(eq(taxonomyItems.id, id), eq(taxonomyItems.companyId, companyId)));
 
       await writeAuditLog(tx, {
+        companyId,
         userId: actor.id,
         userName: actor.name,
         userRole: actor.role,
@@ -215,7 +234,7 @@ export async function taxonomyRoutes(app: FastifyInstance): Promise<void> {
       });
     });
 
-    eventBroadcaster.broadcast("taxonomy_updated", { id });
+    eventBroadcaster.broadcast("taxonomy_updated", { id }, companyId);
     return { ok: true };
   });
 }

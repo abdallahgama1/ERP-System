@@ -7,14 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { usePurchases } from "@/contexts/PurchasesContext";
+import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import { useSettings } from "@/contexts/SettingsContext";
 
 export default function VendorDetail() {
   const { vendorId } = useParams();
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { vendors, purchaseOrders, receives, bills, payments, purchaseReturns, vendorPayables } = usePurchases();
+  const { vendors, purchaseOrders, receives, bills, payments, purchaseReturns, vendorPayables } = usePurchasingScope({ vendors: true, purchaseOrders: true, receives: true, bills: true, payments: true, purchaseReturns: true, products: true });
   const { settings } = useSettings();
 
   const vendor = useMemo(() => vendors.find((v) => String(v.id) === vendorId), [vendors, vendorId]);

@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useSales } from "@/contexts/SalesContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { downloadCsv, csvTimestamp } from "@/lib/export/csv";
 import { buildStatementLines, downloadCustomerStatement } from "@/lib/pdf/customerStatementPdf";
@@ -18,7 +18,7 @@ export default function CustomerDetail() {
   const {
     customers, customerReceivables, salesOrders, invoices, invoiceBalance,
     receivedPayments, salesReturns, creditNoteBalance, customerCredit,
-  } = useSales();
+  } = useSalesScope({ customers: true, salesOrders: true, invoices: true, receivedPayments: true, salesReturns: true, products: true });
 
   const orders = useMemo(
     () => salesOrders.filter(o => String(o.customerId) === customerId),

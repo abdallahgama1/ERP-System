@@ -27,8 +27,10 @@ backend/.env
 !backend/.env.example
 !.env.prod.example
 
-# Database backups
+# Database backups & local attachment uploads
 backups/
+uploads/
+backend/uploads/
 *.dump
 *.dump.sha256
 

@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useSettings } from "@/contexts/SettingsContext";
 import { downloadCsv, csvTimestamp } from "@/lib/export/csv";
 
@@ -30,7 +30,7 @@ interface ValuationRow {
 
 export default function InventoryValuation() {
   const { t } = useTranslation();
-  const { products, branchProducts, branches, getAvailableQuantity } = useInventory();
+  const { products, branchProducts, branches, getAvailableQuantity } = useInventoryScope({ products: true });
   const { settings } = useSettings();
   const [search, setSearch] = useState("");
   const [branchFilter, setBranchFilter] = useState<string>("all");

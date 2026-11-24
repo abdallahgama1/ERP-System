@@ -16,7 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
-import { useSales } from "@/contexts/SalesContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import type { Customer } from "@/types";
 
 const customerSchema = z.object({
@@ -62,7 +63,11 @@ export default function Customers() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const navigate = useNavigate();
-  const { customers, addCustomer, updateCustomer, deleteCustomer, customerReceivables } = useSales();
+  const { can } = usePermissions();
+  const canCreate = can("sales", "create");
+  const canEdit = can("sales", "edit");
+  const canDelete = can("sales", "delete");
+  const { customers, addCustomer, updateCustomer, deleteCustomer, customerReceivables } = useSalesScope({ customers: true, invoices: true });
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [open, setOpen] = useState(false);
@@ -179,10 +184,12 @@ export default function Customers() {
           <h1 className="text-3xl font-bold tracking-tight">{t("customers.title")}</h1>
           <p className="text-muted-foreground">{t("customers.description")}</p>
         </div>
-        <Button onClick={() => openDialog()}>
-          <Plus className="me-2 h-4 w-4" />
-          {t("customers.addCustomer")}
-        </Button>
+        {canCreate && (
+          <Button onClick={() => openDialog()}>
+            <Plus className="me-2 h-4 w-4" />
+            {t("customers.addCustomer")}
+          </Button>
+        )}
       </div>
 
       {customers.length === 0 && (customersPage?.pageInfo?.total ?? 0) === 0 && !search.trim() ? (
@@ -192,10 +199,12 @@ export default function Customers() {
           </div>
           <h3 className="mt-6 text-xl font-semibold">{t("customers.noCustomers")}</h3>
           <p className="mt-2 text-center text-muted-foreground max-w-sm">{t("customers.noCustomersDescription")}</p>
-          <Button className="mt-6" onClick={() => openDialog()}>
-            <Plus className="me-2 h-4 w-4" />
-            {t("customers.createFirstCustomer")}
-          </Button>
+          {canCreate && (
+            <Button className="mt-6" onClick={() => openDialog()}>
+              <Plus className="me-2 h-4 w-4" />
+              {t("customers.createFirstCustomer")}
+            </Button>
+          )}
         </Card>
       ) : (
         <Card>
@@ -266,12 +275,16 @@ export default function Customers() {
                       </TableCell>
                       <TableCell className="text-end" onClick={(e) => e.stopPropagation()}>
                         <div className="flex justify-end gap-2">
-                          <Button variant="ghost" size="icon" title={t("common.edit")} onClick={() => openDialog(customer)}>
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                          <Button variant="ghost" size="icon" title={t("common.delete")} onClick={() => setDeleteId(customer.id)}>
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
+                          {canEdit && (
+                            <Button variant="ghost" size="icon" title={t("common.edit")} onClick={() => openDialog(customer)}>
+                              <Edit className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {canDelete && (
+                            <Button variant="ghost" size="icon" title={t("common.delete")} onClick={() => setDeleteId(customer.id)}>
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>

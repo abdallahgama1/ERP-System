@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useSettings } from "@/contexts/SettingsContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
 import {
   useAccountingMutations,
   useAccountsQuery,
@@ -28,6 +28,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CompaniesTab } from "@/components/settings/CompaniesTab";
+import { PrintTemplatesTab } from "@/components/settings/PrintTemplatesTab";
 import { toast } from "sonner";
 import {
   Sun,
@@ -51,8 +54,8 @@ export default function Settings() {
   const { t } = useTranslation();
   const { settings, companyMeta, updateSettings, reloadCompanySettings } = useSettings();
   const { user } = useAuth();
-  const { role } = usePermissions();
-  const { record } = useAuditLog();
+  const { role, can } = usePermissions();
+  const { record } = useAuditRecorder();
 
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -262,6 +265,18 @@ export default function Settings() {
         <p className="text-muted-foreground">{t("settings.description")}</p>
       </div>
 
+      <Tabs defaultValue="general" className="space-y-6">
+        <TabsList>
+          <TabsTrigger value="general">{t("settings.tabs.general", "General")}</TabsTrigger>
+          {(isAdmin || can("companies", "view")) && (
+            <TabsTrigger value="companies">{t("settings.tabs.companies", "Companies")}</TabsTrigger>
+          )}
+          <TabsTrigger value="print-templates">
+            {t("settings.tabs.printTemplates", "Print Templates")}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="general" className="space-y-6">
       {/* General Preferences */}
       <Card>
         <CardHeader>
@@ -814,6 +829,18 @@ export default function Settings() {
           </CardContent>
         </Card>
       )}
+        </TabsContent>
+
+        {(isAdmin || can("companies", "view")) && (
+          <TabsContent value="companies">
+            <CompaniesTab />
+          </TabsContent>
+        )}
+
+        <TabsContent value="print-templates">
+          <PrintTemplatesTab />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

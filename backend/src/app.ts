@@ -2,7 +2,9 @@ import Fastify, { LogController, type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
+import { ATTACHMENT_MAX_BYTES } from "@erp/shared";
 import type { DestinationStream } from "pino";
 import { env } from "./config.ts";
 import { AppError } from "./db/helpers.ts";
@@ -20,17 +22,23 @@ import { captureBackendException } from "./observability/sentry.ts";
 import { accountingRoutes } from "./routes/accounting.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { approvalRoutes } from "./routes/approvals.ts";
+import { attachmentRoutes } from "./routes/attachments.ts";
 import { auditRoutes } from "./routes/audit.ts";
 import { authRoutes } from "./routes/auth.ts";
 import { branchRoutes } from "./routes/branches.ts";
+import { companiesRoutes } from "./routes/companies.ts";
 import { einvoicingRoutes } from "./routes/einvoicing.ts";
 import { eventRoutes } from "./routes/events.ts";
+import { exportRoutes } from "./routes/exports.ts";
 import { inventoryRoutes } from "./routes/inventory.ts";
 import { manufacturingRoutes } from "./routes/manufacturing.ts";
 import { notificationRoutes } from "./routes/notifications.ts";
 import { posRoutes } from "./routes/pos.ts";
+import { printTemplatesRoutes } from "./routes/print-templates.ts";
 import { purchaseRoutes } from "./routes/purchases.ts";
 import { salesRoutes } from "./routes/sales.ts";
+import { savedViewsRoutes } from "./routes/saved-views.ts";
+import { searchRoutes } from "./routes/search.ts";
 import { sessionRoutes } from "./routes/sessions.ts";
 import { settingsRoutes } from "./routes/settings.ts";
 import { taxonomyRoutes } from "./routes/taxonomy.ts";
@@ -179,6 +187,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     secret: env.AUTH_COOKIE_SECRET,
   });
 
+  await app.register(multipart, {
+    limits: {
+      fileSize: ATTACHMENT_MAX_BYTES,
+      files: 1,
+      fields: 10,
+    },
+  });
+
   app.addHook("onRequest", csrfProtectionHook);
   app.addHook("preHandler", attachAuthHook);
 
@@ -250,6 +266,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(metricsRoutes);
   await app.register(authRoutes);
   await app.register(adminRoutes);
+  await app.register(companiesRoutes);
   await app.register(settingsRoutes);
   await app.register(auditRoutes);
   await app.register(notificationRoutes);
@@ -265,6 +282,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(manufacturingRoutes);
   await app.register(posRoutes);
   await app.register(einvoicingRoutes);
+  await app.register(attachmentRoutes);
+  await app.register(searchRoutes);
+  await app.register(exportRoutes);
+  await app.register(savedViewsRoutes);
+  await app.register(printTemplatesRoutes);
 
   return app;
 }

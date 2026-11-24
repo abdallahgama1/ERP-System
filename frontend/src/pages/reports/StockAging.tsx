@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useSettings } from "@/contexts/SettingsContext";
 import { downloadCsv, csvTimestamp } from "@/lib/export/csv";
 import type { StockMovementType } from "@/types";
@@ -59,7 +59,7 @@ interface AgingRow {
 
 export default function StockAging() {
   const { t } = useTranslation();
-  const { products, branchProducts, branches, movements } = useInventory();
+  const { products, branchProducts, branches, movements } = useInventoryScope({ products: true, movements: true });
   const { settings } = useSettings();
   const [search, setSearch] = useState("");
   const [branchFilter, setBranchFilter] = useState("all");

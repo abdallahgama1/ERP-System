@@ -61,7 +61,15 @@
     "voidDocument": "Void",
     "confirmVoid": "Confirm Void",
     "reason": "Reason",
-    "voidReasonPlaceholder": "e.g. Entered in error, bounced cheque"
+    "voidReasonPlaceholder": "e.g. Entered in error, bounced cheque",
+    "searchPlaceholder": "Search...",
+    "accessDenied": "Access Denied",
+    "accessDeniedDescription": "You do not have permission to view this page.",
+    "backToDashboard": "Back to Dashboard",
+    "exportCsv": "Export CSV",
+    "exportXlsx": "Export Excel (.xlsx)",
+    "exporting": "Exporting...",
+    "download": "Download"
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -475,7 +483,15 @@
     "continueWithGoogle": "Continue with Google",
     "continueWithLovable": "Continue with Lovable",
     "checkEmail": "Confirm your email",
-    "checkEmailDescription": "We've sent a confirmation link to your email. Click it, then sign in."
+    "checkEmailDescription": "We've sent a confirmation link to your email. Click it, then sign in.",
+    "mfaTitle": "Two-Factor Verification",
+    "mfaDescription": "Enter the 6-digit code from your authenticator app or a recovery code.",
+    "mfaCodeLabel": "Verification or Recovery Code",
+    "mfaCodePlaceholder": "123456 or recovery code",
+    "mfaVerify": "Verify & Sign In",
+    "mfaVerifying": "Verifying...",
+    "mfaBackToLogin": "Back to Sign In",
+    "mfaInvalidCode": "Invalid verification or recovery code."
   },
   "profileDropdown": {
     "user": "User",
@@ -1444,5 +1460,91 @@
     "requestPayload": "Canonical Request Payload (ETA v1.2)",
     "responsePayload": "ETA Gateway Response Payload",
     "noResponseYet": "No remote response recorded yet (queued locally)."
+  },
+  "commandPalette": {
+    "triggerLabel": "Search or jump to...",
+    "triggerAria": "Open command palette",
+    "title": "Command Palette",
+    "description": "Search records and navigate across the ERP workspace.",
+    "placeholder": "Search products, customers, invoices, or pages...",
+    "searching": "Searching...",
+    "noResults": "No matching records or pages found.",
+    "quickNavigation": "Quick Navigation",
+    "groups": {
+      "product": "Products",
+      "customer": "Customers",
+      "vendor": "Vendors",
+      "sales_order": "Sales Orders",
+      "sales_invoice": "Invoices",
+      "purchase_order": "Purchase Orders",
+      "vendor_bill": "Vendor Bills",
+      "journal_entry": "Journal Entries"
+    }
+  },
+  "companySwitcher": {
+    "activeCompany": "Active Company",
+    "switchCompany": "Switch Company",
+    "switched": "Switched active company to {{name}}",
+    "switchFailed": "Failed to switch company"
+  },
+  "dataTable": {
+    "columns": "Columns",
+    "toggleColumns": "Toggle visible columns",
+    "selectedCount": "{{count}} selected",
+    "clearSelection": "Clear selection",
+    "selectAll": "Select all rows on page",
+    "selectRow": "Select row",
+    "export": "Export",
+    "exportFailed": "Failed to export data",
+    "sortAscending": "Sort ascending",
+    "sortDescending": "Sort descending"
+  },
+  "savedViews": {
+    "title": "Saved Views",
+    "defaultBadge": "Default",
+    "noViews": "No saved views yet",
+    "saveCurrent": "Save current view",
+    "viewName": "View Name",
+    "viewNamePlaceholder": "e.g. Open High-Value Invoices",
+    "setAsDefault": "Set as default view",
+    "save": "Save View",
+    "saved": "Saved view \"{{name}}\"",
+    "deleted": "Deleted saved view \"{{name}}\"",
+    "nameRequired": "View name is required"
+  },
+  "attachments": {
+    "title": "Attachments",
+    "upload": "Upload File",
+    "uploading": "Uploading...",
+    "empty": "No attachments yet.",
+    "deleteConfirmTitle": "Delete Attachment",
+    "uploaded": "Attachment uploaded",
+    "deleted": "Attachment deleted",
+    "downloadFailed": "Failed to download attachment",
+    "invalidType": "File type \"{{type}}\" is not allowed.",
+    "fileTooLarge": "File exceeds the 10 MB maximum limit.",
+    "emptyFile": "Cannot upload an empty file.",
+    "allowedHint": "PDF, PNG, JPEG, WEBP, CSV, XLSX, DOCX, or TXT up to 10 MB"
+  },
+  "emailDocument": {
+    "title": "Email Document",
+    "description": "Send {{document}} to one or more recipients.",
+    "to": "Recipients (To)",
+    "toPlaceholder": "client@example.com, billing@example.com",
+    "cc": "CC (Optional)",
+    "ccPlaceholder": "manager@example.com",
+    "subject": "Subject",
+    "subjectPlaceholder": "Invoice #INV-0001",
+    "message": "Message",
+    "messagePlaceholder": "Please find the attached document...",
+    "attachStoredFiles": "Attach stored document files / PDF",
+    "selectAttachments": "Select stored attachments",
+    "template": "Print Template",
+    "defaultTemplate": "Default Template",
+    "send": "Send Email",
+    "sending": "Sending...",
+    "sentSuccess": "Email sent to {{count}} recipient(s)",
+    "invalidRecipients": "Enter at least one valid email address.",
+    "invalidSubject": "Subject is required and cannot contain line breaks."
   }
 }

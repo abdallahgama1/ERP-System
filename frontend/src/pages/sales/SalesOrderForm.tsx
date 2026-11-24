@@ -10,8 +10,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { useSales } from "@/contexts/SalesContext";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { CustomerCombobox } from "@/components/sales/CustomerCombobox";
@@ -28,8 +28,8 @@ const SalesOrderForm = () => {
   const location = useLocation();
   const isEditRoute = location.pathname.endsWith("/edit");
 
-  const { customers, salesOrders, createSalesOrder, updateSalesOrder, confirmSalesOrder, nextSoNumber } = useSales();
-  const { products, branches, branchProducts } = useInventory();
+  const { customers, salesOrders, createSalesOrder, updateSalesOrder, confirmSalesOrder, nextSoNumber } = useSalesScope({ customers: true, salesOrders: true, products: true });
+  const { products, branches, branchProducts } = useInventoryScope({ products: true });
   const { settings, taxCodes } = useSettings();
   const defaultTaxRate = useMemo(
     () => (taxCodes.find((tc) => tc.isDefault && tc.isActive) ?? taxCodes.find((tc) => tc.isActive))?.rate ?? 0,

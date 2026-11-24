@@ -62,12 +62,15 @@ async function main() {
 
       await db.execute(
         sql.raw(`TRUNCATE TABLE
+          document_attachments, user_saved_views, user_mfa, user_companies,
+          custom_role_permissions, custom_roles, print_templates,
           einvoice_submissions, pos_return_lines, pos_returns,
           pos_tenders, pos_shift_cash_movements, pos_shifts, pos_terminals, user_pos_pins,
           idempotency_keys, notification_user_states, notifications,
           work_order_materials, work_orders, bom_components, bills_of_materials,
           stock_movement_allocations, stock_serials, branch_lot_balances, stock_lots,
           approval_requests, approval_rules,
+          gl_account_mappings, currencies, chart_of_accounts, tax_codes,
           journal_lines, journal_entries, fiscal_periods, fiscal_years, exchange_rates, audit_logs,
           credit_note_applications, retainer_applications, retainer_invoices,
           sales_return_lines, sales_returns, received_payment_allocations, received_payments,
@@ -79,9 +82,11 @@ async function main() {
           stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments,
           stock_movements, branch_products, products, taxonomy_items, customers, vendors,
           document_sequences, company_settings, user_preferences, password_reset_tokens,
-          user_branches, user_branch_scopes, user_roles, user_sessions, users, branches
+          user_branches, user_branch_scopes, user_roles, user_sessions, users, branches, companies
         RESTART IDENTITY CASCADE`)
       );
+      const { resetSeededDefaultsCache } = await import("../backend/src/auth/permissions.ts");
+      resetSeededDefaultsCache();
     }
 
     const runTag = Date.now().toString(36).toUpperCase();

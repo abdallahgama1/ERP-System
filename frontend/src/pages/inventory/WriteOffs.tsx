@@ -12,9 +12,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { format } from "date-fns";
 import { toast } from "sonner";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useAuth } from "@/contexts/AuthContext";
-import { useAuditLog } from "@/contexts/AuditLogContext";
+import { usePermissions } from "@/contexts/PermissionsContext";
+import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
@@ -33,9 +34,10 @@ const reasonVariant: Record<WriteOffReason, "destructive" | "outline" | "seconda
 export default function WriteOffs() {
   const { t } = useTranslation();
   const { settings } = useSettings();
-  const { writeOffs, branches, products, branchProducts, createWriteOff } = useInventory();
+  const { writeOffs, branches, products, branchProducts, createWriteOff } = useInventoryScope({ writeOffs: true, products: true });
   const { user } = useAuth();
-  const { record } = useAuditLog();
+  const { can } = usePermissions();
+  const { record } = useAuditRecorder();
 
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -114,10 +116,12 @@ export default function WriteOffs() {
             <p className="text-muted-foreground mt-1">{t("pages.inventoryOps.writeOffs.description")}</p>
           </div>
         </div>
-        <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4 me-2" />
-          {t("writeOffs.new", "New Write-off")}
-        </Button>
+        {can("inventory", "create") && (
+          <Button onClick={() => setOpen(true)}>
+            <Plus className="h-4 w-4 me-2" />
+            {t("writeOffs.new", "New Write-off")}
+          </Button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

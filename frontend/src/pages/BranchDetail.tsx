@@ -33,7 +33,8 @@ import { Warehouse, Plus, Search, Edit, Trash2, Building2, Package, AlertCircle,
 import { exportJsonToExcel } from "@/lib/export/excel";
 import { BranchProduct } from "@/types";
 import { useToast } from "@/hooks/use-toast";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
+import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -47,6 +48,8 @@ const BranchDetail = () => {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { settings } = useSettings();
+  const { can } = usePermissions();
+  const canEditStock = can("inventory", "edit") || can("inventory", "create");
   const {
     products,
     branchProducts,
@@ -56,7 +59,7 @@ const BranchDetail = () => {
     assignToBranch, 
     updateBranchProduct, 
     removeFromBranch 
-  } = useInventory();
+  } = useInventoryScope({ products: true, movements: true });
   
   const selectedBranchId = branchId || "";
   const selectedBranch = branches.find(b => b.branchId === selectedBranchId);
@@ -313,21 +316,25 @@ const BranchDetail = () => {
             {t('bulkImport.export')}
           </Button>
           
-          <Button variant="outline" onClick={() => setIsImportDialogOpen(true)}>
-            <Upload className="me-2 h-4 w-4" />
-            {t('bulkImport.title')}
-          </Button>
+          {canEditStock && (
+            <Button variant="outline" onClick={() => setIsImportDialogOpen(true)}>
+              <Upload className="me-2 h-4 w-4" />
+              {t('bulkImport.title')}
+            </Button>
+          )}
           
           <Dialog open={isAddDialogOpen} onOpenChange={(open) => {
             setIsAddDialogOpen(open);
             if (!open) resetForm();
           }}>
-            <DialogTrigger asChild>
-              <Button onClick={resetForm}>
-                <Plus className="me-2 h-4 w-4" />
-                {t("branchInventory.assignProduct")}
-              </Button>
-            </DialogTrigger>
+            {canEditStock && (
+              <DialogTrigger asChild>
+                <Button onClick={resetForm}>
+                  <Plus className="me-2 h-4 w-4" />
+                  {t("branchInventory.assignProduct")}
+                </Button>
+              </DialogTrigger>
+            )}
             <DialogContent className="max-w-md">
               <DialogHeader>
                 <DialogTitle>

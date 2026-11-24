@@ -1,6 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
 import { useAuth } from "@/contexts/AuthContext";
+import { erpQueryKeys } from "@/hooks/queries/queryKeys";
+import { useCompanySettingsQuery, usePreferencesQuery } from "@/hooks/queries/useSettingsQueries";
 
 export interface UserSettings {
   appearance: "light" | "dark" | "system";
@@ -71,10 +74,79 @@ function readCachedSettings(): UserSettings {
 }
 
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
-  const [settings, setSettings] = useState<UserSettings>(readCachedSettings);
-  const [companyMeta, setCompanyMeta] = useState<CompanyMeta | null>(null);
-  const [taxCodes, setTaxCodes] = useState<TaxCodeOption[]>([]);
+  const { user, mfaEnabled } = useAuth();
+  const queryClient = useQueryClient();
+  const [localOverrides, setLocalOverrides] = useState<Partial<UserSettings>>(() => readCachedSettings());
+
+  const companyQuery = useCompanySettingsQuery(Boolean(user));
+  const preferencesQuery = usePreferencesQuery(Boolean(user));
+
+  const companyMeta = useMemo<CompanyMeta | null>(() => {
+    const c = companyQuery.data?.company;
+    if (!c) return null;
+    return {
+      companyName: c.companyName,
+      legalName: c.legalName ?? null,
+      taxRegistrationNumber: c.taxRegistrationNumber ?? null,
+      baseCurrency: c.baseCurrency || "USD",
+      einvoicingMode: c.einvoicingMode || "none",
+      address: c.address ?? null,
+      phone: c.phone ?? null,
+      email: c.email ?? null,
+    };
+  }, [companyQuery.data]);
+
+  const taxCodes = useMemo<TaxCodeOption[]>(() => {
+    const list = companyQuery.data?.taxCodes;
+    if (!Array.isArray(list)) return [];
+    return list.map((tc) => ({
+      ...tc,
+      rate: Number(tc.rate ?? 0),
+    }));
+  }, [companyQuery.data]);
+
+  const settings = useMemo<UserSettings>(() => {
+    const comp = companyQuery.data?.company;
+    const compJson = comp?.settingsJson ?? {};
+    const prefJson = preferencesQuery.data?.preferences?.preferencesJson ?? {};
+
+    const base: UserSettings = {
+      ...defaultSettings,
+      ...localOverrides,
+    };
+
+    if (typeof comp?.baseCurrency === "string" && comp.baseCurrency.trim().length > 0) {
+      base.currency = comp.baseCurrency.trim().toUpperCase();
+    }
+    if (typeof compJson.lowStockThreshold === "number") {
+      base.lowStockThreshold = compJson.lowStockThreshold;
+    }
+    if (prefJson.appearance === "light" || prefJson.appearance === "dark" || prefJson.appearance === "system") {
+      base.appearance = prefJson.appearance;
+    }
+    if (
+      prefJson.dateFormat === "MM/DD/YYYY" ||
+      prefJson.dateFormat === "DD/MM/YYYY" ||
+      prefJson.dateFormat === "YYYY-MM-DD"
+    ) {
+      base.dateFormat = prefJson.dateFormat;
+    }
+    if (typeof prefJson.timezone === "string") {
+      base.timezone = prefJson.timezone;
+    }
+    if (prefJson.defaultView === "table" || prefJson.defaultView === "grid") {
+      base.defaultView = prefJson.defaultView;
+    }
+    if (typeof prefJson.emailNotifications === "boolean") {
+      base.emailNotifications = prefJson.emailNotifications;
+    }
+    if (typeof prefJson.inAppNotifications === "boolean") {
+      base.inAppNotifications = prefJson.inAppNotifications;
+    }
+    base.twoFactorEnabled = user ? mfaEnabled : base.twoFactorEnabled;
+
+    return base;
+  }, [companyQuery.data, preferencesQuery.data, localOverrides, user, mfaEnabled]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -83,7 +155,8 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     } else if (settings.appearance === "light") {
       root.classList.remove("dark");
     } else {
-      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      const prefersDark =
+        typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches;
       root.classList.toggle("dark", prefersDark);
     }
     try {
@@ -95,99 +168,15 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
 
   const reloadCompanySettings = useCallback(async () => {
     if (!user) return;
-    try {
-      const [compRes, prefRes] = await Promise.all([
-        apiRequest<{
-          company: (CompanyMeta & { settingsJson?: Record<string, unknown> }) | null;
-          taxCodes?: Array<{
-            id: string;
-            code: string;
-            name: string;
-            rate: string | number;
-            isDefault: boolean;
-            isInclusive: boolean;
-            isActive: boolean;
-            inputAccountId: string | null;
-            outputAccountId: string | null;
-          }>;
-        }>("/api/settings/company"),
-        apiRequest<{
-          preferences: {
-            preferencesJson?: Record<string, unknown>;
-          } | null;
-        }>("/api/settings/preferences"),
-      ]);
-
-      const compJson = compRes.company?.settingsJson ?? {};
-      const prefJson = prefRes.preferences?.preferencesJson ?? {};
-
-      if (compRes.company) {
-        setCompanyMeta({
-          companyName: compRes.company.companyName,
-          legalName: compRes.company.legalName ?? null,
-          taxRegistrationNumber: compRes.company.taxRegistrationNumber ?? null,
-          baseCurrency: compRes.company.baseCurrency || "USD",
-          einvoicingMode: compRes.company.einvoicingMode || "none",
-          address: compRes.company.address ?? null,
-          phone: compRes.company.phone ?? null,
-          email: compRes.company.email ?? null,
-        });
-      }
-
-      if (Array.isArray(compRes.taxCodes)) {
-        setTaxCodes(
-          compRes.taxCodes.map((tc) => ({
-            ...tc,
-            rate: Number(tc.rate ?? 0),
-          }))
-        );
-      }
-
-      setSettings((prev) => ({
-        ...prev,
-        currency:
-          typeof compRes.company?.baseCurrency === "string" && compRes.company.baseCurrency.trim().length > 0
-            ? compRes.company.baseCurrency.trim().toUpperCase()
-            : prev.currency,
-        lowStockThreshold:
-          typeof compJson.lowStockThreshold === "number" ? compJson.lowStockThreshold : prev.lowStockThreshold,
-        appearance:
-          prefJson.appearance === "light" || prefJson.appearance === "dark" || prefJson.appearance === "system"
-            ? prefJson.appearance
-            : prev.appearance,
-        dateFormat:
-          prefJson.dateFormat === "MM/DD/YYYY" ||
-          prefJson.dateFormat === "DD/MM/YYYY" ||
-          prefJson.dateFormat === "YYYY-MM-DD"
-            ? prefJson.dateFormat
-            : prev.dateFormat,
-        timezone: typeof prefJson.timezone === "string" ? prefJson.timezone : prev.timezone,
-        defaultView:
-          prefJson.defaultView === "table" || prefJson.defaultView === "grid"
-            ? prefJson.defaultView
-            : prev.defaultView,
-        emailNotifications:
-          typeof prefJson.emailNotifications === "boolean"
-            ? prefJson.emailNotifications
-            : prev.emailNotifications,
-        inAppNotifications:
-          typeof prefJson.inAppNotifications === "boolean"
-            ? prefJson.inAppNotifications
-            : prev.inAppNotifications,
-      }));
-    } catch {
-      // retain cached settings
-    }
-  }, [user]);
-
-  useEffect(() => {
-    if (!user) return;
-    void reloadCompanySettings();
-  }, [user, reloadCompanySettings]);
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: erpQueryKeys.companySettings }),
+      queryClient.invalidateQueries({ queryKey: erpQueryKeys.preferences }),
+    ]);
+  }, [user, queryClient]);
 
   const updateSettings = useCallback(
     (newSettings: Partial<UserSettings>) => {
-      setSettings((prev) => ({ ...prev, ...newSettings }));
+      setLocalOverrides((prev) => ({ ...prev, ...newSettings }));
       if (!user) return;
 
       const companyKeys: Array<keyof UserSettings> = ["currency", "lowStockThreshold"];
@@ -201,7 +190,9 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
               ? { settingsJson: { lowStockThreshold: newSettings.lowStockThreshold } }
               : {}),
           },
-        }).catch(() => {});
+        })
+          .then(() => queryClient.invalidateQueries({ queryKey: erpQueryKeys.companySettings }))
+          .catch(() => {});
       }
 
       const prefUpdates: Record<string, unknown> = {};
@@ -218,10 +209,12 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
         void apiRequest("/api/settings/preferences", {
           method: "PUT",
           body: { preferencesJson: prefUpdates },
-        }).catch(() => {});
+        })
+          .then(() => queryClient.invalidateQueries({ queryKey: erpQueryKeys.preferences }))
+          .catch(() => {});
       }
     },
-    [user]
+    [user, queryClient]
   );
 
   const value = useMemo(

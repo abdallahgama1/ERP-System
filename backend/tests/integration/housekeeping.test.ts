@@ -44,9 +44,8 @@ describe.skipIf(!testDbUrl)("F10 — PostgreSQL advisory-locked housekeeping job
 
     const db = getDb();
 
-    await db.execute(
-      sql`TRUNCATE TABLE pos_return_lines, pos_returns, idempotency_keys, password_reset_tokens, audit_logs, user_branches, user_branch_scopes, user_roles, user_sessions, users, branches RESTART IDENTITY CASCADE`
-    );
+    const { resetTestDatabase } = await import("../helpers/db-reset.ts");
+    await resetTestDatabase(db);
 
     const adminSignup = await app.inject({
       method: "POST",

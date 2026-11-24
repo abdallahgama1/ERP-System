@@ -17,7 +17,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useBranch } from "@/contexts/BranchContext";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import {
@@ -34,7 +34,7 @@ import { formatMoney } from "@/lib/money";
 
 export default function WorkOrders() {
   const { t } = useTranslation();
-  const { branches } = useInventory();
+  const { branches } = useInventoryScope();
   const { activeBranchId } = useBranch();
   const { can } = usePermissions();
   const { settings } = useSettings();

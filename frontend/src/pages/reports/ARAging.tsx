@@ -3,7 +3,7 @@ import { Clock, Download } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useSales } from "@/contexts/SalesContext";
+import { useSalesScope } from "@/hooks/queries/useSalesScope";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { downloadCsv, csvTimestamp } from "@/lib/export/csv";
@@ -21,7 +21,7 @@ function bucketFor(dueDate: string): Bucket {
 }
 
 export default function ARAging() {
-  const { invoices } = useSales();
+  const { invoices } = useSalesScope({ invoices: true, customers: true });
   const { settings } = useSettings();
 
   const rows = useMemo(() => {

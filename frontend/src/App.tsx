@@ -1,21 +1,16 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
+import type { PermissionAction, PermissionModule } from "@erp/shared";
 import { AuthProvider } from "./contexts/AuthContext";
 import { BranchProvider } from "./contexts/BranchContext";
-import { InventoryProvider } from "./contexts/InventoryContext";
 import { SettingsProvider } from "./contexts/SettingsContext";
-import { PurchasesProvider } from "./contexts/PurchasesContext";
-import { TaxonomyProvider } from "./contexts/TaxonomyContext";
-import { AuditLogProvider } from "./contexts/AuditLogContext";
-import { NotificationsProvider } from "./contexts/NotificationsContext";
-import { SalesProvider } from "./contexts/SalesContext";
 import { PermissionsProvider } from "./contexts/PermissionsContext";
-import { SessionsProvider } from "./contexts/SessionsContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { RequirePermission } from "./components/auth/RequirePermission";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AppLayout } from "./components/layout/AppLayout";
 import Login from "./pages/Login";
@@ -94,88 +89,80 @@ const queryClient = new QueryClient({
   },
 });
 
+const guard = (module: PermissionModule, element: ReactNode, action: PermissionAction = "view") => (
+  <RequirePermission module={module} action={action} mode="page">
+    {element}
+  </RequirePermission>
+);
+
 const BackOfficeWorkspace = () => (
-  <AuditLogProvider>
-    <InventoryProvider>
-      <TaxonomyProvider>
-        <PurchasesProvider>
-          <NotificationsProvider>
-            <SessionsProvider>
-              <SalesProvider>
-                <AppLayout>
-                  <Suspense fallback={<PageLoader />}>
-                    <Routes>
-                      <Route path="/" element={<Dashboard />} />
-                      <Route path="/products" element={<Products />} />
-                      <Route path="/branches" element={<Branches />} />
-                      <Route path="/branches/:branchId" element={<BranchDetail />} />
-                      <Route path="/sessions" element={<Sessions />} />
-                      <Route path="/sessions/:sessionId" element={<SessionDetail />} />
-                      <Route path="/users" element={<Users />} />
-                      <Route path="/profile" element={<Profile />} />
-                      <Route path="/purchases/vendors" element={<Vendors />} />
-                      <Route path="/purchases/vendors/:vendorId" element={<VendorDetail />} />
-                      <Route path="/purchases/orders" element={<PurchaseOrders />} />
-                      <Route path="/purchases/orders/new" element={<PurchaseOrderForm />} />
-                      <Route path="/purchases/orders/:orderId" element={<PurchaseOrderForm />} />
-                      <Route path="/purchases/orders/:orderId/edit" element={<PurchaseOrderForm />} />
-                      <Route path="/purchases/receives" element={<PurchaseReceives />} />
-                      <Route path="/purchases/receives/new" element={<PurchaseReceiveForm />} />
-                      <Route path="/purchases/receives/:receiveId" element={<PurchaseReceiveForm />} />
-                      <Route path="/purchases/bills" element={<VendorBills />} />
-                      <Route path="/purchases/returns" element={<PurchaseReturns />} />
-                      <Route path="/purchases/payments" element={<PaymentsMade />} />
-                      <Route path="/sales/customers" element={<Customers />} />
-                      <Route path="/sales/customers/:customerId" element={<CustomerDetail />} />
-                      <Route path="/sales/orders" element={<SalesOrders />} />
-                      <Route path="/sales/orders/new" element={<SalesOrderForm />} />
-                      <Route path="/sales/orders/:orderId" element={<SalesOrderForm />} />
-                      <Route path="/sales/orders/:orderId/edit" element={<SalesOrderForm />} />
-                      <Route path="/sales/invoices" element={<Invoices />} />
-                      <Route path="/sales/retainer-invoices" element={<RetainerInvoices />} />
-                      <Route path="/sales/payments" element={<ReceivedPayments />} />
-                      <Route path="/sales/returns" element={<SalesReturns />} />
-                      <Route path="/analytics" element={<Analytics />} />
-                      <Route path="/reports/inventory-valuation" element={<InventoryValuation />} />
-                      <Route path="/reports/stock-aging" element={<StockAging />} />
-                      <Route path="/reports/movement-history" element={<MovementHistory />} />
-                      <Route path="/reports/po-aging" element={<POAging />} />
-                      <Route path="/reports/ar-aging" element={<ARAging />} />
-                      <Route path="/reports/sales-vs-purchases" element={<SalesVsPurchases />} />
-                      <Route path="/audit-log" element={<AuditLog />} />
-                      <Route path="/approvals" element={<Approvals />} />
-                      <Route path="/admin/einvoicing" element={<EInvoiceQueue />} />
-                      <Route path="/einvoicing" element={<EInvoiceQueue />} />
-                      <Route path="/roles" element={<Roles />} />
-                      <Route path="/notifications" element={<Notifications />} />
-                      <Route path="/help" element={<Help />} />
-                      <Route path="/inventory/transfers" element={<Transfers />} />
-                      <Route path="/inventory/transfers/:transferId" element={<TransferDetail />} />
-                      <Route path="/inventory/adjustments" element={<Adjustments />} />
-                      <Route path="/inventory/write-offs" element={<WriteOffs />} />
-                      <Route path="/inventory/lots" element={<LotsAndExpiry />} />
-                      <Route path="/inventory/serials" element={<SerialNumbers />} />
-                      <Route path="/manufacturing/boms" element={<BillsOfMaterials />} />
-                      <Route path="/manufacturing/work-orders" element={<WorkOrders />} />
-                      <Route path="/categories" element={<Categories />} />
-                      <Route path="/brands" element={<Brands />} />
-                      <Route path="/units-of-measure" element={<UnitsOfMeasure />} />
-                      <Route path="/accounting/accounts" element={<ChartOfAccounts />} />
-                      <Route path="/accounting/journal-entries" element={<JournalEntries />} />
-                      <Route path="/accounting/periods" element={<FiscalPeriods />} />
-                      <Route path="/accounting/statements" element={<FinancialStatements />} />
-                      <Route path="/settings" element={<Settings />} />
-                      <Route path="*" element={<NotFound />} />
-                    </Routes>
-                  </Suspense>
-                </AppLayout>
-              </SalesProvider>
-            </SessionsProvider>
-          </NotificationsProvider>
-        </PurchasesProvider>
-      </TaxonomyProvider>
-    </InventoryProvider>
-  </AuditLogProvider>
+  <AppLayout>
+    <Suspense fallback={<PageLoader />}>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/products" element={guard("products", <Products />)} />
+        <Route path="/branches" element={guard("branches", <Branches />)} />
+        <Route path="/branches/:branchId" element={guard("branches", <BranchDetail />)} />
+        <Route path="/sessions" element={guard("sessions", <Sessions />)} />
+        <Route path="/sessions/:sessionId" element={guard("sessions", <SessionDetail />)} />
+        <Route path="/users" element={guard("users", <Users />)} />
+        <Route path="/profile" element={<Profile />} />
+        <Route path="/purchases/vendors" element={guard("purchases", <Vendors />)} />
+        <Route path="/purchases/vendors/:vendorId" element={guard("purchases", <VendorDetail />)} />
+        <Route path="/purchases/orders" element={guard("purchases", <PurchaseOrders />)} />
+        <Route path="/purchases/orders/new" element={guard("purchases", <PurchaseOrderForm />, "create")} />
+        <Route path="/purchases/orders/:orderId" element={guard("purchases", <PurchaseOrderForm />)} />
+        <Route path="/purchases/orders/:orderId/edit" element={guard("purchases", <PurchaseOrderForm />, "edit")} />
+        <Route path="/purchases/receives" element={guard("purchases", <PurchaseReceives />)} />
+        <Route path="/purchases/receives/new" element={guard("purchases", <PurchaseReceiveForm />, "create")} />
+        <Route path="/purchases/receives/:receiveId" element={guard("purchases", <PurchaseReceiveForm />)} />
+        <Route path="/purchases/bills" element={guard("purchases", <VendorBills />)} />
+        <Route path="/purchases/returns" element={guard("purchases", <PurchaseReturns />)} />
+        <Route path="/purchases/payments" element={guard("purchases", <PaymentsMade />)} />
+        <Route path="/sales/customers" element={guard("sales", <Customers />)} />
+        <Route path="/sales/customers/:customerId" element={guard("sales", <CustomerDetail />)} />
+        <Route path="/sales/orders" element={guard("sales", <SalesOrders />)} />
+        <Route path="/sales/orders/new" element={guard("sales", <SalesOrderForm />, "create")} />
+        <Route path="/sales/orders/:orderId" element={guard("sales", <SalesOrderForm />)} />
+        <Route path="/sales/orders/:orderId/edit" element={guard("sales", <SalesOrderForm />, "edit")} />
+        <Route path="/sales/invoices" element={guard("sales", <Invoices />)} />
+        <Route path="/sales/retainer-invoices" element={guard("sales", <RetainerInvoices />)} />
+        <Route path="/sales/payments" element={guard("sales", <ReceivedPayments />)} />
+        <Route path="/sales/returns" element={guard("sales", <SalesReturns />)} />
+        <Route path="/analytics" element={guard("reports", <Analytics />)} />
+        <Route path="/reports/inventory-valuation" element={guard("reports", <InventoryValuation />)} />
+        <Route path="/reports/stock-aging" element={guard("reports", <StockAging />)} />
+        <Route path="/reports/movement-history" element={guard("reports", <MovementHistory />)} />
+        <Route path="/reports/po-aging" element={guard("reports", <POAging />)} />
+        <Route path="/reports/ar-aging" element={guard("reports", <ARAging />)} />
+        <Route path="/reports/sales-vs-purchases" element={guard("reports", <SalesVsPurchases />)} />
+        <Route path="/audit-log" element={guard("audit", <AuditLog />)} />
+        <Route path="/approvals" element={guard("approvals", <Approvals />)} />
+        <Route path="/admin/einvoicing" element={guard("einvoicing", <EInvoiceQueue />)} />
+        <Route path="/einvoicing" element={guard("einvoicing", <EInvoiceQueue />)} />
+        <Route path="/roles" element={guard("roles", <Roles />)} />
+        <Route path="/notifications" element={<Notifications />} />
+        <Route path="/help" element={<Help />} />
+        <Route path="/inventory/transfers" element={guard("inventory", <Transfers />)} />
+        <Route path="/inventory/transfers/:transferId" element={guard("inventory", <TransferDetail />)} />
+        <Route path="/inventory/adjustments" element={guard("inventory", <Adjustments />)} />
+        <Route path="/inventory/write-offs" element={guard("inventory", <WriteOffs />)} />
+        <Route path="/inventory/lots" element={guard("inventory", <LotsAndExpiry />)} />
+        <Route path="/inventory/serials" element={guard("inventory", <SerialNumbers />)} />
+        <Route path="/manufacturing/boms" element={guard("manufacturing", <BillsOfMaterials />)} />
+        <Route path="/manufacturing/work-orders" element={guard("manufacturing", <WorkOrders />)} />
+        <Route path="/categories" element={guard("taxonomy", <Categories />)} />
+        <Route path="/brands" element={guard("taxonomy", <Brands />)} />
+        <Route path="/units-of-measure" element={guard("taxonomy", <UnitsOfMeasure />)} />
+        <Route path="/accounting/accounts" element={guard("accounting", <ChartOfAccounts />)} />
+        <Route path="/accounting/journal-entries" element={guard("accounting", <JournalEntries />)} />
+        <Route path="/accounting/periods" element={guard("accounting", <FiscalPeriods />)} />
+        <Route path="/accounting/statements" element={guard("accounting", <FinancialStatements />)} />
+        <Route path="/settings" element={guard("settings", <Settings />)} />
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </Suspense>
+  </AppLayout>
 );
 
 const App = () => (
@@ -198,12 +185,14 @@ const App = () => (
                       path="/pos/*"
                       element={
                         <ProtectedRoute>
-                          <Suspense fallback={<PageLoader />}>
-                            <Routes>
-                              <Route path="/" element={<PosRegister />} />
-                              <Route path="*" element={<PosRegister />} />
-                            </Routes>
-                          </Suspense>
+                          <RequirePermission module="pos" action="view" mode="page">
+                            <Suspense fallback={<PageLoader />}>
+                              <Routes>
+                                <Route path="/" element={<PosRegister />} />
+                                <Route path="*" element={<PosRegister />} />
+                              </Routes>
+                            </Suspense>
+                          </RequirePermission>
                         </ProtectedRoute>
                       }
                     />

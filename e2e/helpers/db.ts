@@ -16,14 +16,16 @@ export function getTestDbUrl(): string {
 }
 
 /**
- * Truncates all operational, auth, POS, E-Invoice, and migration 0006 tables while
- * preserving idempotent reference tables (`role_permissions`, `chart_of_accounts`,
- * `gl_account_mappings`, `currencies`, `tax_codes`).
+ * Truncates all 85 schema tables (pre-0007 + Wave 1 0007 tables + company-scoped reference tables)
+ * cleanly with RESTART IDENTITY CASCADE. `resetTestDatabase()` immediately re-inserts the baseline
+ * COMP-01 row (`default_branch_id = NULL`) so `ensureSeededDefaults()` re-seeds HQ-01, 8 presets,
+ * CoA/GL/tax/currency defaults, and document sequences deterministically with zero COMP-02+ leakage.
  */
 export const CANONICAL_TRUNCATE_SQL = `TRUNCATE TABLE
   einvoice_submissions, pos_return_lines, pos_returns,
   pos_tenders, pos_shift_cash_movements, pos_shifts, pos_terminals, user_pos_pins,
   idempotency_keys, notification_user_states, notifications,
+  user_saved_views, document_attachments, print_templates,
   work_order_materials, work_orders, bom_components, bills_of_materials,
   stock_movement_allocations, stock_serials, branch_lot_balances, stock_lots,
   approval_requests, approval_rules,
@@ -37,8 +39,11 @@ export const CANONICAL_TRUNCATE_SQL = `TRUNCATE TABLE
   stock_transfer_lines, stock_transfers, stock_session_items, stock_sessions,
   stock_write_off_lines, stock_write_offs, stock_adjustment_lines, stock_adjustments,
   stock_movements, branch_products, products, taxonomy_items, customers, vendors,
+  chart_of_accounts, gl_account_mappings, currencies, tax_codes,
   document_sequences, company_settings, user_preferences, password_reset_tokens,
-  user_branches, user_branch_scopes, user_roles, user_sessions, users, branches
+  user_mfa, user_companies, custom_role_permissions, custom_roles,
+  user_branches, user_branch_scopes, user_roles, user_sessions, users, branches,
+  role_permissions, companies
 RESTART IDENTITY CASCADE`;
 
 export async function withTestDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T> {
@@ -59,5 +64,10 @@ export async function withTestDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Prom
 export async function resetTestDatabase(): Promise<void> {
   await withTestDb(async (sql) => {
     await sql.unsafe(CANONICAL_TRUNCATE_SQL);
+    await sql`
+      INSERT INTO companies (id, code, name, base_currency, einvoicing_mode, is_default, is_active)
+      VALUES ('00000000-0000-4000-8000-000000000001'::uuid, 'COMP-01', 'Count It Keep It', 'USD', 'none', true, true)
+      ON CONFLICT (id) DO NOTHING
+    `;
   });
 }

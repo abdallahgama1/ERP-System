@@ -1,10 +1,26 @@
 import type { FastifyInstance } from "fastify";
-import { and, eq, gt, isNull, ne, sql } from "drizzle-orm";
+import {
+  mfaDisableSchema,
+  mfaRegenerateRecoveryCodesSchema,
+  mfaVerifyEnrollSchema,
+  mfaVerifyLoginSchema,
+  sessionIdParamSchema,
+  switchCompanySchema,
+  type ActiveSessionDto,
+} from "@erp/shared";
+import { and, desc, eq, gt, isNull, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
+  DEFAULT_COMPANY_ID,
+  branches,
+  companies,
+  customRoles,
   passwordResetTokens,
+  posTerminals,
   userBranches,
   userBranchScopes,
+  userCompanies,
+  userMfa,
   userRoles,
   users,
   userSessions,
@@ -17,6 +33,7 @@ import {
   generateOpaqueToken,
   hashToken,
   loadAuthUserById,
+  resolvePrimaryCompanyIdForUser,
   revokeSessionByToken,
   setSessionCookie,
 } from "../auth/sessions.ts";
@@ -25,6 +42,18 @@ import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { requireAuth } from "../middleware/auth.ts";
 import { sendPasswordResetEmail } from "../services/email.service.ts";
+import {
+  consumeMfaChallengeJti,
+  createMfaChallengeToken,
+  disableMfa,
+  enrollMfa,
+  getMfaStatus,
+  regenerateMfaRecoveryCodes,
+  verifyMfaChallengeToken,
+  verifyMfaCodeOrRecovery,
+  verifyMfaEnrollment,
+} from "../services/mfa.service.ts";
+import { parseOrThrow } from "../services/stock-locks.ts";
 
 // Dummy hash used to equalize login response timing when user email does not exist
 const DUMMY_PASSWORD_HASH =
@@ -105,6 +134,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       const role = isFirstUser ? "admin" : "user";
       const scopeMode = isFirstUser ? "all" : "selected";
 
+      let adminCustomRoleId: string | null = null;
+      if (isFirstUser) {
+        const [adminCustomRole] = await tx
+          .select({ id: customRoles.id })
+          .from(customRoles)
+          .where(and(eq(customRoles.companyId, DEFAULT_COMPANY_ID), eq(customRoles.name, "Admin")))
+          .limit(1);
+        adminCustomRoleId = adminCustomRole?.id ?? null;
+      }
+
       const passwordHash = await hashPassword(password);
 
       const [createdUser] = await tx
@@ -122,6 +161,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       await tx.insert(userRoles).values({
         userId: createdUser.id,
         role,
+        customRoleId: adminCustomRoleId,
+      });
+
+      await tx.insert(userCompanies).values({
+        userId: createdUser.id,
+        companyId: DEFAULT_COMPANY_ID,
+        role,
+        customRoleId: adminCustomRoleId,
+        isDefault: true,
+        isActive: true,
       });
 
       await tx.insert(userBranchScopes).values({
@@ -144,9 +193,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         userId: createdUser.id,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"] ?? null,
+        activeCompanyId: DEFAULT_COMPANY_ID,
       });
 
       await writeAuditLog(tx, {
+        companyId: DEFAULT_COMPANY_ID,
         userId: createdUser.id,
         userName: name,
         userRole: role,
@@ -155,10 +206,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         entityId: createdUser.id,
         entityLabel: email,
         details: { firstUserBootstrap: isFirstUser },
+        after: {
+          id: createdUser.id,
+          name,
+          email,
+          role,
+          customRoleId: adminCustomRoleId,
+          companyId: DEFAULT_COMPANY_ID,
+        },
         ipAddress: req.ip,
       });
 
-      const authUser = await loadAuthUserById(tx, createdUser.id);
+      const authUser = await loadAuthUserById(tx, createdUser.id, DEFAULT_COMPANY_ID);
       if (!authUser) {
         throw new AppError(500, "Failed to load newly created user", "INTERNAL_ERROR");
       }
@@ -195,9 +254,25 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       throw new AppError(403, "This account has been deactivated. Please contact an administrator.", "ACCOUNT_DISABLED");
     }
 
+    const [mfaRow] = await db
+      .select({ isEnabled: userMfa.isEnabled })
+      .from(userMfa)
+      .where(eq(userMfa.userId, userRow.id))
+      .limit(1);
+
+    if (mfaRow?.isEnabled) {
+      const mfaChallengeToken = createMfaChallengeToken(userRow.id);
+      return {
+        mfaRequired: true as const,
+        mfaChallengeToken,
+      };
+    }
+
     const { authUser, rawToken } = await db.transaction(async (tx) => {
       await ensureSeededDefaults(tx);
-      const loadedUser = await loadAuthUserById(tx, userRow.id);
+      const primaryCompanyId =
+        (await resolvePrimaryCompanyIdForUser(tx, userRow.id)) ?? DEFAULT_COMPANY_ID;
+      const loadedUser = await loadAuthUserById(tx, userRow.id, primaryCompanyId);
       if (!loadedUser) {
         throw new AppError(403, "Account inactive or unavailable", "ACCOUNT_DISABLED");
       }
@@ -205,8 +280,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         userId: userRow.id,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"] ?? null,
+        activeCompanyId: loadedUser.activeCompanyId,
       });
       await writeAuditLog(tx, {
+        companyId: loadedUser.activeCompanyId,
         userId: loadedUser.id,
         userName: loadedUser.name,
         userRole: loadedUser.role,
@@ -221,6 +298,302 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     setSessionCookie(reply, rawToken);
     return { user: authUser };
+  });
+
+  app.post("/api/auth/mfa/verify-login", authRateLimit, async (req, reply) => {
+    const parsed = parseOrThrow(mfaVerifyLoginSchema, req.body, "Invalid MFA verification payload");
+    const challenge = verifyMfaChallengeToken(parsed.mfaChallengeToken);
+    const db = getDb();
+
+    const { authUser, rawToken } = await db.transaction(async (tx) => {
+      const [userRow] = await tx
+        .select()
+        .from(users)
+        .where(eq(users.id, challenge.userId))
+        .limit(1);
+
+      if (!userRow || !userRow.isActive) {
+        throw new AppError(403, "Account inactive or unavailable", "ACCOUNT_DISABLED");
+      }
+
+      const mfaResult = await verifyMfaCodeOrRecovery(tx, userRow.id, parsed.code);
+      consumeMfaChallengeJti(challenge.jti, challenge.exp);
+
+      await ensureSeededDefaults(tx);
+      const primaryCompanyId =
+        (await resolvePrimaryCompanyIdForUser(tx, userRow.id)) ?? DEFAULT_COMPANY_ID;
+      const loadedUser = await loadAuthUserById(tx, userRow.id, primaryCompanyId);
+      if (!loadedUser) {
+        throw new AppError(403, "Account inactive or unavailable", "ACCOUNT_DISABLED");
+      }
+
+      const session = await createSessionRecord(tx, {
+        userId: userRow.id,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"] ?? null,
+        activeCompanyId: loadedUser.activeCompanyId,
+      });
+
+      await writeAuditLog(tx, {
+        companyId: loadedUser.activeCompanyId,
+        userId: loadedUser.id,
+        userName: loadedUser.name,
+        userRole: loadedUser.role,
+        action: "auth.login",
+        entityType: "user",
+        entityId: loadedUser.id,
+        entityLabel: loadedUser.email,
+        details: { mfaMethod: mfaResult.method },
+        ipAddress: req.ip,
+      });
+
+      return { authUser: loadedUser, rawToken: session.rawToken };
+    });
+
+    setSessionCookie(reply, rawToken);
+    return { user: authUser };
+  });
+
+  app.get("/api/auth/mfa/status", { preHandler: requireAuth }, async (req) => {
+    return getMfaStatus(getDb(), req.authUser!.id);
+  });
+
+  app.post("/api/auth/mfa/enroll", { preHandler: requireAuth }, async (req) => {
+    return enrollMfa(getDb(), req.authUser!, req.ip);
+  });
+
+  app.post("/api/auth/mfa/verify", { preHandler: requireAuth }, async (req) => {
+    const parsed = parseOrThrow(mfaVerifyEnrollSchema, req.body, "Invalid TOTP verification code");
+    return verifyMfaEnrollment(getDb(), req.authUser!, parsed.code, req.ip);
+  });
+
+  app.post("/api/auth/mfa/disable", { preHandler: requireAuth }, async (req) => {
+    const parsed = parseOrThrow(mfaDisableSchema, req.body, "Invalid MFA disable payload");
+    return disableMfa(getDb(), req.authUser!, parsed, req.ip);
+  });
+
+  app.post("/api/auth/mfa/recovery-codes", { preHandler: requireAuth }, async (req) => {
+    const parsed = parseOrThrow(
+      mfaRegenerateRecoveryCodesSchema,
+      req.body,
+      "Current password or verification code is required."
+    );
+    return regenerateMfaRecoveryCodes(getDb(), req.authUser!, parsed, req.ip);
+  });
+
+  app.post("/api/auth/switch-company", { preHandler: requireAuth }, async (req) => {
+    const parsed = parseOrThrow(switchCompanySchema, req.body, "Invalid company switch request");
+    const actor = req.authUser!;
+    const db = getDb();
+
+    const updatedUser = await db.transaction(async (tx) => {
+      const [targetCompany] = await tx
+        .select()
+        .from(companies)
+        .where(eq(companies.id, parsed.companyId))
+        .limit(1);
+
+      if (!targetCompany) {
+        throw new AppError(404, "Company not found", "COMPANY_NOT_FOUND");
+      }
+      if (!targetCompany.isActive) {
+        throw new AppError(400, "Target company is inactive", "COMPANY_INACTIVE");
+      }
+
+      const [membership] = await tx
+        .select({ id: userCompanies.id })
+        .from(userCompanies)
+        .where(
+          and(
+            eq(userCompanies.userId, actor.id),
+            eq(userCompanies.companyId, parsed.companyId),
+            eq(userCompanies.isActive, true)
+          )
+        )
+        .limit(1);
+
+      const [globalRoleRow] = await tx
+        .select({ role: userRoles.role })
+        .from(userRoles)
+        .where(eq(userRoles.userId, actor.id))
+        .limit(1);
+
+      if (!membership && globalRoleRow?.role !== "admin") {
+        throw new AppError(403, "You do not have access to this company", "FORBIDDEN");
+      }
+
+      if (req.authSessionId) {
+        let shouldClearTerminal = false;
+        if (req.posTerminalId) {
+          const [termBranch] = await tx
+            .select({ companyId: branches.companyId })
+            .from(posTerminals)
+            .innerJoin(branches, eq(branches.id, posTerminals.branchId))
+            .where(eq(posTerminals.id, req.posTerminalId))
+            .limit(1);
+          if (!termBranch || termBranch.companyId !== parsed.companyId) {
+            shouldClearTerminal = true;
+          }
+        }
+
+        await tx
+          .update(userSessions)
+          .set({
+            activeCompanyId: parsed.companyId,
+            lastActivityAt: new Date(),
+            ...(shouldClearTerminal
+              ? { posTerminalId: null, activeCashierId: null, isTerminalLocked: false }
+              : {}),
+          })
+          .where(eq(userSessions.id, req.authSessionId));
+      }
+
+      await writeAuditLog(tx, {
+        companyId: parsed.companyId,
+        userId: actor.id,
+        userName: actor.name,
+        userRole: actor.role,
+        action: "auth.company_switched",
+        entityType: "company",
+        entityId: parsed.companyId,
+        entityLabel: targetCompany.code,
+        before: { activeCompanyId: actor.activeCompanyId },
+        after: { activeCompanyId: parsed.companyId },
+        ipAddress: req.ip,
+      });
+
+      const reloaded = await loadAuthUserById(tx, actor.id, parsed.companyId);
+      if (!reloaded) {
+        throw new AppError(500, "Failed to reload switched company context", "INTERNAL_ERROR");
+      }
+      return reloaded;
+    });
+
+    return { user: updatedUser };
+  });
+
+  app.get("/api/auth/sessions", { preHandler: requireAuth }, async (req) => {
+    const actor = req.authUser!;
+    const db = getDb();
+    const now = new Date();
+
+    const rows = await db
+      .select({
+        id: userSessions.id,
+        ipAddress: userSessions.ipAddress,
+        userAgent: userSessions.userAgent,
+        activeCompanyId: userSessions.activeCompanyId,
+        lastActivityAt: userSessions.lastActivityAt,
+        createdAt: userSessions.createdAt,
+        expiresAt: userSessions.expiresAt,
+        posTerminalId: userSessions.posTerminalId,
+      })
+      .from(userSessions)
+      .where(
+        and(
+          eq(userSessions.userId, actor.id),
+          isNull(userSessions.revokedAt),
+          gt(userSessions.expiresAt, now)
+        )
+      )
+      .orderBy(desc(userSessions.lastActivityAt));
+
+    const sessions: ActiveSessionDto[] = rows.map((row) => ({
+      id: row.id,
+      ipAddress: row.ipAddress ?? null,
+      userAgent: row.userAgent ?? null,
+      activeCompanyId: row.activeCompanyId ?? null,
+      lastActivityAt: row.lastActivityAt.toISOString(),
+      createdAt: row.createdAt.toISOString(),
+      expiresAt: row.expiresAt.toISOString(),
+      isCurrent: row.id === req.authSessionId,
+      isTerminalBound: Boolean(row.posTerminalId),
+    }));
+
+    return { sessions };
+  });
+
+  app.delete("/api/auth/sessions/:id", { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = parseOrThrow(sessionIdParamSchema, req.params, "Invalid session ID");
+    const actor = req.authUser!;
+    const db = getDb();
+    const now = new Date();
+
+    await db.transaction(async (tx) => {
+      const revoked = await tx
+        .update(userSessions)
+        .set({ revokedAt: now })
+        .where(
+          and(
+            eq(userSessions.id, id),
+            eq(userSessions.userId, actor.id),
+            isNull(userSessions.revokedAt)
+          )
+        )
+        .returning({ id: userSessions.id });
+
+      if (revoked.length === 0) {
+        throw new AppError(404, "Session not found", "SESSION_NOT_FOUND");
+      }
+
+      await writeAuditLog(tx, {
+        companyId: actor.activeCompanyId,
+        userId: actor.id,
+        userName: actor.name,
+        userRole: actor.role,
+        action: "auth.session_revoked",
+        entityType: "user_session",
+        entityId: id,
+        details: { revokedCurrent: id === req.authSessionId },
+        ipAddress: req.ip,
+      });
+    });
+
+    const revokedCurrent = id === req.authSessionId;
+    if (revokedCurrent) {
+      clearSessionCookie(reply);
+    }
+
+    return { ok: true, revokedCurrent };
+  });
+
+  app.post("/api/auth/sessions/revoke-others", { preHandler: requireAuth }, async (req) => {
+    const actor = req.authUser!;
+    const db = getDb();
+
+    if (!req.authSessionId) {
+      return { ok: true, revokedCount: 0 };
+    }
+
+    const revokedCount = await db.transaction(async (tx) => {
+      const revoked = await tx
+        .update(userSessions)
+        .set({ revokedAt: new Date() })
+        .where(
+          and(
+            eq(userSessions.userId, actor.id),
+            ne(userSessions.id, req.authSessionId!),
+            isNull(userSessions.revokedAt)
+          )
+        )
+        .returning({ id: userSessions.id });
+
+      await writeAuditLog(tx, {
+        companyId: actor.activeCompanyId,
+        userId: actor.id,
+        userName: actor.name,
+        userRole: actor.role,
+        action: "auth.other_sessions_revoked",
+        entityType: "user_session",
+        entityId: req.authSessionId!,
+        details: { revokedCount: revoked.length },
+        ipAddress: req.ip,
+      });
+
+      return revoked.length;
+    });
+
+    return { ok: true, revokedCount };
   });
 
   app.post("/api/auth/logout", async (req, reply) => {
@@ -270,6 +643,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       }
 
       await writeAuditLog(tx, {
+        companyId: authUser.activeCompanyId,
         userId: authUser.id,
         userName: authUser.name,
         userRole: authUser.role,

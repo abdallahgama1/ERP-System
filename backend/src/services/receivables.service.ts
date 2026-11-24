@@ -1,4 +1,4 @@
-import { desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
   calculateLineAmounts,
@@ -9,6 +9,7 @@ import {
 } from "@erp/shared";
 import {
   creditNoteApplications,
+  customers,
   products,
   receivedPaymentAllocations,
   receivedPayments,
@@ -23,16 +24,25 @@ import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal, reverseJournalEntriesForSource } from "./gl.service.ts";
 import { buildBranchScopeCondition, groupByKey, listBranchScoped } from "./query-helpers.ts";
-import { applyBranchStockMovement, type RequestActor } from "./stock-locks.ts";
+import {
+  actorCompanyId,
+  applyBranchStockMovement,
+  assertBranchInCompany,
+  type RequestActor,
+} from "./stock-locks.ts";
 
 export async function listReceivedPayments(db: AppDatabase, actor: RequestActor) {
+  const companyId = actorCompanyId(actor);
   const scopeCond = buildBranchScopeCondition(receivedPayments.branchId, actor, undefined, true);
   if (scopeCond === "EMPTY") return [];
+
+  const companyCond = eq(receivedPayments.companyId, companyId);
+  const whereClause = scopeCond ? and(companyCond, scopeCond) : companyCond;
 
   const list = await db
     .select()
     .from(receivedPayments)
-    .where(scopeCond ?? undefined)
+    .where(whereClause)
     .orderBy(desc(receivedPayments.createdAt));
   if (list.length === 0) return [];
 
@@ -61,6 +71,7 @@ export async function createReceivedPayment(
   data: z.infer<typeof receivedPaymentSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   const totalAllocated = data.allocations.reduce((s, a) => s + a.amount, 0);
   if (totalAllocated > data.amount + 0.0001) {
     throw new AppError(400, "Allocated amount exceeds payment amount", "INVALID_ALLOCATION");
@@ -68,10 +79,21 @@ export async function createReceivedPayment(
   if (data.branchId) assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const paymentNumber = await nextDocNumber(tx, "RPAY", "RP-");
+    if (data.branchId) {
+      await assertBranchInCompany(tx, data.branchId, companyId);
+    }
+    const [cust] = await tx
+      .select({ id: customers.id })
+      .from(customers)
+      .where(and(eq(customers.id, data.customerId), eq(customers.companyId, companyId)))
+      .limit(1);
+    if (!cust) throw new AppError(404, "Customer not found", "NOT_FOUND");
+
+    const paymentNumber = await nextDocNumber(tx, "RPAY", "RP-", null, companyId);
     const [rp] = await tx
       .insert(receivedPayments)
       .values({
+        companyId,
         paymentNumber,
         customerId: data.customerId,
         branchId: data.branchId ?? null,
@@ -97,7 +119,7 @@ export async function createReceivedPayment(
         status: string;
       }>(sql`
         SELECT id, total_amount, paid_amount, credit_applied_amount, retainer_applied_amount, status
-        FROM sales_invoices WHERE id = ${alloc.invoiceId} FOR UPDATE
+        FROM sales_invoices WHERE id = ${alloc.invoiceId} AND company_id = ${companyId} FOR UPDATE
       `);
       const inv = invRows[0];
       if (!inv) throw new AppError(404, "Referenced invoice not found", "NOT_FOUND");
@@ -116,7 +138,7 @@ export async function createReceivedPayment(
       await tx
         .update(salesInvoices)
         .set({ paidAmount: toNumeric(nextPaid, 4), status: nextStatus, updatedAt: new Date() })
-        .where(eq(salesInvoices.id, inv.id));
+        .where(and(eq(salesInvoices.id, inv.id), eq(salesInvoices.companyId, companyId)));
 
       await tx.insert(receivedPaymentAllocations).values({
         paymentId: rp.id,
@@ -126,6 +148,7 @@ export async function createReceivedPayment(
     }
 
     await postMappedJournal(tx, {
+      companyId,
       branchId: rp.branchId,
       entryDate: rp.paymentDate,
       sourceType: "received_payment",
@@ -140,6 +163,7 @@ export async function createReceivedPayment(
     });
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -163,8 +187,13 @@ export async function voidReceivedPayment(
   reason: string,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [rp] = await tx.select().from(receivedPayments).where(eq(receivedPayments.id, id)).limit(1);
+    const [rp] = await tx
+      .select()
+      .from(receivedPayments)
+      .where(and(eq(receivedPayments.id, id), eq(receivedPayments.companyId, companyId)))
+      .limit(1);
     if (!rp) throw new AppError(404, "Payment not found", "NOT_FOUND");
     if (rp.status === "Voided") throw new AppError(400, "Payment is already voided", "ALREADY_VOIDED");
 
@@ -182,7 +211,7 @@ export async function voidReceivedPayment(
         retainer_applied_amount: string;
       }>(sql`
         SELECT id, total_amount, paid_amount, credit_applied_amount, retainer_applied_amount
-        FROM sales_invoices WHERE id = ${alloc.invoiceId} FOR UPDATE
+        FROM sales_invoices WHERE id = ${alloc.invoiceId} AND company_id = ${companyId} FOR UPDATE
       `);
       const inv = invRows[0];
       if (!inv) continue;
@@ -193,18 +222,19 @@ export async function voidReceivedPayment(
       await tx
         .update(salesInvoices)
         .set({ paidAmount: toNumeric(nextPaid, 4), status: nextStatus, updatedAt: new Date() })
-        .where(eq(salesInvoices.id, inv.id));
+        .where(and(eq(salesInvoices.id, inv.id), eq(salesInvoices.companyId, companyId)));
     }
 
     const [res] = await tx
       .update(receivedPayments)
       .set({ status: "Voided", voidReason: reason, voidedAt: new Date(), voidedBy: actor.id })
-      .where(eq(receivedPayments.id, id))
+      .where(and(eq(receivedPayments.id, id), eq(receivedPayments.companyId, companyId)))
       .returning();
 
-    await reverseJournalEntriesForSource(tx, "received_payment", id, actor.id, reason);
+    await reverseJournalEntriesForSource(tx, "received_payment", id, actor.id, reason, companyId);
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -262,11 +292,29 @@ export async function createSalesReturn(
   data: z.infer<typeof salesReturnSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const returnNumber = await nextDocNumber(tx, "SRET", "SRTN-");
-    const creditNoteNumber = await nextDocNumber(tx, "CN", "CN-");
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const [cust] = await tx
+      .select({ id: customers.id })
+      .from(customers)
+      .where(and(eq(customers.id, data.customerId), eq(customers.companyId, companyId)))
+      .limit(1);
+    if (!cust) throw new AppError(404, "Customer not found", "NOT_FOUND");
+
+    if (data.invoiceId) {
+      const [inv] = await tx
+        .select({ id: salesInvoices.id })
+        .from(salesInvoices)
+        .where(and(eq(salesInvoices.id, data.invoiceId), eq(salesInvoices.companyId, companyId)))
+        .limit(1);
+      if (!inv) throw new AppError(404, "Invoice not found", "NOT_FOUND");
+    }
+
+    const returnNumber = await nextDocNumber(tx, "SRET", "SRTN-", null, companyId);
+    const creditNoteNumber = await nextDocNumber(tx, "CN", "CN-", null, companyId);
 
     let subtotal = 0;
     let taxTotal = 0;
@@ -283,6 +331,7 @@ export async function createSalesReturn(
     const [ret] = await tx
       .insert(salesReturns)
       .values({
+        companyId,
         returnNumber,
         creditNoteNumber,
         customerId: data.customerId,
@@ -305,12 +354,17 @@ export async function createSalesReturn(
     let totalRestockVal = 0;
 
     for (const line of sorted) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, line.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, line.productId), eq(products.companyId, companyId)))
+        .limit(1);
       if (!prod) throw new AppError(404, `Product ${line.productId} not found`, "NOT_FOUND");
 
       let unitCostSnapshot = num(prod.costPrice);
       if (data.restockItems) {
         const moved = await applyBranchStockMovement(tx, {
+          companyId,
           branchId: data.branchId,
           productId: line.productId,
           qtyDelta: line.quantity,
@@ -340,6 +394,7 @@ export async function createSalesReturn(
     }
 
     await postMappedJournal(tx, {
+      companyId,
       branchId: ret.branchId,
       entryDate: ret.returnDate,
       sourceType: "sales_return",
@@ -356,6 +411,7 @@ export async function createSalesReturn(
 
     if (totalRestockVal > 0.0001) {
       await postMappedJournal(tx, {
+        companyId,
         branchId: ret.branchId,
         entryDate: ret.returnDate,
         sourceType: "sales_return",
@@ -371,6 +427,7 @@ export async function createSalesReturn(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -392,6 +449,7 @@ export async function applySalesReturnCredit(
   data: z.infer<typeof applyAmountSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
     const retRows = await tx.execute<{
       id: string;
@@ -399,7 +457,9 @@ export async function applySalesReturnCredit(
       customer_id: string;
       total_amount: string;
       applied_amount: string;
-    }>(sql`SELECT id, credit_note_number, customer_id, total_amount, applied_amount FROM sales_returns WHERE id = ${id} FOR UPDATE`);
+    }>(
+      sql`SELECT id, credit_note_number, customer_id, total_amount, applied_amount FROM sales_returns WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE`
+    );
     const ret = retRows[0];
     if (!ret) throw new AppError(404, "Credit note not found", "NOT_FOUND");
 
@@ -418,7 +478,7 @@ export async function applySalesReturnCredit(
       status: string;
     }>(sql`
       SELECT id, customer_id, total_amount, paid_amount, credit_applied_amount, retainer_applied_amount, status
-      FROM sales_invoices WHERE id = ${data.invoiceId} FOR UPDATE
+      FROM sales_invoices WHERE id = ${data.invoiceId} AND company_id = ${companyId} FOR UPDATE
     `);
     const inv = invRows[0];
     if (!inv) throw new AppError(404, "Target invoice not found", "NOT_FOUND");
@@ -442,7 +502,7 @@ export async function applySalesReturnCredit(
         appliedAmount: toNumeric(nextApplied, 4),
         status: nextApplied >= num(ret.total_amount) - 0.0001 ? "Applied" : "Open",
       })
-      .where(eq(salesReturns.id, id));
+      .where(and(eq(salesReturns.id, id), eq(salesReturns.companyId, companyId)));
 
     await tx
       .update(salesInvoices)
@@ -451,7 +511,7 @@ export async function applySalesReturnCredit(
         status: nextInvStatus,
         updatedAt: new Date(),
       })
-      .where(eq(salesInvoices.id, inv.id));
+      .where(and(eq(salesInvoices.id, inv.id), eq(salesInvoices.companyId, companyId)));
 
     await tx.insert(creditNoteApplications).values({
       returnId: id,
@@ -461,6 +521,7 @@ export async function applySalesReturnCredit(
     });
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -475,13 +536,17 @@ export async function applySalesReturnCredit(
 }
 
 export async function listRetainerInvoices(db: AppDatabase, actor: RequestActor) {
+  const companyId = actorCompanyId(actor);
   const scopeCond = buildBranchScopeCondition(retainerInvoices.branchId, actor, undefined, true);
   if (scopeCond === "EMPTY") return [];
+
+  const companyCond = eq(retainerInvoices.companyId, companyId);
+  const whereClause = scopeCond ? and(companyCond, scopeCond) : companyCond;
 
   const list = await db
     .select()
     .from(retainerInvoices)
-    .where(scopeCond ?? undefined)
+    .where(whereClause)
     .orderBy(desc(retainerInvoices.createdAt));
   return list.map((r) => ({
     ...r,
@@ -500,14 +565,26 @@ export async function createRetainerInvoice(
   data: z.infer<typeof retainerSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   if (data.branchId) assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const retainerNumber = await nextDocNumber(tx, "RET", "RET-");
+    if (data.branchId) {
+      await assertBranchInCompany(tx, data.branchId, companyId);
+    }
+    const [cust] = await tx
+      .select({ id: customers.id })
+      .from(customers)
+      .where(and(eq(customers.id, data.customerId), eq(customers.companyId, companyId)))
+      .limit(1);
+    if (!cust) throw new AppError(404, "Customer not found", "NOT_FOUND");
+
+    const retainerNumber = await nextDocNumber(tx, "RET", "RET-", null, companyId);
     const paidAmount = data.status === "Paid" ? data.amount : 0;
     const [row] = await tx
       .insert(retainerInvoices)
       .values({
+        companyId,
         retainerNumber,
         customerId: data.customerId,
         branchId: data.branchId ?? null,
@@ -525,6 +602,7 @@ export async function createRetainerInvoice(
 
     if (data.status === "Paid") {
       await postMappedJournal(tx, {
+        companyId,
         branchId: row.branchId,
         entryDate: row.issueDate,
         sourceType: "retainer",
@@ -540,6 +618,7 @@ export async function createRetainerInvoice(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -555,12 +634,22 @@ export async function createRetainerInvoice(
 }
 
 export async function sendRetainerInvoice(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [ret] = await tx.select().from(retainerInvoices).where(eq(retainerInvoices.id, id)).limit(1);
+    const [ret] = await tx
+      .select()
+      .from(retainerInvoices)
+      .where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)))
+      .limit(1);
     if (!ret) throw new AppError(404, "Retainer not found", "NOT_FOUND");
     if (ret.status !== "Draft") throw new AppError(400, "Only Draft retainers can be sent", "INVALID_STATUS");
-    const [res] = await tx.update(retainerInvoices).set({ status: "Sent" }).where(eq(retainerInvoices.id, id)).returning();
+    const [res] = await tx
+      .update(retainerInvoices)
+      .set({ status: "Sent" })
+      .where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)))
+      .returning();
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -576,8 +665,13 @@ export async function sendRetainerInvoice(db: AppDatabase, actor: RequestActor, 
 }
 
 export async function cancelRetainerInvoice(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [ret] = await tx.select().from(retainerInvoices).where(eq(retainerInvoices.id, id)).limit(1);
+    const [ret] = await tx
+      .select()
+      .from(retainerInvoices)
+      .where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)))
+      .limit(1);
     if (!ret) throw new AppError(404, "Retainer not found", "NOT_FOUND");
     if (num(ret.paidAmount) > 0 || num(ret.appliedAmount) > 0) {
       throw new AppError(400, "Cannot cancel a paid or applied retainer invoice", "RETAINER_IN_USE");
@@ -585,9 +679,10 @@ export async function cancelRetainerInvoice(db: AppDatabase, actor: RequestActor
     const [res] = await tx
       .update(retainerInvoices)
       .set({ status: "Cancelled" })
-      .where(eq(retainerInvoices.id, id))
+      .where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)))
       .returning();
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -603,14 +698,20 @@ export async function cancelRetainerInvoice(db: AppDatabase, actor: RequestActor
 }
 
 export async function deleteRetainerInvoice(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [ret] = await tx.select().from(retainerInvoices).where(eq(retainerInvoices.id, id)).limit(1);
+    const [ret] = await tx
+      .select()
+      .from(retainerInvoices)
+      .where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)))
+      .limit(1);
     if (!ret) throw new AppError(404, "Retainer not found", "NOT_FOUND");
     if (ret.status !== "Draft") {
       throw new AppError(400, "Only Draft retainer invoices can be deleted", "IMMUTABLE_DOCUMENT");
     }
-    await tx.delete(retainerInvoices).where(eq(retainerInvoices.id, id));
+    await tx.delete(retainerInvoices).where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)));
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -625,19 +726,25 @@ export async function deleteRetainerInvoice(db: AppDatabase, actor: RequestActor
 }
 
 export async function recordRetainerPayment(db: AppDatabase, actor: RequestActor, id: string, ipAddress?: string) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [ret] = await tx.select().from(retainerInvoices).where(eq(retainerInvoices.id, id)).limit(1);
+    const [ret] = await tx
+      .select()
+      .from(retainerInvoices)
+      .where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)))
+      .limit(1);
     if (!ret) throw new AppError(404, "Retainer not found", "NOT_FOUND");
     const [res] = await tx
       .update(retainerInvoices)
       .set({ paidAmount: ret.amount, status: "Paid" })
-      .where(eq(retainerInvoices.id, id))
+      .where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)))
       .returning();
 
     if (ret.status !== "Paid") {
       const amt = num(ret.amount);
       const fx = num(ret.fxRate) || 1;
       await postMappedJournal(tx, {
+        companyId,
         branchId: ret.branchId,
         entryDate: new Date(),
         sourceType: "retainer",
@@ -653,6 +760,7 @@ export async function recordRetainerPayment(db: AppDatabase, actor: RequestActor
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -674,6 +782,7 @@ export async function applyRetainer(
   data: z.infer<typeof applyAmountSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
     const retRows = await tx.execute<{
       id: string;
@@ -681,7 +790,9 @@ export async function applyRetainer(
       customer_id: string;
       paid_amount: string;
       applied_amount: string;
-    }>(sql`SELECT id, retainer_number, customer_id, paid_amount, applied_amount FROM retainer_invoices WHERE id = ${id} FOR UPDATE`);
+    }>(
+      sql`SELECT id, retainer_number, customer_id, paid_amount, applied_amount FROM retainer_invoices WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE`
+    );
     const ret = retRows[0];
     if (!ret) throw new AppError(404, "Retainer not found", "NOT_FOUND");
 
@@ -699,7 +810,7 @@ export async function applyRetainer(
       retainer_applied_amount: string;
     }>(sql`
       SELECT id, customer_id, total_amount, paid_amount, credit_applied_amount, retainer_applied_amount
-      FROM sales_invoices WHERE id = ${data.invoiceId} FOR UPDATE
+      FROM sales_invoices WHERE id = ${data.invoiceId} AND company_id = ${companyId} FOR UPDATE
     `);
     const inv = invRows[0];
     if (!inv) throw new AppError(404, "Target invoice not found", "NOT_FOUND");
@@ -723,7 +834,7 @@ export async function applyRetainer(
         appliedAmount: toNumeric(nextApplied, 4),
         status: nextApplied >= num(ret.paid_amount) - 0.0001 ? "Applied" : "Partially Applied",
       })
-      .where(eq(retainerInvoices.id, id));
+      .where(and(eq(retainerInvoices.id, id), eq(retainerInvoices.companyId, companyId)));
 
     await tx
       .update(salesInvoices)
@@ -732,7 +843,7 @@ export async function applyRetainer(
         status: nextInvStatus,
         updatedAt: new Date(),
       })
-      .where(eq(salesInvoices.id, inv.id));
+      .where(and(eq(salesInvoices.id, inv.id), eq(salesInvoices.companyId, companyId)));
 
     await tx.insert(retainerApplications).values({
       retainerId: id,
@@ -742,6 +853,7 @@ export async function applyRetainer(
     });
 
     await postMappedJournal(tx, {
+      companyId,
       sourceType: "retainer_application",
       sourceId: id,
       referenceNumber: ret.retainer_number,
@@ -754,6 +866,7 @@ export async function applyRetainer(
     });
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

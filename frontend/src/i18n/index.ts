@@ -42,7 +42,13 @@ const applyLanguage = (lng: string) => {
   const dir = normalized === 'ar' ? 'rtl' : 'ltr';
   document.documentElement.dir = dir;
   document.documentElement.lang = normalized;
-  localStorage.setItem('i18nextLng', normalized);
+  try {
+    if (typeof localStorage !== 'undefined' && typeof localStorage.setItem === 'function') {
+      localStorage.setItem('i18nextLng', normalized);
+    }
+  } catch {
+    // ignore storage access errors in restricted/test environments
+  }
 };
 
 // Update document direction and lazily load locale JSON when language changes

@@ -62,7 +62,12 @@ export async function eventRoutes(app: FastifyInstance): Promise<void> {
       "X-Accel-Buffering": "no",
     });
 
-    const cleanup = eventBroadcaster.addClient(randomUUID(), req.authUser!.id, reply.raw);
+    const cleanup = eventBroadcaster.addClient(
+      randomUUID(),
+      req.authUser!.id,
+      reply.raw,
+      req.authUser!.activeCompanyId ?? null
+    );
     req.raw.on("close", cleanup);
   });
 }

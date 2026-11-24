@@ -1,4 +1,4 @@
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { z } from "zod";
 import type { createSessionSchema, patchSessionSchema, upsertSessionItemsSchema } from "@erp/shared";
 import {
@@ -15,7 +15,7 @@ import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import { postMappedJournal } from "./gl.service.ts";
 import { groupByKey, listBranchScoped } from "./query-helpers.ts";
-import { lockBranchProduct, type RequestActor } from "./stock-locks.ts";
+import { actorCompanyId, assertBranchInCompany, lockBranchProduct, type RequestActor } from "./stock-locks.ts";
 
 export async function listSessions(db: AppDatabase, actor: RequestActor) {
   const headers = (await listBranchScoped(
@@ -63,13 +63,16 @@ export async function createSession(
   data: z.infer<typeof createSessionSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const sessionNumber = await nextDocNumber(tx, "SESS", "CNT-");
+    await assertBranchInCompany(tx, data.branchId, companyId);
+    const sessionNumber = await nextDocNumber(tx, "SESS", "CNT-", null, companyId);
     const [session] = await tx
       .insert(stockSessions)
       .values({
+        companyId,
         sessionNumber,
         branchId: data.branchId,
         name: data.name,
@@ -81,10 +84,19 @@ export async function createSession(
       .returning();
 
     const targetProducts = data.productIds?.length
-      ? await tx.select().from(products).where(inArray(products.id, data.productIds))
-      : await tx.select().from(products).where(eq(products.isActive, true));
+      ? await tx
+          .select()
+          .from(products)
+          .where(and(eq(products.companyId, companyId), inArray(products.id, data.productIds)))
+      : await tx
+          .select()
+          .from(products)
+          .where(and(eq(products.companyId, companyId), eq(products.isActive, true)));
 
-    const bpRows = await tx.select().from(branchProducts).where(eq(branchProducts.branchId, data.branchId));
+    const bpRows = await tx
+      .select()
+      .from(branchProducts)
+      .where(and(eq(branchProducts.companyId, companyId), eq(branchProducts.branchId, data.branchId)));
     const qtyMap = new Map(bpRows.map((bp) => [bp.productId, num(bp.qtyOnHand)]));
 
     if (targetProducts.length > 0) {
@@ -104,6 +116,7 @@ export async function createSession(
     }
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -126,12 +139,20 @@ export async function updateSession(
   data: z.infer<typeof patchSessionSchema>,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   if (data.branchId) assertBranchAccess(actor, data.branchId);
 
   return db.transaction(async (tx) => {
-    const [current] = await tx.select().from(stockSessions).where(eq(stockSessions.id, id)).limit(1);
+    const [current] = await tx
+      .select()
+      .from(stockSessions)
+      .where(and(eq(stockSessions.id, id), eq(stockSessions.companyId, companyId)))
+      .limit(1);
     if (!current) throw new AppError(404, "Session not found", "NOT_FOUND");
     assertBranchAccess(actor, current.branchId);
+    if (data.branchId) {
+      await assertBranchInCompany(tx, data.branchId, companyId);
+    }
     if (current.status === "Completed") {
       throw new AppError(400, "Completed stock-take sessions are immutable", "SESSION_IMMUTABLE");
     }
@@ -145,10 +166,11 @@ export async function updateSession(
         status: data.status ?? current.status,
         updatedAt: new Date(),
       })
-      .where(eq(stockSessions.id, id))
+      .where(and(eq(stockSessions.id, id), eq(stockSessions.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -169,8 +191,13 @@ export async function removeSessionItem(
   sessionId: string,
   productId: string
 ) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [session] = await tx.select().from(stockSessions).where(eq(stockSessions.id, sessionId)).limit(1);
+    const [session] = await tx
+      .select()
+      .from(stockSessions)
+      .where(and(eq(stockSessions.id, sessionId), eq(stockSessions.companyId, companyId)))
+      .limit(1);
     if (!session) throw new AppError(404, "Session not found", "NOT_FOUND");
     assertBranchAccess(actor, session.branchId);
     if (session.status !== "In Progress") {
@@ -188,15 +215,34 @@ export async function upsertSessionItems(
   sessionId: string,
   data: z.infer<typeof upsertSessionItemsSchema>
 ) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [session] = await tx.select().from(stockSessions).where(eq(stockSessions.id, sessionId)).limit(1);
+    const [session] = await tx
+      .select()
+      .from(stockSessions)
+      .where(and(eq(stockSessions.id, sessionId), eq(stockSessions.companyId, companyId)))
+      .limit(1);
     if (!session) throw new AppError(404, "Session not found", "NOT_FOUND");
     assertBranchAccess(actor, session.branchId);
     if (session.status !== "In Progress") {
       throw new AppError(400, "Cannot modify counts on a closed or cancelled session", "SESSION_IMMUTABLE");
     }
 
-    const bpRows = await tx.select().from(branchProducts).where(eq(branchProducts.branchId, session.branchId));
+    const uniqueProdIds = Array.from(new Set(data.items.map((i) => i.productId)));
+    if (uniqueProdIds.length > 0) {
+      const validProds = await tx
+        .select({ id: products.id })
+        .from(products)
+        .where(and(eq(products.companyId, companyId), inArray(products.id, uniqueProdIds)));
+      if (validProds.length !== uniqueProdIds.length) {
+        throw new AppError(404, "One or more products not found in active company", "NOT_FOUND");
+      }
+    }
+
+    const bpRows = await tx
+      .select()
+      .from(branchProducts)
+      .where(and(eq(branchProducts.companyId, companyId), eq(branchProducts.branchId, session.branchId)));
     const qtyMap = new Map(bpRows.map((bp) => [bp.productId, num(bp.qtyOnHand)]));
 
     for (const item of data.items) {
@@ -226,7 +272,10 @@ export async function upsertSessionItems(
         });
     }
 
-    await tx.update(stockSessions).set({ updatedAt: new Date() }).where(eq(stockSessions.id, sessionId));
+    await tx
+      .update(stockSessions)
+      .set({ updatedAt: new Date() })
+      .where(and(eq(stockSessions.id, sessionId), eq(stockSessions.companyId, companyId)));
   });
 }
 
@@ -236,6 +285,7 @@ export async function completeSession(
   id: string,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
     const sRows = await tx.execute<{
       id: string;
@@ -243,7 +293,9 @@ export async function completeSession(
       branch_id: string;
       name: string;
       status: string;
-    }>(sql`SELECT id, session_number, branch_id, name, status FROM stock_sessions WHERE id = ${id} FOR UPDATE`);
+    }>(
+      sql`SELECT id, session_number, branch_id, name, status FROM stock_sessions WHERE id = ${id} AND company_id = ${companyId} FOR UPDATE`
+    );
     const session = sRows[0];
     if (!session) throw new AppError(404, "Session not found", "NOT_FOUND");
     assertBranchAccess(actor, session.branch_id);
@@ -268,9 +320,13 @@ export async function completeSession(
     }> = [];
 
     for (const item of items) {
-      const [prod] = await tx.select().from(products).where(eq(products.id, item.productId)).limit(1);
+      const [prod] = await tx
+        .select()
+        .from(products)
+        .where(and(eq(products.id, item.productId), eq(products.companyId, companyId)))
+        .limit(1);
       if (!prod) continue;
-      const bp = await lockBranchProduct(tx, session.branch_id, item.productId, num(prod.costPrice));
+      const bp = await lockBranchProduct(tx, session.branch_id, item.productId, num(prod.costPrice), companyId);
       const counted = num(item.countedQty);
       const delta = counted - bp.qtyOnHand;
       if (delta !== 0) {
@@ -287,10 +343,11 @@ export async function completeSession(
 
     let adjustmentId: string | null = null;
     if (deltas.length > 0) {
-      const adjNumber = await nextDocNumber(tx, "ADJ", "ADJ-");
+      const adjNumber = await nextDocNumber(tx, "ADJ", "ADJ-", null, companyId);
       const [adj] = await tx
         .insert(stockAdjustments)
         .values({
+          companyId,
           adjustmentNumber: adjNumber,
           branchId: session.branch_id,
           reason: "stock_take",
@@ -320,6 +377,7 @@ export async function completeSession(
         });
 
         await tx.insert(stockMovements).values({
+          companyId,
           branchId: session.branch_id,
           productId: d.productId,
           movementType: "stock_take",
@@ -339,6 +397,7 @@ export async function completeSession(
       if (Math.abs(netVarianceVal) > 0.0001) {
         const absVal = Math.abs(netVarianceVal);
         await postMappedJournal(tx, {
+          companyId,
           branchId: session.branch_id,
           sourceType: "stock_session",
           sourceId: id,
@@ -368,10 +427,11 @@ export async function completeSession(
         completedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(stockSessions.id, id))
+      .where(and(eq(stockSessions.id, id), eq(stockSessions.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -394,8 +454,13 @@ export async function cancelSession(
   id: string,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   return db.transaction(async (tx) => {
-    const [session] = await tx.select().from(stockSessions).where(eq(stockSessions.id, id)).limit(1);
+    const [session] = await tx
+      .select()
+      .from(stockSessions)
+      .where(and(eq(stockSessions.id, id), eq(stockSessions.companyId, companyId)))
+      .limit(1);
     if (!session) throw new AppError(404, "Session not found", "NOT_FOUND");
     assertBranchAccess(actor, session.branchId);
     if (session.status === "Completed") {
@@ -405,10 +470,11 @@ export async function cancelSession(
     const [res] = await tx
       .update(stockSessions)
       .set({ status: "Cancelled", updatedAt: new Date() })
-      .where(eq(stockSessions.id, id))
+      .where(and(eq(stockSessions.id, id), eq(stockSessions.companyId, companyId)))
       .returning();
 
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,
@@ -430,16 +496,22 @@ export async function deleteSession(
   id: string,
   ipAddress?: string
 ) {
+  const companyId = actorCompanyId(actor);
   await db.transaction(async (tx) => {
-    const [session] = await tx.select().from(stockSessions).where(eq(stockSessions.id, id)).limit(1);
+    const [session] = await tx
+      .select()
+      .from(stockSessions)
+      .where(and(eq(stockSessions.id, id), eq(stockSessions.companyId, companyId)))
+      .limit(1);
     if (!session) throw new AppError(404, "Session not found", "NOT_FOUND");
     assertBranchAccess(actor, session.branchId);
     if (session.status === "Completed") {
       throw new AppError(400, "Completed stock-take sessions cannot be deleted", "SESSION_IMMUTABLE");
     }
 
-    await tx.delete(stockSessions).where(eq(stockSessions.id, id));
+    await tx.delete(stockSessions).where(and(eq(stockSessions.id, id), eq(stockSessions.companyId, companyId)));
     await writeAuditLog(tx, {
+      companyId,
       userId: actor.id,
       userName: actor.name,
       userRole: actor.role,

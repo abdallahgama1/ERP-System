@@ -7,14 +7,14 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import MovementHistoryTable from "@/components/inventory/MovementHistoryTable";
 import { useBranch } from "@/contexts/BranchContext";
-import { useInventory } from "@/contexts/InventoryContext";
+import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useMovementsCursorQuery } from "@/hooks/queries/useInventoryQueries";
 import type { StockMovement } from "@/types";
 
 export default function MovementHistory() {
   const { t } = useTranslation();
   const { activeBranchId } = useBranch();
-  const { products, branches } = useInventory();
+  const { products, branches } = useInventoryScope({ products: true });
   const [search, setSearch] = useState("");
 
   const {
