@@ -43,7 +43,8 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
   const role: AppRole = user?.role ?? "user";
   const [matrixOverride, setMatrixOverride] = useState<RolePermissionMatrix | null>(null);
 
-  const shouldFetchMatrix = Boolean(user) && (isRolesRoute || !user?.permissions);
+  const canViewRoles = role === "admin" || Boolean(user?.permissions?.roles?.view);
+  const shouldFetchMatrix = Boolean(user) && canViewRoles && (isRolesRoute || !user?.permissions);
 
   const matrixQuery = useQuery({
     queryKey: erpQueryKeys.permissions,

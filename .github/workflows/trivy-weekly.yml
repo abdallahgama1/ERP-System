@@ -1,0 +1,57 @@
+name: Weekly Trivy Image Security Report
+
+on:
+  schedule:
+    # Mondays at 06:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy-high-report:
+    name: Build & Trivy Scan Images (Report HIGH)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          load: true
+          tags: count-it-keep-it-backend:weekly-scan
+          cache-from: type=gha
+
+      - name: Build frontend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          load: true
+          tags: count-it-keep-it-frontend:weekly-scan
+          cache-from: type=gha
+
+      - name: Trivy scan backend image (report HIGH without failing)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: count-it-keep-it-backend:weekly-scan
+          format: table
+          ignore-unfixed: true
+          severity: HIGH
+          exit-code: "0"
+
+      - name: Trivy scan frontend image (report HIGH without failing)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: count-it-keep-it-frontend:weekly-scan
+          format: table
+          ignore-unfixed: true
+          severity: HIGH
+          exit-code: "0"

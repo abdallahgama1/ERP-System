@@ -22,7 +22,8 @@ ENV VITE_API_BASE_URL=${VITE_API_BASE_URL} \
 
 RUN npm --prefix frontend run build
 
-FROM nginx:1.27-alpine AS runtime
+FROM nginx:alpine AS runtime
+RUN apk upgrade --no-cache
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 

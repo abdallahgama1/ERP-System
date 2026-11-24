@@ -42,6 +42,163 @@ function escapeHtml(raw: string): string {
     .replace(/'/g, "&#39;");
 }
 
+const SAFE_TEMPLATE_TAGS = new Set([
+  "p",
+  "br",
+  "div",
+  "span",
+  "strong",
+  "b",
+  "em",
+  "i",
+  "u",
+  "small",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "hr",
+  "ul",
+  "ol",
+  "li",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+  "th",
+  "td",
+  "a",
+  "img",
+]);
+
+const VOID_TEMPLATE_TAGS = new Set(["br", "hr", "img"]);
+
+const ALLOWED_TAG_ATTRS: Record<string, ReadonlySet<string>> = {
+  a: new Set(["href", "title"]),
+  img: new Set(["src", "alt", "title", "width", "height"]),
+  td: new Set(["colspan", "rowspan", "align"]),
+  th: new Set(["colspan", "rowspan", "align"]),
+  table: new Set(["width", "align"]),
+  div: new Set(["align"]),
+  p: new Set(["align"]),
+  h1: new Set(["align"]),
+  h2: new Set(["align"]),
+  h3: new Set(["align"]),
+  h4: new Set(["align"]),
+};
+
+const SAFE_URL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+const SAFE_IMG_PROTOCOLS = new Set(["http:", "https:"]);
+const SAFE_ALIGN_VALUES = new Set(["left", "center", "right", "justify"]);
+
+function decodeHtmlEntitiesForSchemeCheck(raw: string): string {
+  const decoded = raw
+    .replace(/&#x([0-9a-f]+);?/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#([0-9]+);?/g, (_, dec: string) => String.fromCodePoint(Number.parseInt(dec, 10)))
+    .replace(/&colon;/gi, ":")
+    .replace(/&tab;/gi, "\t")
+    .replace(/&newline;/gi, "\n");
+  // Strip ASCII control characters and whitespace that browsers ignore inside URL schemes
+  return Array.from(decoded)
+    .filter((ch) => ch.charCodeAt(0) > 32)
+    .join("");
+}
+
+function isSafeUrl(rawUrl: string, allowedProtocols: ReadonlySet<string>): boolean {
+  const normalized = decodeHtmlEntitiesForSchemeCheck(rawUrl.trim());
+  if (!normalized) return false;
+  try {
+    const parsed = new URL(normalized);
+    return allowedProtocols.has(parsed.protocol.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeTagAttributes(tagName: string, rawAttrs: string): string {
+  const allowed = ALLOWED_TAG_ATTRS[tagName];
+  if (!allowed || !rawAttrs.trim()) return "";
+
+  const sanitizedParts: string[] = [];
+  const attrRegex = /([a-zA-Z0-9_-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  let match: RegExpExecArray | null;
+  while ((match = attrRegex.exec(rawAttrs)) !== null) {
+    const attrName = match[1]!.toLowerCase();
+    // Explicitly block all event handlers and disallowed attributes
+    if (attrName.startsWith("on") || !allowed.has(attrName)) {
+      continue;
+    }
+    const rawVal = (match[2] ?? match[3] ?? match[4] ?? "").trim();
+    if (!rawVal) continue;
+
+    if (attrName === "href") {
+      if (!isSafeUrl(rawVal, SAFE_URL_PROTOCOLS)) continue;
+      sanitizedParts.push(`href="${escapeHtml(rawVal)}"`);
+      continue;
+    }
+    if (attrName === "src") {
+      if (!isSafeUrl(rawVal, SAFE_IMG_PROTOCOLS)) continue;
+      sanitizedParts.push(`src="${escapeHtml(rawVal)}"`);
+      continue;
+    }
+    if (attrName === "align") {
+      const lowerVal = rawVal.toLowerCase();
+      if (!SAFE_ALIGN_VALUES.has(lowerVal)) continue;
+      sanitizedParts.push(`align="${lowerVal}"`);
+      continue;
+    }
+    if (attrName === "width" || attrName === "height") {
+      if (!/^\d{1,4}(?:px|%)?$/i.test(rawVal)) continue;
+      sanitizedParts.push(`${attrName}="${escapeHtml(rawVal)}"`);
+      continue;
+    }
+    if (attrName === "colspan" || attrName === "rowspan") {
+      if (!/^\d{1,2}$/.test(rawVal)) continue;
+      sanitizedParts.push(`${attrName}="${rawVal}"`);
+      continue;
+    }
+    sanitizedParts.push(`${attrName}="${escapeHtml(rawVal)}"`);
+  }
+
+  return sanitizedParts.length > 0 ? ` ${sanitizedParts.join(" ")}` : "";
+}
+
+/**
+ * Sanitizes print template header/footer HTML for safe inclusion in outbound emails.
+ * Strips dangerous elements (with contents), all event handlers, javascript:/data: URLs,
+ * and any tags/attributes outside the strict allow-list.
+ */
+export function sanitizeTemplateHtml(rawHtml: string): string {
+  if (!rawHtml) return "";
+
+  // 1. Remove HTML comments and dangerous elements along with their inner contents
+  let cleaned = rawHtml
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(
+      /<\s*(script|style|iframe|object|embed|svg|math|form|noscript|template|textarea|select|button|input|meta|link|base)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi,
+      ""
+    )
+    .replace(
+      /<\s*(script|style|iframe|object|embed|svg|math|form|noscript|template|textarea|select|button|input|meta|link|base)\b[^>]*\/?>/gi,
+      ""
+    );
+
+  // 2. Filter remaining tags against the allow-list and sanitize attributes
+  cleaned = cleaned.replace(/<\s*(\/?)\s*([a-zA-Z][a-zA-Z0-9:-]*)([^>]*)>/g, (_full, slash: string, rawTag: string, rawAttrs: string) => {
+    const tag = rawTag.toLowerCase();
+    if (!SAFE_TEMPLATE_TAGS.has(tag)) {
+      return "";
+    }
+    if (slash === "/") {
+      return VOID_TEMPLATE_TAGS.has(tag) ? "" : `</${tag}>`;
+    }
+    const safeAttrs = sanitizeTagAttributes(tag, rawAttrs);
+    return VOID_TEMPLATE_TAGS.has(tag) ? `<${tag}${safeAttrs} />` : `<${tag}${safeAttrs}>`;
+  });
+
+  return cleaned.trim();
+}
+
 function toPrintTemplateDto(row: typeof printTemplates.$inferSelect): PrintTemplateDto {
   const rawCfg = (row.configJson ?? {}) as Partial<PrintTemplateConfig>;
   return {
@@ -523,15 +680,18 @@ export async function emailDocument(
     ...(body.message ? ["", body.message] : []),
   ];
 
+  const sanitizedHeaderHtml = template?.headerHtml ? sanitizeTemplateHtml(template.headerHtml) : "";
+  const sanitizedFooterHtml = template?.footerHtml ? sanitizeTemplateHtml(template.footerHtml) : "";
+
   const html = `<!doctype html>
 <html>
 <body style="font-family: Inter, Arial, sans-serif; color: #0f172a; margin: 0; padding: 24px;">
   <div style="max-width: 640px; margin: 0 auto; border: 1px solid #e2e8f0; border-top: 4px solid ${escapeHtml(accent)}; border-radius: 6px; padding: 20px;">
-    ${template?.headerHtml ? `<div>${template.headerHtml}</div>` : `<h2 style="margin:0 0 8px;color:${escapeHtml(accent)};">${escapeHtml(companyDisplay)}</h2>`}
+    ${sanitizedHeaderHtml ? `<div>${sanitizedHeaderHtml}</div>` : `<h2 style="margin:0 0 8px;color:${escapeHtml(accent)};">${escapeHtml(companyDisplay)}</h2>`}
     <p style="margin: 12px 0;"><strong>${escapeHtml(type.replace(/_/g, " ").toUpperCase())} ${escapeHtml(doc.docNumber)}</strong></p>
     <p style="margin: 4px 0; font-size: 14px; color: #475569;">Date: ${escapeHtml(doc.dateIso)} · Status: ${escapeHtml(doc.status)}${totalLine ? ` · Total: ${escapeHtml(totalLine)}` : ""}</p>
     ${body.message ? `<div style="margin-top: 16px; white-space: pre-wrap;">${escapeHtml(body.message)}</div>` : ""}
-    ${template?.footerHtml ? `<div style="margin-top: 20px; border-top: 1px solid #e2e8f0; padding-top: 12px;">${template.footerHtml}</div>` : ""}
+    ${sanitizedFooterHtml ? `<div style="margin-top: 20px; border-top: 1px solid #e2e8f0; padding-top: 12px;">${sanitizedFooterHtml}</div>` : ""}
   </div>
 </body>
 </html>`;

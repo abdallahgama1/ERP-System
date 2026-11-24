@@ -20,7 +20,6 @@ import {
   vendors,
 } from "../../drizzle/schema.ts";
 import { ensureSeededDefaults } from "../auth/permissions.ts";
-import { loadAuthUserById } from "../auth/sessions.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
@@ -220,7 +219,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       return mapCompanyToSettingsDto(row);
     });
 
-    eventBroadcaster.broadcast("settings_updated", { companyId });
+    eventBroadcaster.broadcast("settings_updated", { companyId }, companyId);
     return { company: updated, settings: updated };
   });
 
@@ -295,8 +294,6 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       return row;
     });
 
-    // Reload user only if needed later; preferences change doesn't invalidate auth
-    void loadAuthUserById;
     return { preferences: updated };
   });
 

@@ -33,23 +33,32 @@ function resolveMigrationsFolder(): string {
   );
 }
 
-export async function runMigrations(): Promise<void> {
-  if (!env.DATABASE_URL) {
+const MIGRATION_ADVISORY_LOCK_KEY = 749207;
+
+export async function runMigrations(databaseUrl: string = env.DATABASE_URL): Promise<void> {
+  if (!databaseUrl) {
     throw new Error("DATABASE_URL is required to run database migrations.");
   }
 
   const migrationsFolder = resolveMigrationsFolder();
-  const sql = postgres(env.DATABASE_URL, {
+  const sql = postgres(databaseUrl, {
     max: 1,
     connect_timeout: 15,
     prepare: false,
   });
 
+  let lockAcquired = false;
   try {
+    // Serialize concurrent container startups so two nodes never race on pending migrations
+    await sql`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_KEY})`;
+    lockAcquired = true;
     log.info({ migrationsFolder }, "Applying Drizzle PostgreSQL migrations");
     await migrate(drizzle(sql), { migrationsFolder });
     log.info("Drizzle PostgreSQL migrations applied cleanly");
   } finally {
+    if (lockAcquired) {
+      await sql`SELECT pg_advisory_unlock(${MIGRATION_ADVISORY_LOCK_KEY})`.catch(() => {});
+    }
     await sql.end({ timeout: 5 });
   }
 }

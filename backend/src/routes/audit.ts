@@ -8,6 +8,19 @@ import { getDb } from "../db/index.ts";
 import { assertBranchAccess, requireAuth, requirePermission } from "../middleware/auth.ts";
 import { buildKeysetCondition, parseCursorOrThrow } from "../services/query-helpers.ts";
 
+export const CLIENT_AUDIT_ALLOWED_ACTIONS = [
+  "ui.export_downloaded",
+  "ui.document_printed",
+  "ui.report_viewed",
+  "ui.barcode_scanned",
+  "pos.receipt_reprinted",
+  "pos.drawer_opened",
+] as const;
+
+export type ClientAuditAllowedAction = (typeof CLIENT_AUDIT_ALLOWED_ACTIONS)[number];
+
+const CLIENT_AUDIT_ALLOWED_ACTION_SET = new Set<string>(CLIENT_AUDIT_ALLOWED_ACTIONS);
+
 const createAuditSchema = z.object({
   module: z.string().trim().min(1).max(60),
   action: z.string().trim().min(1).max(160),
@@ -120,7 +133,19 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
       throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid audit log entry", "VALIDATION_ERROR");
     }
 
+    if (!CLIENT_AUDIT_ALLOWED_ACTION_SET.has(parsed.data.action)) {
+      throw new AppError(
+        400,
+        `Client audit action '${parsed.data.action}' is not allowed`,
+        "AUDIT_ACTION_NOT_ALLOWED"
+      );
+    }
+
     const actor = req.authUser!;
+    if (parsed.data.branchId) {
+      assertBranchAccess(actor, parsed.data.branchId);
+    }
+
     const db = getDb();
     await writeAuditLog(db, {
       companyId: actor.activeCompanyId,

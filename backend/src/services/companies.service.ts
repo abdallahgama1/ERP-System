@@ -32,13 +32,51 @@ import {
   vendors,
   type AppRole,
 } from "../../drizzle/schema.ts";
-import { seedCompanyDefaults } from "../auth/permissions.ts";
+import { seedCompanyDefaults, type DbOrTx } from "../auth/permissions.ts";
 import type { AuthUser } from "../auth/sessions.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { parseOrThrow } from "./stock-locks.ts";
 
 const uuidParamSchema = z.string().uuid("Invalid UUID parameter");
+
+async function isGlobalAdmin(txOrDb: DbOrTx, userId: string): Promise<boolean> {
+  const [row] = await txOrDb
+    .select({ role: userRoles.role })
+    .from(userRoles)
+    .where(eq(userRoles.userId, userId))
+    .limit(1);
+  return row?.role === "admin";
+}
+
+async function assertCompanyAccess(
+  txOrDb: DbOrTx,
+  actor: AuthUser,
+  companyId: string
+): Promise<{ isGlobalAdmin: boolean; membershipRole: AppRole | null }> {
+  const globalAdmin = await isGlobalAdmin(txOrDb, actor.id);
+  if (globalAdmin) {
+    return { isGlobalAdmin: true, membershipRole: "admin" };
+  }
+
+  const [membership] = await txOrDb
+    .select({ id: userCompanies.id, role: userCompanies.role })
+    .from(userCompanies)
+    .where(
+      and(
+        eq(userCompanies.userId, actor.id),
+        eq(userCompanies.companyId, companyId),
+        eq(userCompanies.isActive, true)
+      )
+    )
+    .limit(1);
+
+  if (!membership) {
+    throw new AppError(403, "You do not have access to this company", "FORBIDDEN");
+  }
+
+  return { isGlobalAdmin: false, membershipRole: membership.role };
+}
 
 export function toCompanyDto(row: typeof companies.$inferSelect): CompanyDto {
   return {
@@ -81,7 +119,7 @@ function toCompanyAuditSnapshot(row: typeof companies.$inferSelect): Record<stri
 }
 
 export async function listCompanies(db: AppDatabase, actor: AuthUser): Promise<CompanyDto[]> {
-  if (actor.role === "admin") {
+  if (await isGlobalAdmin(db, actor.id)) {
     const rows = await db
       .select()
       .from(companies)
@@ -111,22 +149,7 @@ export async function getCompanyById(
     throw new AppError(404, "Company not found", "COMPANY_NOT_FOUND");
   }
 
-  if (actor.role !== "admin") {
-    const [membership] = await db
-      .select({ id: userCompanies.id })
-      .from(userCompanies)
-      .where(
-        and(
-          eq(userCompanies.userId, actor.id),
-          eq(userCompanies.companyId, companyId),
-          eq(userCompanies.isActive, true)
-        )
-      )
-      .limit(1);
-    if (!membership) {
-      throw new AppError(403, "You do not have access to this company", "FORBIDDEN");
-    }
-  }
+  await assertCompanyAccess(db, actor, companyId);
 
   const [[branchAgg], [memberAgg]] = await Promise.all([
     db
@@ -275,22 +298,7 @@ export async function updateCompany(
       throw new AppError(404, "Company not found", "COMPANY_NOT_FOUND");
     }
 
-    if (actor.role !== "admin") {
-      const [membership] = await tx
-        .select({ id: userCompanies.id })
-        .from(userCompanies)
-        .where(
-          and(
-            eq(userCompanies.userId, actor.id),
-            eq(userCompanies.companyId, companyId),
-            eq(userCompanies.isActive, true)
-          )
-        )
-        .limit(1);
-      if (!membership) {
-        throw new AppError(403, "You do not have access to this company", "FORBIDDEN");
-      }
-    }
+    await assertCompanyAccess(tx, actor, companyId);
 
     if (
       (companyId === DEFAULT_COMPANY_ID || existing.isDefault) &&
@@ -438,6 +446,8 @@ export async function deleteCompany(
       throw new AppError(400, "Cannot delete the default company", "DEFAULT_COMPANY_PROTECTED");
     }
 
+    await assertCompanyAccess(tx, actor, companyId);
+
     const usageChecks = await Promise.all([
       tx.select({ id: products.id }).from(products).where(eq(products.companyId, companyId)).limit(1),
       tx
@@ -544,22 +554,7 @@ export async function listCompanyMembers(
     throw new AppError(404, "Company not found", "COMPANY_NOT_FOUND");
   }
 
-  if (actor.role !== "admin") {
-    const [membership] = await db
-      .select({ id: userCompanies.id })
-      .from(userCompanies)
-      .where(
-        and(
-          eq(userCompanies.userId, actor.id),
-          eq(userCompanies.companyId, companyId),
-          eq(userCompanies.isActive, true)
-        )
-      )
-      .limit(1);
-    if (!membership) {
-      throw new AppError(403, "You do not have access to this company", "FORBIDDEN");
-    }
-  }
+  await assertCompanyAccess(db, actor, companyId);
 
   const rows = await db
     .select({
@@ -613,6 +608,9 @@ export async function assignCompanyMember(
       throw new AppError(404, "Company not found", "COMPANY_NOT_FOUND");
     }
 
+    const { isGlobalAdmin: actorIsGlobalAdmin, membershipRole: actorCompanyRole } =
+      await assertCompanyAccess(tx, actor, companyId);
+
     const [targetUser] = await tx
       .select({ id: users.id, name: users.name, email: users.email, isActive: users.isActive })
       .from(users)
@@ -639,7 +637,7 @@ export async function assignCompanyMember(
       customRoleName = cr.name;
     }
 
-    if (role === "admin" && actor.role !== "admin") {
+    if (role === "admin" && !actorIsGlobalAdmin && actorCompanyRole !== "admin") {
       throw new AppError(403, "Only admins can assign an admin role", "FORBIDDEN");
     }
 
@@ -680,7 +678,7 @@ export async function assignCompanyMember(
       })
       .returning();
 
-    if (saved.isDefault || companyId === DEFAULT_COMPANY_ID) {
+    if (companyId === DEFAULT_COMPANY_ID && (role !== "admin" || actorIsGlobalAdmin)) {
       await tx
         .insert(userRoles)
         .values({ userId: parsed.userId, role, customRoleId })
@@ -737,6 +735,9 @@ export async function updateCompanyMember(
   const parsed = parseOrThrow(updateCompanyMemberSchema, rawBody, "Invalid member update payload");
 
   return db.transaction(async (tx) => {
+    const { isGlobalAdmin: actorIsGlobalAdmin, membershipRole: actorCompanyRole } =
+      await assertCompanyAccess(tx, actor, companyId);
+
     const [existing] = await tx
       .select()
       .from(userCompanies)
@@ -784,7 +785,7 @@ export async function updateCompanyMember(
       customRoleName = cr?.name ?? null;
     }
 
-    if ((existing.role === "admin" || nextRole === "admin") && actor.role !== "admin") {
+    if ((existing.role === "admin" || nextRole === "admin") && !actorIsGlobalAdmin && actorCompanyRole !== "admin") {
       throw new AppError(403, "Only admins can modify an admin membership", "FORBIDDEN");
     }
 
@@ -833,7 +834,7 @@ export async function updateCompanyMember(
       .where(eq(userCompanies.id, existing.id))
       .returning();
 
-    if (updated.isDefault || companyId === DEFAULT_COMPANY_ID) {
+    if (companyId === DEFAULT_COMPANY_ID && (nextRole !== "admin" || actorIsGlobalAdmin)) {
       await tx
         .insert(userRoles)
         .values({ userId: targetUserId, role: nextRole, customRoleId: nextCustomRoleId })
@@ -903,6 +904,9 @@ export async function removeCompanyMember(
   const targetUserId = parseOrThrow(uuidParamSchema, rawUserId, "Invalid user ID");
 
   await db.transaction(async (tx) => {
+    const { isGlobalAdmin: actorIsGlobalAdmin, membershipRole: actorCompanyRole } =
+      await assertCompanyAccess(tx, actor, companyId);
+
     const [existing] = await tx
       .select()
       .from(userCompanies)
@@ -912,7 +916,7 @@ export async function removeCompanyMember(
       throw new AppError(404, "Company membership not found", "NOT_FOUND");
     }
 
-    if (existing.role === "admin" && actor.role !== "admin") {
+    if (existing.role === "admin" && !actorIsGlobalAdmin && actorCompanyRole !== "admin") {
       throw new AppError(403, "Only admins can remove an admin membership", "FORBIDDEN");
     }
 

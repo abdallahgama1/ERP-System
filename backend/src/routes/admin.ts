@@ -17,12 +17,12 @@ import {
   type AppRole,
 } from "../../drizzle/schema.ts";
 import { hashPassword } from "../auth/password.ts";
-import { invalidatePermissionMatrixCache, loadPermissionMatrix, PERMISSION_MODULES } from "../auth/permissions.ts";
+import { invalidatePermissionMatrixCache, loadPermissionMatrix, PERMISSION_MODULES, type DbOrTx } from "../auth/permissions.ts";
 import { generateOpaqueToken, hashToken } from "../auth/sessions.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
-import { requireAuth, requirePermission, requireRole } from "../middleware/auth.ts";
+import { requirePermission, requireRole } from "../middleware/auth.ts";
 import {
   createCustomRole,
   deleteCustomRole,
@@ -73,6 +73,15 @@ const updatePermissionsSchema = z.object({
   ),
 });
 
+async function isGlobalAdmin(txOrDb: DbOrTx, userId: string): Promise<boolean> {
+  const [row] = await txOrDb
+    .select({ role: userRoles.role })
+    .from(userRoles)
+    .where(eq(userRoles.userId, userId))
+    .limit(1);
+  return row?.role === "admin";
+}
+
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/custom-roles", { preHandler: requirePermission("roles", "view") }, async (req) => {
     const roles = await listCustomRoles(getDb(), req.authUser!.activeCompanyId);
@@ -80,22 +89,25 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/api/custom-roles", { preHandler: requirePermission("roles", "create") }, async (req, reply) => {
+    const companyId = req.authUser!.activeCompanyId;
     const role = await createCustomRole(getDb(), req.authUser!, req.body, req.ip);
-    eventBroadcaster.broadcast("permissions_updated", { companyId: req.authUser!.activeCompanyId });
+    eventBroadcaster.broadcast("permissions_updated", { companyId }, companyId);
     return reply.status(201).send({ role });
   });
 
   app.put("/api/custom-roles/:id", { preHandler: requirePermission("roles", "edit") }, async (req) => {
     const { id } = req.params as { id: string };
+    const companyId = req.authUser!.activeCompanyId;
     const role = await updateCustomRole(getDb(), req.authUser!, id, req.body, req.ip);
-    eventBroadcaster.broadcast("permissions_updated", { companyId: req.authUser!.activeCompanyId });
+    eventBroadcaster.broadcast("permissions_updated", { companyId }, companyId);
     return { role };
   });
 
   app.delete("/api/custom-roles/:id", { preHandler: requirePermission("roles", "delete") }, async (req) => {
     const { id } = req.params as { id: string };
+    const companyId = req.authUser!.activeCompanyId;
     const result = await deleteCustomRole(getDb(), req.authUser!, id, req.ip);
-    eventBroadcaster.broadcast("permissions_updated", { companyId: req.authUser!.activeCompanyId });
+    eventBroadcaster.broadcast("permissions_updated", { companyId }, companyId);
     return result;
   });
 
@@ -248,10 +260,16 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
           createdAt: users.createdAt,
         });
 
+      const actorIsGlobalAdmin = await isGlobalAdmin(tx, actor.id);
+      const globalRoleToInsert: AppRole =
+        effectiveRole === "admin" && !(companyId === DEFAULT_COMPANY_ID && actorIsGlobalAdmin)
+          ? "user"
+          : effectiveRole;
+
       await tx.insert(userRoles).values({
         userId: newUser.id,
-        role: effectiveRole,
-        customRoleId: effectiveCustomRoleId,
+        role: globalRoleToInsert,
+        customRoleId: companyId === DEFAULT_COMPANY_ID ? effectiveCustomRoleId : null,
       });
 
       await tx.insert(userCompanies).values({
@@ -310,7 +328,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       };
     });
 
-    eventBroadcaster.broadcast("users_updated", { userId: created.id });
+    eventBroadcaster.broadcast("users_updated", { userId: created.id }, companyId);
     return reply.status(201).send({ user: created });
   });
 
@@ -347,6 +365,24 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(749202)`);
 
+      const actorIsGlobalAdmin = await isGlobalAdmin(tx, actor.id);
+      if (requestedCompanyId !== actor.activeCompanyId && !actorIsGlobalAdmin) {
+        const [actorTargetMembership] = await tx
+          .select({ role: userCompanies.role })
+          .from(userCompanies)
+          .where(
+            and(
+              eq(userCompanies.userId, actor.id),
+              eq(userCompanies.companyId, requestedCompanyId),
+              eq(userCompanies.isActive, true)
+            )
+          )
+          .limit(1);
+        if (!actorTargetMembership || actorTargetMembership.role !== "admin") {
+          throw new AppError(403, "Only admins of the target company can assign roles there", "FORBIDDEN");
+        }
+      }
+
       const [target] = await tx
         .select({ id: users.id, email: users.email, name: users.name, isActive: users.isActive })
         .from(users)
@@ -354,6 +390,16 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         .limit(1);
       if (!target) {
         throw new AppError(404, "User not found", "NOT_FOUND");
+      }
+
+      const [currentMembership] = await tx
+        .select()
+        .from(userCompanies)
+        .where(and(eq(userCompanies.userId, targetId), eq(userCompanies.companyId, requestedCompanyId)))
+        .limit(1);
+
+      if (!actorIsGlobalAdmin && !currentMembership) {
+        throw new AppError(404, "User not found in company", "NOT_FOUND");
       }
 
       let newRole: AppRole;
@@ -382,12 +428,6 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       if (actor.role !== "admin" && newRole === "admin") {
         throw new AppError(403, "Only admins can assign the admin role", "FORBIDDEN");
       }
-
-      const [currentMembership] = await tx
-        .select()
-        .from(userCompanies)
-        .where(and(eq(userCompanies.userId, targetId), eq(userCompanies.companyId, requestedCompanyId)))
-        .limit(1);
 
       const [currentRoleRow] = await tx
         .select()
@@ -454,9 +494,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         });
 
       const shouldSyncGlobalRole =
-        requestedCompanyId === actor.activeCompanyId ||
-        requestedCompanyId === DEFAULT_COMPANY_ID ||
-        Boolean(currentMembership?.isDefault);
+        requestedCompanyId === DEFAULT_COMPANY_ID && (newRole !== "admin" || actorIsGlobalAdmin);
 
       if (shouldSyncGlobalRole) {
         await tx
@@ -468,7 +506,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
           });
       }
 
-      if (newRole === "admin") {
+      if (newRole === "admin" && requestedCompanyId === DEFAULT_COMPANY_ID) {
         await tx
           .insert(userBranchScopes)
           .values({ userId: targetId, scopeMode: "all" })
@@ -494,7 +532,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       });
     });
 
-    eventBroadcaster.broadcast("users_updated", { userId: targetId });
+    eventBroadcaster.broadcast("users_updated", { userId: targetId }, requestedCompanyId);
     return { ok: true };
   };
 
@@ -521,6 +559,17 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         .limit(1);
       if (!target) {
         throw new AppError(404, "User not found", "NOT_FOUND");
+      }
+
+      if (!(await isGlobalAdmin(tx, actor.id))) {
+        const [membership] = await tx
+          .select({ id: userCompanies.id })
+          .from(userCompanies)
+          .where(and(eq(userCompanies.userId, targetId), eq(userCompanies.companyId, companyId)))
+          .limit(1);
+        if (!membership) {
+          throw new AppError(404, "User not found in active company", "NOT_FOUND");
+        }
       }
 
       if (branchIds.length > 0) {
@@ -611,7 +660,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       });
     });
 
-    eventBroadcaster.broadcast("users_updated", { userId: targetId });
+    eventBroadcaster.broadcast("users_updated", { userId: targetId }, companyId);
     return { ok: true };
   });
 
@@ -639,7 +688,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         throw new AppError(404, "User not found", "NOT_FOUND");
       }
 
-      if (actor.role !== "admin") {
+      if (!(await isGlobalAdmin(tx, actor.id))) {
         const [membership] = await tx
           .select({ id: userCompanies.id })
           .from(userCompanies)
@@ -688,7 +737,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       });
     });
 
-    eventBroadcaster.broadcast("users_updated", { userId: targetId });
+    eventBroadcaster.broadcast("users_updated", { userId: targetId }, companyId);
     return { ok: true };
   });
 
@@ -705,6 +754,17 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
     if (!target) {
       throw new AppError(404, "User not found", "NOT_FOUND");
+    }
+
+    if (!(await isGlobalAdmin(db, actor.id))) {
+      const [membership] = await db
+        .select({ id: userCompanies.id })
+        .from(userCompanies)
+        .where(and(eq(userCompanies.userId, targetId), eq(userCompanies.companyId, actor.activeCompanyId)))
+        .limit(1);
+      if (!membership) {
+        throw new AppError(404, "User not found in active company", "NOT_FOUND");
+      }
     }
 
     const rawToken = generateOpaqueToken();
@@ -737,13 +797,27 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/api/roles/permissions", { preHandler: requireAuth }, async () => {
-    const db = getDb();
-    const matrix = await loadPermissionMatrix(db);
-    return { matrix };
-  });
+  /**
+   * @deprecated Legacy global 3-role permission matrix endpoint.
+   * Prefer per-company `/api/custom-roles` endpoints. Kept for backward compatibility.
+   */
+  app.get(
+    "/api/roles/permissions",
+    { preHandler: requirePermission("roles", "view") },
+    async (_req, reply) => {
+      reply.header("Deprecation", "true");
+      const db = getDb();
+      const matrix = await loadPermissionMatrix(db);
+      return { matrix };
+    }
+  );
 
-  app.put("/api/roles/permissions", { preHandler: requireRole("admin") }, async (req) => {
+  /**
+   * @deprecated Legacy global 3-role permission matrix mutation endpoint.
+   * Restricted to admin; prefer `/api/custom-roles`.
+   */
+  app.put("/api/roles/permissions", { preHandler: requireRole("admin") }, async (req, reply) => {
+    reply.header("Deprecation", "true");
     const parsed = updatePermissionsSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, "Invalid permission matrix", "VALIDATION_ERROR");

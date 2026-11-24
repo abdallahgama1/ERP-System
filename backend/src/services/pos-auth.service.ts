@@ -1,7 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull, or } from "drizzle-orm";
 import type { PosOverrideAction } from "@erp/shared";
 import {
   posTerminals,
+  userCompanies,
   userPosPins,
   userRoles,
   users,
@@ -38,6 +39,30 @@ export async function setUserPosPin(
 
   if (!target || !target.isActive) {
     throw new AppError(404, "Target user not found or inactive", "NOT_FOUND");
+  }
+
+  if (actor.id !== targetUserId) {
+    const [actorGlobalRole] = await db
+      .select({ role: userRoles.role })
+      .from(userRoles)
+      .where(eq(userRoles.userId, actor.id))
+      .limit(1);
+    if (actorGlobalRole?.role !== "admin") {
+      const [targetMembership] = await db
+        .select({ id: userCompanies.id })
+        .from(userCompanies)
+        .where(
+          and(
+            eq(userCompanies.userId, targetUserId),
+            eq(userCompanies.companyId, companyId),
+            eq(userCompanies.isActive, true)
+          )
+        )
+        .limit(1);
+      if (!targetMembership) {
+        throw new AppError(404, "Target user not found in active company", "NOT_FOUND");
+      }
+    }
   }
 
   const pinHash = await hashPassword(pin);
@@ -207,27 +232,44 @@ export async function switchCashierByPin(
   }
   const effectiveCompanyId = terminalCompanyId ?? params.companyId;
 
-  const candidateRows = params.cashierId
-    ? await db
-        .select({
-          userId: userPosPins.userId,
-          pinHash: userPosPins.pinHash,
-          failedAttempts: userPosPins.failedAttempts,
-          lockedUntil: userPosPins.lockedUntil,
-        })
-        .from(userPosPins)
-        .innerJoin(users, eq(users.id, userPosPins.userId))
-        .where(and(eq(userPosPins.userId, params.cashierId), eq(users.isActive, true)))
-    : await db
-        .select({
-          userId: userPosPins.userId,
-          pinHash: userPosPins.pinHash,
-          failedAttempts: userPosPins.failedAttempts,
-          lockedUntil: userPosPins.lockedUntil,
-        })
-        .from(userPosPins)
-        .innerJoin(users, eq(users.id, userPosPins.userId))
-        .where(eq(users.isActive, true));
+  const companyScopeFilter = effectiveCompanyId
+    ? or(isNotNull(userCompanies.id), eq(userRoles.role, "admin"))
+    : undefined;
+
+  const queriedCashierRows = await db
+    .select({
+      userId: userPosPins.userId,
+      pinHash: userPosPins.pinHash,
+      failedAttempts: userPosPins.failedAttempts,
+      lockedUntil: userPosPins.lockedUntil,
+    })
+    .from(userPosPins)
+    .innerJoin(users, eq(users.id, userPosPins.userId))
+    .leftJoin(userRoles, eq(userRoles.userId, userPosPins.userId))
+    .leftJoin(
+      userCompanies,
+      effectiveCompanyId
+        ? and(
+            eq(userCompanies.userId, userPosPins.userId),
+            eq(userCompanies.companyId, effectiveCompanyId),
+            eq(userCompanies.isActive, true)
+          )
+        : eq(userCompanies.userId, userPosPins.userId)
+    )
+    .where(
+      and(
+        eq(users.isActive, true),
+        params.cashierId ? eq(userPosPins.userId, params.cashierId) : undefined,
+        companyScopeFilter
+      )
+    );
+
+  const seenCashierIds = new Set<string>();
+  const candidateRows = queriedCashierRows.filter((row) => {
+    if (seenCashierIds.has(row.userId)) return false;
+    seenCashierIds.add(row.userId);
+    return true;
+  });
 
   if (candidateRows.length === 0) {
     throw new AppError(401, "Invalid cashier PIN", "INVALID_PIN");
@@ -375,31 +417,55 @@ export async function verifyManagerPinOverride(
   }
   const effectiveCompanyId = terminalCompanyId ?? input.companyId;
 
-  const rawCandidates = input.managerUserId
-    ? await db
-        .select({
-          userId: userPosPins.userId,
-          pinHash: userPosPins.pinHash,
-          failedAttempts: userPosPins.failedAttempts,
-          lockedUntil: userPosPins.lockedUntil,
-          role: userRoles.role,
-        })
-        .from(userPosPins)
-        .innerJoin(users, eq(users.id, userPosPins.userId))
-        .leftJoin(userRoles, eq(userRoles.userId, userPosPins.userId))
-        .where(and(eq(userPosPins.userId, input.managerUserId), eq(users.isActive, true)))
-    : await db
-        .select({
-          userId: userPosPins.userId,
-          pinHash: userPosPins.pinHash,
-          failedAttempts: userPosPins.failedAttempts,
-          lockedUntil: userPosPins.lockedUntil,
-          role: userRoles.role,
-        })
-        .from(userPosPins)
-        .innerJoin(users, eq(users.id, userPosPins.userId))
-        .leftJoin(userRoles, eq(userRoles.userId, userPosPins.userId))
-        .where(eq(users.isActive, true));
+  const companyScopeFilter = effectiveCompanyId
+    ? or(isNotNull(userCompanies.id), eq(userRoles.role, "admin"))
+    : undefined;
+
+  const queriedCandidates = await db
+    .select({
+      userId: userPosPins.userId,
+      pinHash: userPosPins.pinHash,
+      failedAttempts: userPosPins.failedAttempts,
+      lockedUntil: userPosPins.lockedUntil,
+      companyRole: userCompanies.role,
+      globalRole: userRoles.role,
+    })
+    .from(userPosPins)
+    .innerJoin(users, eq(users.id, userPosPins.userId))
+    .leftJoin(userRoles, eq(userRoles.userId, userPosPins.userId))
+    .leftJoin(
+      userCompanies,
+      effectiveCompanyId
+        ? and(
+            eq(userCompanies.userId, userPosPins.userId),
+            eq(userCompanies.companyId, effectiveCompanyId),
+            eq(userCompanies.isActive, true)
+          )
+        : eq(userCompanies.userId, userPosPins.userId)
+    )
+    .where(
+      and(
+        eq(users.isActive, true),
+        input.managerUserId ? eq(userPosPins.userId, input.managerUserId) : undefined,
+        companyScopeFilter
+      )
+    );
+
+  // Deduplicate by userId (only relevant when effectiveCompanyId is absent and user belongs to multiple companies)
+  const seenCandidateIds = new Set<string>();
+  const rawCandidates = queriedCandidates
+    .filter((row) => {
+      if (seenCandidateIds.has(row.userId)) return false;
+      seenCandidateIds.add(row.userId);
+      return true;
+    })
+    .map((row) => ({
+      userId: row.userId,
+      pinHash: row.pinHash,
+      failedAttempts: row.failedAttempts,
+      lockedUntil: row.lockedUntil,
+      role: row.companyRole ?? row.globalRole,
+    }));
 
   if (rawCandidates.length === 0) {
     throw new AppError(401, "Invalid manager PIN", "INVALID_PIN");
