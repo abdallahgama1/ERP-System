@@ -33,34 +33,58 @@ function resolveMigrationsFolder(): string {
   );
 }
 
-const MIGRATION_ADVISORY_LOCK_KEY = 749207;
+export const MIGRATION_ADVISORY_LOCK_KEY = 749207;
 
-export async function runMigrations(databaseUrl: string = env.DATABASE_URL): Promise<void> {
+export interface MigrationRunResult {
+  lockPid: number;
+  unlockPid: number;
+  unlocked: boolean;
+}
+
+export async function runMigrations(
+  databaseUrl: string = env.DATABASE_URL
+): Promise<MigrationRunResult> {
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required to run database migrations.");
   }
 
   const migrationsFolder = resolveMigrationsFolder();
+  // Dedicated single-connection client (max: 1, no idle/lifetime recycling) so
+  // pg_advisory_lock, Drizzle migrate(), and pg_advisory_unlock share one backend session.
   const sql = postgres(databaseUrl, {
     max: 1,
+    idle_timeout: 0,
+    max_lifetime: 0,
     connect_timeout: 15,
     prepare: false,
   });
 
-  let lockAcquired = false;
+  let lockPid = 0;
+  let unlockPid = 0;
+  let unlocked = false;
   try {
-    // Serialize concurrent container startups so two nodes never race on pending migrations
-    await sql`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_KEY})`;
-    lockAcquired = true;
-    log.info({ migrationsFolder }, "Applying Drizzle PostgreSQL migrations");
+    const [lockRow] = await sql<{ pid: number }[]>`
+      SELECT pg_backend_pid()::int AS pid, pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_KEY})
+    `;
+    lockPid = lockRow?.pid ?? 0;
+    log.info({ migrationsFolder, backendPid: lockPid }, "Applying Drizzle PostgreSQL migrations");
     await migrate(drizzle(sql), { migrationsFolder });
-    log.info("Drizzle PostgreSQL migrations applied cleanly");
+    log.info({ backendPid: lockPid }, "Drizzle PostgreSQL migrations applied cleanly");
   } finally {
-    if (lockAcquired) {
-      await sql`SELECT pg_advisory_unlock(${MIGRATION_ADVISORY_LOCK_KEY})`.catch(() => {});
+    try {
+      if (lockPid > 0) {
+        const [unlockRow] = await sql<{ pid: number; unlocked: boolean }[]>`
+          SELECT pg_backend_pid()::int AS pid, pg_advisory_unlock(${MIGRATION_ADVISORY_LOCK_KEY}) AS unlocked
+        `.catch(() => [{ pid: 0, unlocked: false }]);
+        unlockPid = unlockRow?.pid ?? 0;
+        unlocked = Boolean(unlockRow?.unlocked);
+      }
+    } finally {
+      await sql.end({ timeout: 5 });
     }
-    await sql.end({ timeout: 5 });
   }
+
+  return { lockPid, unlockPid, unlocked };
 }
 
 function isMainModule(): boolean {

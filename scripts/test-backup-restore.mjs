@@ -34,9 +34,11 @@ function sha256File(filePath) {
   return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
-function commandExists(cmd) {
-  const res = spawnSync(cmd, ["--version"], { stdio: "ignore" });
-  return res.status === 0;
+function getPgClientMajorVersion(cmd) {
+  const res = spawnSync(cmd, ["--version"], { stdio: "pipe", encoding: "utf8" });
+  if (res.status !== 0) return 0;
+  const m = String(res.stdout ?? "").match(/(\d+)\./);
+  return m ? Number.parseInt(m[1], 10) : 0;
 }
 
 function resolveDockerBin() {
@@ -372,7 +374,9 @@ async function main() {
   assert.ok(pre0007Entries.length === 7, "Expected migrations 0000..0006 in _journal.json");
   assert.ok(mig0007Entry, "Expected migration 0007 in _journal.json");
 
-  const hasNativePgTools = commandExists("pg_dump") && commandExists("pg_restore");
+  const nativePgDumpMajor = getPgClientMajorVersion("pg_dump");
+  const nativePgRestoreMajor = getPgClientMajorVersion("pg_restore");
+  const hasNativePg18Tools = nativePgDumpMajor >= 18 && nativePgRestoreMajor >= 18;
   const adminEnvUrl = (process.env.RESTORE_TEST_ADMIN_URL ?? "").trim();
   const dockerBin = resolveDockerBin();
 
@@ -382,12 +386,15 @@ async function main() {
   const createdDbs = [];
 
   try {
-    if (adminEnvUrl && hasNativePgTools) {
+    if (adminEnvUrl && hasNativePg18Tools) {
       mode = "native";
+    } else if (adminEnvUrl && dockerBin) {
+      // CI service container (PG 18) with older host postgresql-client -> run PG 18 client via Docker
+      mode = "ci-docker-client";
     } else {
       if (!dockerBin) {
         throw new Error(
-          "Neither native pg_dump/pg_restore + RESTORE_TEST_ADMIN_URL nor Docker Desktop is available."
+          "Neither native pg_dump/pg_restore (>= 18) + RESTORE_TEST_ADMIN_URL nor Docker Desktop is available."
         );
       }
       mode = "docker";
@@ -435,6 +442,23 @@ async function main() {
           `--dbname=${externalUrl ?? buildDbUrlWithName(adminUrl, dbName)}`,
           `--file=${hostPath}`,
         ]);
+      } else if (mode === "ci-docker-client") {
+        const target = externalUrl ?? buildDbUrlWithName(adminUrl, dbName);
+        runCmd(dockerBin, [
+          "run",
+          "--rm",
+          "--network",
+          "host",
+          "-v",
+          `${tmpDir}:/work`,
+          "postgres:18-alpine",
+          "pg_dump",
+          "-Fc",
+          "--no-owner",
+          "--no-privileges",
+          `--dbname=${target}`,
+          `--file=/work/${outFileName}`,
+        ]);
       } else {
         const target = externalUrl ?? `postgresql://erp:erp_scratch_pw@127.0.0.1:5432/${dbName}`;
         runCmd(dockerBin, [
@@ -451,6 +475,17 @@ async function main() {
       assert.ok(fs.existsSync(hostPath) && fs.statSync(hostPath).size > 0, "Backup dump file must be non-empty");
       if (mode === "native") {
         runCmd("pg_restore", ["-l", hostPath]);
+      } else if (mode === "ci-docker-client") {
+        runCmd(dockerBin, [
+          "run",
+          "--rm",
+          "-v",
+          `${tmpDir}:/work`,
+          "postgres:18-alpine",
+          "pg_restore",
+          "-l",
+          `/work/${outFileName}`,
+        ]);
       } else {
         runCmd(dockerBin, ["exec", containerName, "pg_restore", "-l", `/work/${outFileName}`]);
       }
@@ -468,6 +503,25 @@ async function main() {
           "--exit-on-error",
           `--dbname=${buildDbUrlWithName(adminUrl, dbName)}`,
           path.join(tmpDir, inFileName),
+        ]);
+      } else if (mode === "ci-docker-client") {
+        runCmd(dockerBin, [
+          "run",
+          "--rm",
+          "--network",
+          "host",
+          "-v",
+          `${tmpDir}:/work`,
+          "postgres:18-alpine",
+          "pg_restore",
+          "--clean",
+          "--if-exists",
+          "--no-owner",
+          "--no-privileges",
+          "--single-transaction",
+          "--exit-on-error",
+          `--dbname=${buildDbUrlWithName(adminUrl, dbName)}`,
+          `/work/${inFileName}`,
         ]);
       } else {
         runCmd(dockerBin, [
@@ -644,7 +698,7 @@ async function main() {
         )
       );
     } finally {
-      if (mode === "native") {
+      if (mode === "native" || mode === "ci-docker-client") {
         for (const name of createdDbs) {
           await adminSql
             .unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`)

@@ -250,7 +250,52 @@ describe.skipIf(!testDbUrl)(
       expect(capturedHtml.toLowerCase()).not.toContain("onclick");
       expect(capturedHtml.toLowerCase()).not.toContain("javascript:");
 
-      // 5. Concurrent runMigrations() is advisory-locked and idempotent (does not replay 0000..0007)
+      // 5. Dedicated-connection advisory lock & concurrent migration idempotency proof
+      const { MIGRATION_ADVISORY_LOCK_KEY } = await import("../../src/db/migrate.ts");
+      const postgres = (await import("postgres")).default;
+      const blockerSql = postgres(testDbUrl!, { max: 1, prepare: false });
+      const blockerConn = await blockerSql.reserve();
+      let migrationResolved = false;
+      try {
+        await blockerConn`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_KEY})`;
+        const [heldBefore] = await blockerConn<{ cnt: number }[]>`
+          SELECT count(*)::int AS cnt
+          FROM pg_locks
+          WHERE locktype = 'advisory' AND objid = ${MIGRATION_ADVISORY_LOCK_KEY} AND granted = true
+        `;
+        expect(heldBefore?.cnt).toBe(1);
+
+        // Start runMigrations while blockerConn holds the advisory lock — it must wait
+        let migrationResult: { lockPid: number; unlockPid: number; unlocked: boolean } | null = null;
+        const pendingMigration = runMigrations(testDbUrl!).then((res) => {
+          migrationResult = res;
+          migrationResolved = true;
+        });
+        await new Promise((r) => setTimeout(r, 250));
+        expect(migrationResolved).toBe(false);
+
+        // Release blocker lock -> runMigrations acquires on its own dedicated connection, finishes, and releases
+        await blockerConn`SELECT pg_advisory_unlock(${MIGRATION_ADVISORY_LOCK_KEY})`;
+        await pendingMigration;
+        expect(migrationResolved).toBe(true);
+        expect(migrationResult).not.toBeNull();
+        expect(migrationResult!.lockPid).toBeGreaterThan(0);
+        expect(migrationResult!.unlockPid).toBe(migrationResult!.lockPid);
+        expect(migrationResult!.unlocked).toBe(true);
+
+        // Confirm zero lingering advisory locks (proves lock & unlock ran on the exact same dedicated session)
+        const [heldAfter] = await blockerConn<{ cnt: number }[]>`
+          SELECT count(*)::int AS cnt
+          FROM pg_locks
+          WHERE locktype = 'advisory' AND objid = ${MIGRATION_ADVISORY_LOCK_KEY} AND granted = true
+        `;
+        expect(heldAfter?.cnt).toBe(0);
+      } finally {
+        await blockerConn`SELECT pg_advisory_unlock(${MIGRATION_ADVISORY_LOCK_KEY})`.catch(() => {});
+        blockerConn.release();
+        await blockerSql.end({ timeout: 5 });
+      }
+
       const [beforeMig] = await db.execute<{ cnt: number }>(
         sql`SELECT count(*)::int AS cnt FROM drizzle.__drizzle_migrations`
       );

@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: erp
           POSTGRES_PASSWORD: erp_ci_password
@@ -63,11 +63,7 @@ jobs:
       - name: Run PostgreSQL backup/restore & migration 0007 upgrade verification
         env:
           RESTORE_TEST_ADMIN_URL: postgresql://erp:erp_ci_password@127.0.0.1:5432/postgres
-        run: |
-          if ! command -v pg_dump >/dev/null 2>&1; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-          fi
-          npm run test:restore
+        run: npm run test:restore
 
       - name: Build production bundle
         run: npm run build
@@ -103,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: erp
           POSTGRES_PASSWORD: erp_ci_password
@@ -161,7 +157,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: erp
           POSTGRES_PASSWORD: erp_ci_password

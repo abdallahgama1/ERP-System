@@ -141,8 +141,12 @@ test.describe("ERP Full-Stack E2E (Auth, P2P, O2C, ZATCA QR, GL & Approvals)", (
     await page.getByRole("tab", { name: /Threshold Rules/i }).click();
     await expect(page.getByText("Purchase Order", { exact: true })).toBeVisible();
 
-    // 7. Open Fiscal Periods -> verify open fiscal year renders
+    // 7. Open Fiscal Periods -> wait for /api/accounting/fiscal-years before asserting seeded fiscal year
+    const fiscalYearsResponse = page.waitForResponse(
+      (res) => res.url().includes("/api/accounting/fiscal-years") && res.status() === 200
+    );
     await page.goto("/accounting/periods");
+    await fiscalYearsResponse;
     await expect(page.getByRole("heading", { name: /Fiscal Years & Periods/i })).toBeVisible();
     await expect(page.getByText(`FY ${new Date().getUTCFullYear()}`, { exact: true })).toBeVisible();
 
