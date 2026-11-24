@@ -5,6 +5,7 @@ import { checkDatabaseConnection } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
 import { requireAuth } from "../middleware/auth.ts";
 import { recordDbError } from "../observability/metrics.ts";
+import { checkStorageHealth } from "../services/storage.service.ts";
 
 export async function eventRoutes(app: FastifyInstance): Promise<void> {
   const allowedOrigins = new Set(
@@ -13,6 +14,14 @@ export async function eventRoutes(app: FastifyInstance): Promise<void> {
       .filter(Boolean)
   );
 
+  app.get("/health", async () => ({
+    ok: true,
+    status: "ok",
+    service: "erp-api",
+    timestamp: new Date().toISOString(),
+    uptimeSeconds: Math.round(process.uptime()),
+  }));
+
   app.get("/api/health/live", async () => ({
     status: "live",
     service: "erp-api",
@@ -20,21 +29,29 @@ export async function eventRoutes(app: FastifyInstance): Promise<void> {
   }));
 
   const handleReadyHealth = async (_req: FastifyRequest, reply: FastifyReply) => {
-    const dbStatus = await checkDatabaseConnection();
-    const ok = dbStatus.configured && dbStatus.connected;
-    if (!ok) {
+    const [dbStatus, storageStatus] = await Promise.all([
+      checkDatabaseConnection(),
+      checkStorageHealth(),
+    ]);
+    const dbOk = dbStatus.configured && dbStatus.connected;
+    const storageOk = storageStatus.ok;
+    const ok = dbOk && storageOk;
+    if (!dbOk) {
       recordDbError("health_ready");
     }
     return reply.status(ok ? 200 : 503).send({
       ok,
       status: ok ? "ready" : "not_ready",
-      db: ok ? "ok" : "error",
+      db: dbOk ? "ok" : "error",
+      storage: storageOk ? "ok" : "error",
       service: "erp-api",
       timestamp: new Date().toISOString(),
       database: dbStatus,
+      storageCheck: storageStatus,
     });
   };
 
+  app.get("/ready", handleReadyHealth);
   app.get("/api/health/ready", handleReadyHealth);
   app.get("/api/health", handleReadyHealth);
 

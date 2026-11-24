@@ -44,6 +44,6 @@ ENV NODE_ENV=production \
 EXPOSE 3001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:3001/api/health/live >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:3001/ready >/dev/null || exit 1
 
 CMD ["sh", "-c", "if [ \"${RUN_MIGRATIONS:-true}\" = \"true\" ]; then node backend/dist/migrate.mjs; fi && exec node backend/dist/server.mjs"]

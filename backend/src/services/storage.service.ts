@@ -1,7 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { env } from "../config.ts";
 import { AppError } from "../db/helpers.ts";
 
@@ -231,5 +238,43 @@ export async function deleteStorageObject(key: string, driverOverride?: StorageD
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
       throw err;
     }
+  }
+}
+
+export interface StorageHealthStatus {
+  driver: StorageDriver;
+  ok: boolean;
+  error?: string;
+}
+
+export async function checkStorageHealth(): Promise<StorageHealthStatus> {
+  const driver = getActiveStorageDriver();
+
+  if (driver === "s3") {
+    try {
+      const bucket = resolveS3Bucket();
+      const client = getS3Client();
+      await client.send(new HeadBucketCommand({ Bucket: bucket }));
+      return { driver, ok: true };
+    } catch (err) {
+      return {
+        driver,
+        ok: false,
+        error: err instanceof Error ? err.message : "S3 storage bucket unreachable",
+      };
+    }
+  }
+
+  try {
+    const rootDir = path.resolve(getLocalStorageRoot());
+    await fs.mkdir(rootDir, { recursive: true });
+    await fs.access(rootDir, fsConstants.R_OK | fsConstants.W_OK);
+    return { driver, ok: true };
+  } catch (err) {
+    return {
+      driver,
+      ok: false,
+      error: err instanceof Error ? err.message : "Local storage directory unreachable",
+    };
   }
 }

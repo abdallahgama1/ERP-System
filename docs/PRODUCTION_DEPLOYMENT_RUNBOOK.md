@@ -82,6 +82,10 @@ This idempotently installs Docker Engine + Compose v2, `postgresql-client`, UFW 
 4. Verify container health and endpoints:
    ```bash
    docker compose -f docker-compose.prod.yml ps
+   # Internal container healthchecks (used by Docker HEALTHCHECK):
+   docker compose -f docker-compose.prod.yml exec backend wget -qO- http://127.0.0.1:3001/health
+   docker compose -f docker-compose.prod.yml exec backend wget -qO- http://127.0.0.1:3001/ready
+   # External HTTPS endpoints via Caddy:
    curl -fsS https://erp.example.com/api/health/live
    curl -fsS https://erp.example.com/api/health/ready
    ```
@@ -91,72 +95,195 @@ This idempotently installs Docker Engine + Compose v2, `postgresql-client`, UFW 
 
 ## 4. Production Environment Variables Reference
 
-All variable names below match `backend/src/config.ts`, `backend/.env.example`, and `docker-compose.prod.yml`.
+All variable names below match `backend/src/config.ts`, `backend/.env.example`, `.env.prod.example`, `docker-compose.yml`, `docker-compose.prod.yml`, and the ops scripts.
 
 > **Important:** This application uses `AUTH_COOKIE_SECRET`, `CORS_ORIGIN`, and `APP_BASE_URL` — **not** `SESSION_SECRET` or `APP_ORIGIN`.
 
+### Core Runtime, Database & HTTP Security
+
 | Variable | Required in Prod | Default | Description |
 |---|---|---|---|
-| `SITE_ADDRESS` | Yes (Compose/Caddy) | — | Public domain for Caddy ACME HTTPS (e.g., `erp.example.com`). |
+| `NODE_ENV` | **Yes** | `production` | Must be `production` in production deployments (enforces fail-fast secret checks, HSTS, and error sanitization). |
+| `HOST` | No | `0.0.0.0` (`127.0.0.1` local) | Bind host inside the backend container. |
+| `PORT` | No | `3001` | Backend HTTP listen port inside the container. |
 | `DATABASE_URL` | **Yes** | — | PostgreSQL connection URL (`?sslmode=require`). |
-| `AUTH_COOKIE_SECRET` | **Yes** | — | Random secret (>= 32 chars). Backend refuses startup in `production` if unset, placeholder, or `< 32` chars. |
-| `NODE_ENV` | Yes | `production` | Must be `production` in prod deployments. |
-| `HOST` | No | `0.0.0.0` | Bind host inside container. |
-| `PORT` | No | `3001` | Backend HTTP listen port inside container. |
-| `LOG_LEVEL` | No | `info` | Pino structured log level (`fatal\|error\|warn\|info\|debug\|trace`). |
-| `TRUST_PROXY` | Yes (behind Caddy) | `true` | Enables reading `X-Forwarded-*` headers from Caddy. |
-| `CORS_ORIGIN` | **Yes** | `https://${SITE_ADDRESS}` | Comma-separated allowed browser origins (`https://...` triggers `Secure` cookies in `COOKIE_SECURE=auto`). |
+| `DIRECT_DATABASE_URL` | Optional | `""` | Direct (non-pooler) PostgreSQL URL used for `pg_dump`, `pg_restore`, and Neon migrations. |
+| `RUN_MIGRATIONS` | No | `true` (`false` local) | Runs `node backend/dist/migrate.mjs` before starting `server.mjs`. Set `false` on secondary replicas. |
+| `TRUST_PROXY` | **Yes** (behind Caddy) | `true` (`false` local) | Enables reading `X-Forwarded-For` / `X-Forwarded-Proto` from Caddy. |
+| `CORS_ORIGIN` | **Yes** | `https://${SITE_ADDRESS}` | Comma-separated strict CORS allow-list (wildcards `*` are rejected). |
 | `APP_BASE_URL` | **Yes** | `https://${SITE_ADDRESS}` | Canonical external URL used in password-reset emails & links. |
+| `AUTH_COOKIE_SECRET` | **Yes** | — | Random secret (>= 32 chars). Backend refuses startup in `production` if unset, placeholder, or `< 32` chars. |
 | `SESSION_COOKIE_NAME` | No | `erp_session` | HTTP-only session cookie name. |
 | `SESSION_TTL_DAYS` | No | `30` | Session expiration window in days. |
-| `COOKIE_SECURE` | No | `auto` | `auto` (Secure when `NODE_ENV=production` & `CORS_ORIGIN` starts with `https://`), `true`, or `false`. |
-| `RUN_MIGRATIONS` | No | `true` | Runs `node backend/dist/migrate.mjs` before starting `server.mjs`. Set `false` for secondary replicas. |
-| `METRICS_TOKEN` | Recommended | `""` | Bearer token for `GET /api/metrics`. Returns `404` in production if unset, `401` if invalid. |
-| `SENTRY_DSN` | Optional | `""` | Backend Sentry DSN (PII/tokens/connection strings scrubbed automatically). |
-| `SENTRY_ENVIRONMENT` | Optional | `production` | Sentry environment tag. |
-| `SENTRY_TRACES_SAMPLE_RATE` | Optional | `0` | Sentry performance sample rate (`0`–`1`). |
+| `COOKIE_SECURE` | No | `auto` | `auto` (sets `Secure` when `NODE_ENV=production` & HTTPS origin/protocol), `true`, or `false`. |
+| `DISABLE_RATE_LIMIT` | No | `false` | Disables Fastify rate limiting when `true` (test/benchmark only; keep `false` in production). |
+
+### Authentication Rate Limiting & Temporary Lockout
+
+| Variable | Required in Prod | Default | Description |
+|---|---|---|---|
+| `AUTH_RATE_LIMIT_MAX` | No | `20` | Max requests per window for `/api/auth/login` and `/api/auth/signup`. |
+| `AUTH_RATE_LIMIT_WINDOW_MS` | No | `60000` | Sliding rate-limit window (ms) for login/signup. |
+| `AUTH_MFA_RATE_LIMIT_MAX` | No | `10` | Max requests per window for `/api/auth/mfa/*` endpoints. |
+| `AUTH_MFA_RATE_LIMIT_WINDOW_MS` | No | `60000` | Sliding rate-limit window (ms) for MFA endpoints. |
+| `AUTH_PASSWORD_RESET_RATE_LIMIT_MAX` | No | `10` | Max requests per window for `/api/auth/forgot-password` and `/api/auth/reset-password`. |
+| `AUTH_PASSWORD_RESET_RATE_LIMIT_WINDOW_MS` | No | `900000` | Sliding rate-limit window (ms) for password-reset endpoints (15 minutes). |
+| `AUTH_LOCKOUT_MAX_ATTEMPTS` | No | `5` | Consecutive failed attempts before temporary lockout (`429 ACCOUNT_LOCKED` + `Retry-After`). |
+| `AUTH_LOCKOUT_WINDOW_MS` | No | `900000` | Failure counting window in ms (15 minutes). |
+| `AUTH_LOCKOUT_DURATION_MS` | No | `900000` | Lockout duration in ms (15 minutes). |
+
+### MFA Encryption & Key Rotation
+
+| Variable | Required in Prod | Default | Description |
+|---|---|---|---|
+| `MFA_ENCRYPTION_KEY` | **Yes** | — | Active 32-byte key (64 hex chars or canonical 32-byte base64) for AES-256-GCM TOTP secret encryption. |
+| `MFA_ENCRYPTION_KEY_VERSION` | No | `1` | Positive integer version tag stored in `user_mfa.key_version` for new/rotated secrets. |
+| `MFA_ENCRYPTION_PREVIOUS_KEYS` | During rotation | `""` | Previous keys for decrypting older `key_version` rows (`"1:<key>,2:<key>"` or JSON `'{"1":"<key>"}'`). |
+
+### Attachment Storage & Virus-Scan Hook
+
+| Variable | Required in Prod | Default | Description |
+|---|---|---|---|
+| `STORAGE_DRIVER` | No | `local` | Attachment storage backend: `local` or `s3`. |
+| `STORAGE_LOCAL_DIR` | No | `/app/uploads` | Local directory for `STORAGE_DRIVER=local` (backed by `erp_uploads` Docker volume). |
+| `S3_BUCKET` | If `STORAGE_DRIVER=s3` | `""` | S3/R2/MinIO bucket name. Verified by `/ready` (`HeadBucket`). |
+| `S3_REGION` | No | `us-east-1` | S3 region. |
+| `S3_ENDPOINT` | Optional | `""` | Custom S3-compatible endpoint (e.g., Cloudflare R2 or MinIO). |
+| `S3_ACCESS_KEY_ID` | If `STORAGE_DRIVER=s3` | `""` | S3 access key ID. |
+| `S3_SECRET_ACCESS_KEY` | If `STORAGE_DRIVER=s3` | `""` | S3 secret access key. |
+| `S3_FORCE_PATH_STYLE` | No | `false` | Set `true` for MinIO or path-style S3 endpoints. |
+| `ATTACHMENT_VIRUS_SCAN_ENABLED` | No | `false` | Enables ClamAV `clamd` upload screening when `true` (**off by default**). |
+| `ATTACHMENT_VIRUS_SCAN_CLAMAV_HOST` | No | `127.0.0.1` | ClamAV `clamd` TCP host. |
+| `ATTACHMENT_VIRUS_SCAN_CLAMAV_PORT` | No | `3310` | ClamAV `clamd` TCP port. |
+| `ATTACHMENT_VIRUS_SCAN_TIMEOUT_MS` | No | `10000` | ClamAV scan timeout in ms. |
+| `ATTACHMENT_VIRUS_SCAN_FAIL_CLOSED` | No | `true` | When scanning is enabled, reject uploads with `503` if `clamd` is unreachable. |
+
+### Observability, Logging, SMTP & ETA Egypt
+
+| Variable | Required in Prod | Default | Description |
+|---|---|---|---|
+| `LOG_LEVEL` | No | `info` | Pino structured JSON log level (`fatal\|error\|warn\|info\|debug\|trace`). |
+| `METRICS_TOKEN` | Recommended | `""` | Bearer token for `GET /api/metrics`. Returns `404` when unset, `401` when invalid. |
+| `SENTRY_DSN` | Optional | `""` | Backend Sentry-compatible DSN. Error reporting is **off** unless set; PII & secrets are scrubbed in `beforeSend`. |
+| `SENTRY_ENVIRONMENT` | Optional | `NODE_ENV` | Environment tag attached to Sentry events. |
+| `SENTRY_TRACES_SAMPLE_RATE` | Optional | `0` | Sentry performance trace sample rate (`0`–`1`). |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Optional | `""` / `587` / `false` | SMTP credentials for password reset & operational alerts. |
 | `ETA_CLIENT_ID` / `ETA_CLIENT_SECRET` | Optional | `""` | Egyptian Tax Authority e-Receipt v1.2 OAuth2 client credentials. |
 | `ETA_ID_BASE_URL` | Optional | `https://id.preprod.eta.gov.eg` | Use `https://id.eta.gov.eg` in Egypt ETA production. |
+| `ETA_TOKEN_URL` | Optional | `${ETA_ID_BASE_URL}/connect/token` | Override ETA OAuth2 token endpoint if needed. |
 | `ETA_API_BASE_URL` | Optional | `https://api.preprod.invoicing.eta.gov.eg` | Use `https://api.invoicing.eta.gov.eg` in Egypt ETA production. |
 
-*Frontend build-time variables* (injected during Vite build if needed): `VITE_API_BASE_URL` (empty default for same-origin `/api`), `VITE_SENTRY_DSN`, `VITE_SENTRY_ENVIRONMENT`.
+### Frontend Build-Time, Docker Compose & Ops Script Variables
+
+| Variable | Scope | Default | Description |
+|---|---|---|---|
+| `VITE_API_BASE_URL` | Frontend build | `""` | Optional API origin override baked into Vite assets (keep empty for same-origin `/api`). |
+| `VITE_SENTRY_DSN` | Frontend build | `""` | Optional frontend Sentry DSN (off unless set). |
+| `VITE_SENTRY_ENVIRONMENT` | Frontend build | `production` | Frontend Sentry environment tag. |
+| `SITE_ADDRESS` | `docker-compose.prod.yml` / Caddy | `localhost` | Public domain for Caddy automatic Let's Encrypt HTTPS. |
+| `BACKEND_IMAGE` / `FRONTEND_IMAGE` | `docker-compose.prod.yml` | `ghcr.io/...:latest` | Pinned container image references deployed on the VPS. |
+| `APP_PORT` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `docker-compose.yml` | `8080` / `erp` | Local Docker Compose stack overrides. |
+| `PRE_DEPLOY_BACKUP` | `scripts/deploy.sh` | `true` | Runs `scripts/backup-db.sh` before pulling/restarting containers. |
+| `BACKUP_DIR` / `BACKUP_RETENTION_DAYS` / `BACKUP_MIN_KEEP` / `BACKUP_UPLOADS` | `scripts/backup-db.sh` | `/var/backups/count-it-keep-it` / `14` / `5` / `true` | Backup storage path, retention policy, and `erp_uploads` archival toggle. |
+| `TARGET_DATABASE_URL` / `RESTORE_CONFIRM` | `scripts/restore-db.sh` | — | Explicit restore target DB URL and non-interactive confirmation (`YES`). |
+| `TEST_DATABASE_URL` / `TEST_PG_PORT` | Local & CI tests | Local PG 18 (`5439`) | Isolated test database URL or port for `docker-compose.test.yml`. |
 
 ---
 
-## 5. Backup & Restore Procedures
+## 5. Health, Observability & Structured Logging
+
+- **Liveness (`GET /health` and `GET /api/health/live`)**: Confirms the Node.js/Fastify process is up (`200`, `{ ok: true, status: "ok", uptimeSeconds }`). Exempt from rate limiting.
+- **Readiness (`GET /ready`, `GET /api/health/ready`, `GET /api/health`)**: Verifies **both** PostgreSQL (`SELECT 1`) **and** attachment storage reachability (writable `STORAGE_LOCAL_DIR` for `local`, `HeadBucket` for `s3`). Returns `200` when both pass and `503` if either is unreachable. Used by `backend/Dockerfile`, `docker-compose.yml`, and `docker-compose.prod.yml` Docker `HEALTHCHECK`s.
+- **Structured Request Logs (Pino JSON)**: Every HTTP request receives a sanitized `x-request-id` (`reqId`) echoed in the response header and attached to every log line (`http.request`, `app.rejected`, `app.error`, `http.unhandled_error`) and audit log entry. Passwords, PINs, tokens, cookies, `Authorization` headers, MFA keys/secrets, recovery codes, SMTP/S3 secrets, and PostgreSQL connection-string credentials are automatically scrubbed (`[REDACTED]`).
+- **Sentry-Compatible Error Hook**: Disabled by default. Set `SENTRY_DSN` (backend) and/or `VITE_SENTRY_DSN` (frontend build) to enable. Works with Sentry SaaS, self-hosted Sentry, or GlitchTip. All events and breadcrumbs pass through `scrubSentryEvent` / `scrubSentryBreadcrumb` before transmission.
+
+---
+
+## 6. Backup, Restore & Restore Drills
 
 ### Automated Backups (`scripts/backup-db.sh`)
-`scripts/backup-db.sh` creates an atomic `pg_dump -Fc --no-owner --no-privileges` dump, validates its table of contents with `pg_restore -l`, writes a portable `.sha256` checksum, and prunes old backups while preserving at least `BACKUP_MIN_KEEP` (default `3`) dumps.
+`scripts/backup-db.sh` creates an atomic `pg_dump -Fc --no-owner --no-privileges` dump, validates its table of contents with `pg_restore -l`, archives the `erp_uploads` Docker volume (or `STORAGE_LOCAL_DIR`) into `erp_uploads_<UTC>.tar.gz`, writes `.sha256` checksums for both, and prunes old backups while preserving at least `BACKUP_MIN_KEEP` dumps.
 
 Example daily cron job (store backups outside the git checkout, e.g., `/var/backups/count-it-keep-it`):
 ```bash
 0 2 * * * DATABASE_URL='postgresql://...' BACKUP_RETENTION_DAYS=14 BACKUP_MIN_KEEP=5 /opt/count-it-keep-it/scripts/backup-db.sh /var/backups/count-it-keep-it >> /var/log/erp-backup.log 2>&1
 ```
-Sync `/var/backups/count-it-keep-it` off-site (e.g., S3, Backblaze B2, or encrypted object storage) after each run.
+Sync `/var/backups/count-it-keep-it` off-site (e.g., encrypted S3 or Backblaze B2) after each run.
 
 ### Verified Restore (`scripts/restore-db.sh`)
-`scripts/restore-db.sh` verifies the `.sha256` checksum and archive integrity, requires explicit `TARGET_DATABASE_URL` (or `DATABASE_URL`) in the environment (never auto-reads `backend/.env`), and enforces `--yes`, `RESTORE_CONFIRM=YES`, or interactive `RESTORE` confirmation before running `--clean --if-exists --single-transaction --exit-on-error`.
+`scripts/restore-db.sh` verifies `.sha256` checksums and archive integrity, requires explicit `TARGET_DATABASE_URL` (or `DATABASE_URL`) in the environment (never auto-reads `backend/.env`), and requires `--yes`, `RESTORE_CONFIRM=YES`, or interactive `RESTORE` confirmation before running `pg_restore --clean --if-exists --single-transaction --exit-on-error`.
 
 ```bash
 # 1. Stop backend workers/API to avoid active locks
 docker compose -f docker-compose.prod.yml stop backend
 
-# 2. Restore using direct (non-pooler) PostgreSQL URL
+# 2. Restore PostgreSQL and paired erp_uploads volume using direct (non-pooler) URL
 TARGET_DATABASE_URL='postgresql://USER:PASSWORD@DIRECT_HOST:5432/DBNAME?sslmode=require' \
-  ./scripts/restore-db.sh /var/backups/count-it-keep-it/erp_backup_20261121T020000Z.dump
+  bash scripts/restore-db.sh \
+    --uploads /var/backups/count-it-keep-it/erp_uploads_20261124T020000Z.tar.gz \
+    --uploads-volume erp_uploads \
+    /var/backups/count-it-keep-it/erp_backup_20261124T020000Z.dump
 
 # 3. Restart backend and verify readiness
 docker compose -f docker-compose.prod.yml start backend
 curl -fsS https://erp.example.com/api/health/ready
 ```
 
+### Periodic Restore Drills (Recommended Monthly / Pre-Major Upgrade)
+1. **Automated CI/Local Drill**: Run `npm run test:restore` (verifies `pg_dump` → `pg_restore` + `erp_uploads` SHA-256 parity + balanced trial balance + idempotent Drizzle migrations).
+2. **Production Snapshot Scratch Drill**:
+   - Provision an isolated scratch database (e.g., a temporary Neon branch or local `postgres:18-alpine` container) and a temporary uploads directory `/tmp/drill-uploads`.
+   - Restore the latest production `.dump` and `.tar.gz` into the scratch targets:
+     ```bash
+     TARGET_DATABASE_URL='postgresql://.../erp_drill' \
+       bash scripts/restore-db.sh --yes \
+         --uploads /var/backups/count-it-keep-it/erp_uploads_LATEST.tar.gz \
+         --uploads-dir /tmp/drill-uploads \
+         /var/backups/count-it-keep-it/erp_backup_LATEST.dump
+     ```
+   - Boot a temporary backend container pointing at the scratch DB + `/tmp/drill-uploads` and verify:
+     1. `GET /ready` returns `200` (`db: "ok"`, `storage: "ok"`).
+     2. `GET /api/audit-logs/verify` (as admin) returns `"valid": true`.
+     3. Trial balance (`GET /api/accounting/reports/trial-balance`) is balanced (`isBalanced: true`).
+     4. A sample uploaded attachment downloads cleanly with matching SHA-256.
+   - Record drill date, elapsed time (RTO), and snapshot age (RPO), then destroy the scratch DB and `/tmp/drill-uploads`.
+
 ---
 
-## 6. Upgrade & Rollback Procedures
+## 7. Key & Secret Rotation Procedures
+
+### Zero-Downtime MFA Encryption Key Rotation (`MFA_ENCRYPTION_KEY`)
+Because `user_mfa.key_version` tracks which key encrypted each user's TOTP secret, you can rotate `MFA_ENCRYPTION_KEY` without locking anyone out:
+1. Generate a new 32-byte key:
+   ```bash
+   openssl rand -hex 32
+   ```
+2. Update `.env` on the VPS, incrementing `MFA_ENCRYPTION_KEY_VERSION` (e.g., `1` → `2`) and moving the old key into `MFA_ENCRYPTION_PREVIOUS_KEYS`:
+   ```bash
+   MFA_ENCRYPTION_KEY=<new-64-hex-key-v2>
+   MFA_ENCRYPTION_KEY_VERSION=2
+   MFA_ENCRYPTION_PREVIOUS_KEYS=1:<old-64-hex-key-v1>
+   ```
+3. Restart `backend` (`docker compose -f docker-compose.prod.yml up -d backend`) and confirm `GET /ready` returns `200`. Existing users on `key_version=1` continue authenticating seamlessly while new enrollments use `key_version=2`.
+4. Preview and run the transactional re-encryption script:
+   ```bash
+   npm run mfa:rotate-key -- --dry-run
+   npm run mfa:rotate-key
+   ```
+   Confirm output shows `"ok": true, "targetVersion": 2` and `"rotated"` matches all legacy rows.
+5. Once every row is on `key_version=2`, remove `1:<old-key>` from `MFA_ENCRYPTION_PREVIOUS_KEYS` and restart `backend`.
+
+### Rotating Other Secrets
+- **`AUTH_COOKIE_SECRET`**: Generate a new 32+ char secret (`openssl rand -hex 32`), update `.env`, and restart `backend`. Existing signed cookies and in-flight MFA challenge tokens are invalidated (users simply sign in again).
+- **`METRICS_TOKEN`**: Update `.env`, restart `backend`, and update Prometheus `authorization.credentials` in lockstep.
+- **`SMTP_PASS` / `S3_SECRET_ACCESS_KEY` / `ETA_CLIENT_SECRET`**: Issue a new credential at the provider, update `.env`, restart `backend`, verify `GET /ready` (for S3), then revoke the old credential at the provider.
+
+---
+
+## 8. Upgrade & Rollback Procedures
 
 ### Standard Upgrade (Safe Deploy Script)
-`scripts/deploy.sh` validates `.env`, records currently running container image refs, runs a pre-deploy `pg_dump` backup (`PRE_DEPLOY_BACKUP=true`), pulls or builds containers, waits for healthchecks (`--wait`), verifies `/api/health/live`, `/api/health/ready`, and public `https://${SITE_ADDRESS}/api/health/ready`, and **automatically rolls back** to the previous running container images with `RUN_MIGRATIONS=false` if any check fails:
+`scripts/deploy.sh` validates `.env`, records currently running container image refs, runs a pre-deploy `pg_dump` + `erp_uploads` backup (`PRE_DEPLOY_BACKUP=true`), pulls or builds containers, waits for Docker `/ready` healthchecks (`--wait`), verifies `/api/health/live`, `/api/health/ready`, and public `https://${SITE_ADDRESS}/api/health/ready`, and **automatically rolls back** to the previous running container images with `RUN_MIGRATIONS=false` if any check fails:
 ```bash
 git pull --ff-only origin main
 bash ./scripts/deploy.sh --build          # When building from source on the VPS
@@ -173,14 +300,14 @@ bash ./scripts/deploy.sh \
     --backend-image ghcr.io/abdallahgama1/erp-system-backend:sha-<previous> \
     --frontend-image ghcr.io/abdallahgama1/erp-system-frontend:sha-<previous>
   ```
-- **Schema-affecting rollback**: Drizzle migrations (`0000`–`0006`) are forward-only SQL files. If a release introduced breaking DDL:
+- **Schema-affecting rollback**: Drizzle migrations (`0000`–`0008`) are forward-only SQL files and must never be edited retroactively. If a release introduced breaking DDL:
   1. Stop `backend` (`docker compose -f docker-compose.prod.yml stop backend`).
-  2. Restore the pre-deploy dump via `scripts/restore-db.sh` (or Neon/RDS PITR to the timestamp immediately before migration).
-  3. Deploy the previous good commit/images via `scripts/deploy.sh`.
+  2. Restore the pre-deploy `pg_dump` + paired `erp_uploads` archive via `scripts/restore-db.sh` (or Neon/RDS PITR to the timestamp immediately before migration). See **[docs/BACKUP_RESTORE_AND_ROLLBACK.md](./BACKUP_RESTORE_AND_ROLLBACK.md)** for full details.
+  3. Deploy the previous good commit/images via `scripts/deploy.sh` with `RUN_MIGRATIONS=false` (or once the schema matches).
 
 ---
 
-## 7. ETA Egypt e-Receipt v1.2, Sentry & Prometheus Setup
+## 9. ETA Egypt e-Receipt v1.2, Sentry & Prometheus Setup
 
 ### ETA Egypt e-Receipt v1.2
 1. Set `ETA_CLIENT_ID`, `ETA_CLIENT_SECRET`, `ETA_ID_BASE_URL=https://id.eta.gov.eg`, and `ETA_API_BASE_URL=https://api.invoicing.eta.gov.eg` in `.env` (use `preprod` URLs during ETA onboarding).
@@ -217,7 +344,7 @@ bash ./scripts/deploy.sh \
 
 ---
 
-## 8. Automated CI/CD (GHCR + GitHub Actions Deployment)
+## 10. Automated CI/CD (GHCR + GitHub Actions Deployment)
 
 `.github/workflows/cd.yml` (**Deploy (CD)**) builds, security-scans, publishes immutable multi-stage Docker images to GitHub Container Registry (`ghcr.io`), and optionally deploys to your VPS over SSH using `scripts/deploy.sh`.
 

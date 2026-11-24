@@ -5,7 +5,7 @@ import { env } from "../config.ts";
 const REDACTED = "[REDACTED]";
 
 const SENSITIVE_KEY_PATTERN =
-  /(?:^|[^a-z])(password|passwd|pwd|pin|pins|pos_pin|pin_hash|password_hash|token|tokens|raw_token|reset_token|token_hash|secret|secrets|eta_client_secret|cookie|cookies|set_cookie|authorization|proxy_authorization|api_key|x_api_key|private_key|session_id)(?:$|[^a-z])/i;
+  /(?:^|[^a-z])(password|passwd|pwd|pin|pins|pos_pin|pin_hash|password_hash|token|tokens|raw_token|reset_token|token_hash|secret|secrets|eta_client_secret|cookie|cookies|set_cookie|authorization|proxy_authorization|api_key|x_api_key|private_key|session_id|encryption_key|mfa_key|recovery_code|recovery_codes|totp_secret|smtp_pass)(?:$|[^a-z])/i;
 
 const SENSITIVE_QUERY_PARAM_PATTERN =
   /([?&](?:token|resetToken|reset_token|rawToken|raw_token|password|passwd|pwd|pin|posPin|pos_pin|secret|apiKey|api_key|authorization|cookie)=)([^&\s#]+)/gi;

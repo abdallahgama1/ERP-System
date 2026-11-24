@@ -148,6 +148,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       userId: req.authUser?.id ?? null,
     };
     const isObservabilityProbe =
+      path === "/health" ||
+      path === "/ready" ||
       path === "/api/health" ||
       path === "/api/health/live" ||
       path === "/api/health/ready" ||
@@ -192,6 +194,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       allowList: (req) => {
         const path = req.url.split("?")[0] ?? "";
         return (
+          path === "/health" ||
+          path === "/ready" ||
           path === "/api/health" ||
           path === "/api/health/live" ||
           path === "/api/health/ready" ||

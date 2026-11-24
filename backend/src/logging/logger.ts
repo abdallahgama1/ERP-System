@@ -53,6 +53,11 @@ export const LOG_REDACT_PATHS: string[] = [
   "recoveryCode",
   "recoveryCodes",
   "mfaChallengeToken",
+  "mfaEncryptionKey",
+  "mfaEncryptionPreviousKeys",
+  "authCookieSecret",
+  "smtpPass",
+  "metricsToken",
   "s3SecretAccessKey",
   "*.password",
   "*.currentPassword",
@@ -72,6 +77,11 @@ export const LOG_REDACT_PATHS: string[] = [
   "*.recoveryCode",
   "*.recoveryCodes",
   "*.mfaChallengeToken",
+  "*.mfaEncryptionKey",
+  "*.mfaEncryptionPreviousKeys",
+  "*.authCookieSecret",
+  "*.smtpPass",
+  "*.metricsToken",
   "*.s3SecretAccessKey",
   "body.password",
   "body.pin",
@@ -81,7 +91,9 @@ export const LOG_REDACT_PATHS: string[] = [
 ];
 
 function redactConnectionStrings(input: string): string {
-  return input.replace(/(postgres(?:ql)?:\/\/)([^:@\s]+):([^@\s]+)@/gi, "$1[REDACTED]:[REDACTED]@");
+  return input
+    .replace(/(postgres(?:ql)?:\/\/)([^:@\s]+):([^@\s]+)@/gi, "$1[REDACTED]:[REDACTED]@")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [REDACTED]");
 }
 
 export function sanitizeErrorForLog(err: unknown): {

@@ -502,4 +502,41 @@ describeWithDb("Production hardening integration suite", () => {
       await hardenedApp.close();
     }
   });
+
+  it("6. serves /health (liveness) and /ready (DB + storage reachability, returning 503 when storage fails)", async () => {
+    const healthRes = await app.inject({ method: "GET", url: "/health" });
+    expect(healthRes.statusCode).toBe(200);
+    expect(healthRes.json().ok).toBe(true);
+    expect(healthRes.json().status).toBe("ok");
+
+    const readyOk = await app.inject({ method: "GET", url: "/ready" });
+    expect(readyOk.statusCode).toBe(200);
+    const readyBody = readyOk.json();
+    expect(readyBody.ok).toBe(true);
+    expect(readyBody.db).toBe("ok");
+    expect(readyBody.storage).toBe("ok");
+    expect(readyBody.storageCheck?.ok).toBe(true);
+
+    const { setS3ClientOverrideForTests, setStorageConfigOverrideForTests } = await import(
+      "../../src/services/storage.service.ts"
+    );
+    try {
+      setStorageConfigOverrideForTests({ driver: "s3" });
+      setS3ClientOverrideForTests({
+        send: async () => {
+          throw new Error("Simulated S3 outage");
+        },
+      });
+      const readyFail = await app.inject({ method: "GET", url: "/ready" });
+      expect(readyFail.statusCode).toBe(503);
+      const failBody = readyFail.json();
+      expect(failBody.ok).toBe(false);
+      expect(failBody.db).toBe("ok");
+      expect(failBody.storage).toBe("error");
+      expect(failBody.storageCheck?.error).toContain("Simulated S3 outage");
+    } finally {
+      setS3ClientOverrideForTests(null);
+      setStorageConfigOverrideForTests(null);
+    }
+  });
 });
