@@ -125,10 +125,15 @@
     "accounting": {
       "title": "Accounting",
       "accounts": "Chart of Accounts",
+      "costCenters": "Cost Centers",
       "journalEntries": "Journal Entries",
       "fiscalPeriods": "Fiscal Periods",
       "financialStatements": "Financial Statements"
     },
+    "treasury": {
+      "accounts": "Treasury & Bank"
+    },
+    "expenses": "Operating Expenses",
     "taxonomy": {
       "title": "Taxonomy",
       "categories": "Categories",
@@ -1031,10 +1036,19 @@
       "sales": "Sales",
       "purchases": "Purchases",
       "accounting": "Accounting",
+      "treasury": "Treasury & Bank",
+      "expenses": "Operating Expenses",
+      "fixed_assets": "Fixed Assets",
       "reports": "Reports",
       "taxonomy": "Taxonomy",
       "users": "Users",
-      "settings": "Settings"
+      "settings": "Settings",
+      "approvals": "Approvals",
+      "audit": "Audit Log",
+      "manufacturing": "Manufacturing",
+      "pos": "POS Register",
+      "einvoicing": "E-Invoicing",
+      "roles": "Roles"
     }
   },
   "customers": {

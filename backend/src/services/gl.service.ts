@@ -4,6 +4,7 @@ import type { z } from "zod";
 import {
   DEFAULT_COMPANY_ID,
   chartOfAccounts,
+  costCenters,
   currencies,
   fiscalPeriods,
   fiscalYears,
@@ -38,12 +39,15 @@ export const DEFAULT_COA: DefaultAccountDef[] = [
   { code: "2100", name: "Goods Received Not Invoiced (GRNI)", accountType: "liability", normalBalance: "credit", mappingKey: "grni" },
   { code: "2200", name: "Customer Retainers & Advances", accountType: "liability", normalBalance: "credit", mappingKey: "retainer_liability" },
   { code: "2300", name: "Output VAT Payable", accountType: "liability", normalBalance: "credit", mappingKey: "output_vat" },
+  { code: "2400", name: "Employee Expense Reimbursements Payable", accountType: "liability", normalBalance: "credit", mappingKey: "employee_reimbursements" },
   { code: "3000", name: "Opening Balance Equity", accountType: "equity", normalBalance: "credit", mappingKey: "opening_equity" },
+  { code: "3100", name: "Retained Earnings", accountType: "equity", normalBalance: "credit", mappingKey: "retained_earnings" },
   { code: "4000", name: "Sales Revenue", accountType: "revenue", normalBalance: "credit", mappingKey: "sales_revenue" },
   { code: "5000", name: "Cost of Goods Sold", accountType: "expense", normalBalance: "debit", mappingKey: "cogs" },
   { code: "5100", name: "Inventory Adjustment & Shrinkage", accountType: "expense", normalBalance: "debit", mappingKey: "inventory_adjustment" },
   { code: "5200", name: "Inventory Write-Off Expense", accountType: "expense", normalBalance: "debit", mappingKey: "write_off_expense" },
   { code: "5400", name: "Cash Over & Short", accountType: "expense", normalBalance: "debit", mappingKey: "cash_over_short" },
+  { code: "5500", name: "General Operating Expenses", accountType: "expense", normalBalance: "debit", mappingKey: "operating_expenses" },
   { code: "5900", name: "Purchase Price & Rounding Variance", accountType: "expense", normalBalance: "debit", mappingKey: "rounding_variance" },
 ];
 
@@ -165,6 +169,7 @@ async function seedCalendarFiscalYear(
 export interface JournalLineSpec {
   accountId: string;
   branchId?: string | null;
+  costCenterId?: string | null;
   debit: number;
   credit: number;
   currency?: string;
@@ -176,6 +181,7 @@ export interface BalancedJournalValidation {
   normalizedLines: Array<{
     accountId: string;
     branchId: string | null;
+    costCenterId: string | null;
     debitBase: number;
     creditBase: number;
     currency: string;
@@ -214,6 +220,7 @@ export function validateAndNormalizeJournalLines(
     return {
       accountId: l.accountId,
       branchId: l.branchId ?? null,
+      costCenterId: l.costCenterId ?? null,
       debitBase,
       creditBase,
       currency: l.currency ?? "USD",
@@ -237,6 +244,7 @@ export function validateAndNormalizeJournalLines(
         normalizedLines.push({
           accountId: roundingVarianceAccountId,
           branchId: normalizedLines[0]?.branchId ?? null,
+          costCenterId: null,
           debitBase: 0,
           creditBase: diff,
           currency: "USD",
@@ -251,6 +259,7 @@ export function validateAndNormalizeJournalLines(
         normalizedLines.push({
           accountId: roundingVarianceAccountId,
           branchId: normalizedLines[0]?.branchId ?? null,
+          costCenterId: null,
           debitBase: absDiff,
           creditBase: 0,
           currency: "USD",
@@ -390,6 +399,24 @@ export async function postJournalEntry(tx: DbOrTx, input: PostJournalEntryInput)
     await assertBranchInCompany(tx, bId, effectiveCompanyId);
   }
 
+  const distinctCostCenterIds = Array.from(
+    new Set(normalizedLines.map((l) => l.costCenterId).filter((c): c is string => Boolean(c)))
+  );
+  if (distinctCostCenterIds.length > 0) {
+    const companyCostCenters = await tx
+      .select({ id: costCenters.id })
+      .from(costCenters)
+      .where(
+        and(
+          eq(costCenters.companyId, effectiveCompanyId),
+          inArray(costCenters.id, distinctCostCenterIds)
+        )
+      );
+    if (companyCostCenters.length !== distinctCostCenterIds.length) {
+      throw new AppError(404, "One or more cost centers were not found in the active company", "COST_CENTER_NOT_FOUND");
+    }
+  }
+
   const entryNumber = await nextDocNumber(tx, "JE", "JE-", undefined, effectiveCompanyId);
   const [je] = await tx
     .insert(journalEntries)
@@ -413,6 +440,7 @@ export async function postJournalEntry(tx: DbOrTx, input: PostJournalEntryInput)
       entryId: je.id,
       accountId: l.accountId,
       branchId: l.branchId ?? input.branchId ?? null,
+      costCenterId: l.costCenterId ?? null,
       debitBase: toNumeric(l.debitBase, 4),
       creditBase: toNumeric(l.creditBase, 4),
       currency: l.currency,
@@ -430,6 +458,7 @@ export interface MappedLineSpec {
   mappingKey: GlMappingKey;
   accountId?: string;
   branchId?: string | null;
+  costCenterId?: string | null;
   debit?: number;
   credit?: number;
   currency?: string;
@@ -458,6 +487,7 @@ export async function postMappedJournal(
     activeLines.push({
       accountId,
       branchId: l.branchId ?? input.branchId,
+      costCenterId: l.costCenterId ?? null,
       debit,
       credit,
       currency: l.currency,
@@ -533,6 +563,7 @@ export async function reverseSingleJournalEntry(
     lines: lines.map((l) => ({
       accountId: l.accountId,
       branchId: l.branchId,
+      costCenterId: l.costCenterId ?? null,
       debit: num(l.creditTx),
       credit: num(l.debitTx),
       currency: l.currency,

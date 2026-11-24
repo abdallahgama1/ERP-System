@@ -14,6 +14,7 @@ import { formatMoney } from "@/lib/money";
 import { csvTimestamp, downloadCsv } from "@/lib/export/csv";
 import {
   useBalanceSheetQuery,
+  useCostCentersQuery,
   useProfitLossQuery,
   useTrialBalanceQuery,
 } from "@/hooks/queries/useAccountingQueries";
@@ -22,14 +23,17 @@ export default function FinancialStatements() {
   const { t } = useTranslation();
   const { branches } = useInventoryScope();
   const { settings } = useSettings();
+  const { data: costCenters = [] } = useCostCentersQuery(false);
 
   const [tab, setTab] = useState("trial-balance");
   const [branchFilter, setBranchFilter] = useState("all");
+  const [costCenterFilter, setCostCenterFilter] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
 
   const filter = {
     branchId: branchFilter,
+    costCenterId: tab === "balance-sheet" ? undefined : costCenterFilter,
     fromDate: fromDate || undefined,
     toDate: toDate || undefined,
     asOfDate: toDate || undefined,
@@ -114,6 +118,27 @@ export default function FinancialStatements() {
                 ))}
               </SelectContent>
             </Select>
+            {tab !== "balance-sheet" && (
+              <Select value={costCenterFilter} onValueChange={setCostCenterFilter}>
+                <SelectTrigger
+                  className="w-[220px]"
+                  aria-label="Cost Center Filter"
+                  data-testid="statement-cost-center-filter"
+                >
+                  <SelectValue placeholder="All Cost Centers" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">
+                    {t("accounting.costCenters.all", "All Cost Centers")}
+                  </SelectItem>
+                  {costCenters.map((cc) => (
+                    <SelectItem key={cc.id} value={cc.id}>
+                      {cc.code} — {cc.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             {tab !== "balance-sheet" && (
               <Input
                 type="date"

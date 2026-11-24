@@ -99,6 +99,7 @@ export const erpQueryKeys = {
   accounting: {
     all: ["accounting"] as const,
     accounts: () => ["accounting", "accounts"] as const,
+    costCenters: () => ["accounting", "costCenters"] as const,
     mappings: () => ["accounting", "mappings"] as const,
     journals: () => ["accounting", "journals"] as const,
     fiscalYears: () => ["accounting", "fiscalYears"] as const,
@@ -106,6 +107,19 @@ export const erpQueryKeys = {
     currencies: () => ["accounting", "currencies"] as const,
     statement: (kind: string, params?: Record<string, string>) =>
       ["accounting", "statement", kind, params ?? {}] as const,
+  },
+
+  treasury: {
+    all: ["treasury"] as const,
+    accounts: () => ["treasury", "accounts"] as const,
+    transfers: () => ["treasury", "transfers"] as const,
+    reconciliation: (accountId: string) => ["treasury", "reconciliation", accountId] as const,
+  },
+
+  expenses: {
+    all: ["expenses"] as const,
+    list: (params?: Record<string, unknown>) => ["expenses", "list", params ?? {}] as const,
+    detail: (id: string) => ["expenses", "detail", id] as const,
   },
 
   approvals: {
@@ -156,7 +170,11 @@ export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<reado
     case "sessions_updated":
       return [erpQueryKeys.sessions.all, erpQueryKeys.accounting.all];
     case "accounting_updated":
-      return [erpQueryKeys.accounting.all];
+      return [erpQueryKeys.accounting.all, erpQueryKeys.treasury.all];
+    case "treasury_updated":
+      return [erpQueryKeys.treasury.all, erpQueryKeys.accounting.all];
+    case "expenses_updated":
+      return [erpQueryKeys.expenses.all, erpQueryKeys.treasury.all, erpQueryKeys.accounting.all];
     case "approvals_updated":
       return [erpQueryKeys.approvals.all, erpQueryKeys.notifications];
     case "tracking_updated":

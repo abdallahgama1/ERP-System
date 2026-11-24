@@ -12,6 +12,7 @@ export interface ReportFilter {
   toDate?: string;
   asOfDate?: string;
   branchId?: string;
+  costCenterId?: string;
   cursor?: string;
   limit?: number;
 }
@@ -30,6 +31,9 @@ function buildEntryConditions(actor: RequestActor, filter: ReportFilter): SQL[] 
     } else {
       conds.push(sql`1 = 0`);
     }
+  }
+  if (filter.costCenterId) {
+    conds.push(eq(journalLines.costCenterId, filter.costCenterId));
   }
   if (filter.fromDate) conds.push(gte(journalEntries.entryDate, new Date(filter.fromDate)));
   if (filter.toDate) conds.push(lte(journalEntries.entryDate, new Date(filter.toDate)));

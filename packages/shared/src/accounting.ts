@@ -25,12 +25,15 @@ export const GL_MAPPING_KEYS = [
   "grni",
   "retainer_liability",
   "output_vat",
+  "employee_reimbursements",
   "opening_equity",
+  "retained_earnings",
   "sales_revenue",
   "cogs",
   "inventory_adjustment",
   "write_off_expense",
   "cash_over_short",
+  "operating_expenses",
   "rounding_variance",
 ] as const;
 export type GlMappingKey = (typeof GL_MAPPING_KEYS)[number];
@@ -55,6 +58,7 @@ export const updateGlMappingSchema = z.object({
 export const journalLineInputSchema = z.object({
   accountId: z.string().uuid(),
   branchId: z.string().uuid().nullable().optional(),
+  costCenterId: z.string().uuid().nullable().optional(),
   debit: z.number().min(0).default(0),
   credit: z.number().min(0).default(0),
   currency: z.string().trim().min(3).max(10).optional().default("USD"),

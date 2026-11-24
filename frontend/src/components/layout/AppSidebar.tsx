@@ -40,6 +40,8 @@ import {
   Barcode,
   Boxes,
   Factory,
+  Landmark,
+  Target,
   MonitorSmartphone
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
@@ -102,11 +104,14 @@ const manufacturingItems = [
   { titleKey: "nav.manufacturing.workOrders", url: "/manufacturing/work-orders", icon: Factory },
 ];
 
-const accountingItems = [
-  { titleKey: "nav.accounting.accounts", url: "/accounting/accounts", icon: BookOpen },
-  { titleKey: "nav.accounting.journalEntries", url: "/accounting/journal-entries", icon: FileText },
-  { titleKey: "nav.accounting.fiscalPeriods", url: "/accounting/periods", icon: CalendarClock },
-  { titleKey: "nav.accounting.financialStatements", url: "/accounting/statements", icon: Scale },
+const accountingItems: Array<{ titleKey: string; url: string; icon: typeof BookOpen; module?: PermissionModule }> = [
+  { titleKey: "nav.accounting.accounts", url: "/accounting/accounts", icon: BookOpen, module: "accounting" },
+  { titleKey: "nav.accounting.costCenters", url: "/accounting/cost-centers", icon: Target, module: "accounting" },
+  { titleKey: "nav.accounting.journalEntries", url: "/accounting/journal-entries", icon: FileText, module: "accounting" },
+  { titleKey: "nav.accounting.fiscalPeriods", url: "/accounting/periods", icon: CalendarClock, module: "accounting" },
+  { titleKey: "nav.accounting.financialStatements", url: "/accounting/statements", icon: Scale, module: "accounting" },
+  { titleKey: "nav.treasury.accounts", url: "/treasury/accounts", icon: Landmark, module: "treasury" },
+  { titleKey: "nav.expenses", url: "/expenses", icon: Receipt, module: "expenses" },
 ];
 
 const reportsItems = [
@@ -186,7 +191,8 @@ export function AppSidebar() {
   const isSalesActive = salesItems.some(item => currentPath.startsWith(item.url));
   const isPurchasesActive = purchasesItems.some(item => currentPath.startsWith(item.url));
   const isInventoryOpsActive = inventoryOpsItems.some(item => currentPath.startsWith(item.url));
-  const isAccountingActive = accountingItems.some(item => currentPath.startsWith(item.url));
+  const visibleAccountingItems = accountingItems.filter((item) => !item.module || can(item.module, "view"));
+  const isAccountingActive = visibleAccountingItems.some(item => currentPath.startsWith(item.url));
   const isReportsActive = reportsItems.some(item => currentPath.startsWith(item.url));
   const isTaxonomyActive = taxonomyItems.some(item => currentPath.startsWith(item.url));
   const visibleAdminItems = adminItems.filter((item) => !item.module || can(item.module, "view"));
@@ -363,7 +369,7 @@ export function AppSidebar() {
               {/* Bottom items (Users) */}
               {can("inventory", "view") && renderGroup(inventoryOpsItems, "nav.inventoryOps.title", ArrowRightLeft, inventoryOpsOpen, setInventoryOpsOpen, isInventoryOpsActive)}
               {can("manufacturing", "view") && renderGroup(manufacturingItems, "nav.manufacturing.title", Factory, manufacturingOpen, setManufacturingOpen, manufacturingItems.some(item => currentPath.startsWith(item.url)))}
-              {can("accounting", "view") && renderGroup(accountingItems, "nav.accounting.title", Scale, accountingOpen, setAccountingOpen, isAccountingActive)}
+              {visibleAccountingItems.length > 0 && renderGroup(visibleAccountingItems, "nav.accounting.title", Scale, accountingOpen, setAccountingOpen, isAccountingActive)}
               {can("reports", "view") && renderGroup(reportsItems, "nav.reports.title", BarChart3, reportsOpen, setReportsOpen, isReportsActive)}
               {can("taxonomy", "view") && renderGroup(taxonomyItems, "nav.taxonomy.title", FolderTree, taxonomyOpen, setTaxonomyOpen, isTaxonomyActive)}
               {visibleAdminItems.length > 0 && renderGroup(visibleAdminItems, "nav.admin.title", Shield, adminOpen, setAdminOpen, isAdminActive)}

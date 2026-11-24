@@ -125,10 +125,15 @@
     "accounting": {
       "title": "المحاسبة",
       "accounts": "شجرة الحسابات",
+      "costCenters": "مراكز التكلفة",
       "journalEntries": "قيود اليومية",
       "fiscalPeriods": "الفترات المالية",
       "financialStatements": "القوائم المالية"
     },
+    "treasury": {
+      "accounts": "الخزينة والبنوك"
+    },
+    "expenses": "المصروفات التشغيلية",
     "taxonomy": {
       "title": "التصنيفات",
       "categories": "الفئات",
@@ -1025,10 +1030,19 @@
       "sales": "المبيعات",
       "purchases": "المشتريات",
       "accounting": "المحاسبة",
+      "treasury": "الخزينة والبنوك",
+      "expenses": "المصروفات التشغيلية",
+      "fixed_assets": "الأصول الثابتة",
       "reports": "التقارير",
       "taxonomy": "التصنيفات",
       "users": "المستخدمون",
-      "settings": "الإعدادات"
+      "settings": "الإعدادات",
+      "approvals": "الاعتمادات",
+      "audit": "سجل التدقيق",
+      "manufacturing": "التصنيع",
+      "pos": "نقاط البيع",
+      "einvoicing": "الفوترة الإلكترونية",
+      "roles": "الأدوار"
     }
   },
   "customers": {

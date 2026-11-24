@@ -276,6 +276,9 @@ export async function seedCompanyDefaults(
     { docType: "SHIFT", prefix: "SHF-", padding: 4 },
     { docType: "POS", prefix: "POS-", padding: 5 },
     { docType: "POSR", prefix: "POSR-", padding: 5 },
+    { docType: "TRFT", prefix: "TRFT-", padding: 4 },
+    { docType: "BST", prefix: "BST-", padding: 4 },
+    { docType: "EXP", prefix: "EXP-", padding: 4 },
   ];
 
   await tx

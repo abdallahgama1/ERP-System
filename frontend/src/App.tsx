@@ -69,9 +69,12 @@ const Categories = lazy(() => import("./pages/taxonomy/Categories"));
 const Brands = lazy(() => import("./pages/taxonomy/Brands"));
 const UnitsOfMeasure = lazy(() => import("./pages/taxonomy/UnitsOfMeasure"));
 const ChartOfAccounts = lazy(() => import("./pages/accounting/ChartOfAccounts"));
+const CostCenters = lazy(() => import("./pages/accounting/CostCenters"));
 const JournalEntries = lazy(() => import("./pages/accounting/JournalEntries"));
 const FiscalPeriods = lazy(() => import("./pages/accounting/FiscalPeriods"));
 const FinancialStatements = lazy(() => import("./pages/accounting/FinancialStatements"));
+const TreasuryAccounts = lazy(() => import("./pages/treasury/TreasuryAccounts"));
+const Expenses = lazy(() => import("./pages/expenses/Expenses"));
 const PosRegister = lazy(() => import("./pages/pos/PosRegister"));
 
 const PageLoader = () => (
@@ -155,9 +158,12 @@ const BackOfficeWorkspace = () => (
         <Route path="/brands" element={guard("taxonomy", <Brands />)} />
         <Route path="/units-of-measure" element={guard("taxonomy", <UnitsOfMeasure />)} />
         <Route path="/accounting/accounts" element={guard("accounting", <ChartOfAccounts />)} />
+        <Route path="/accounting/cost-centers" element={guard("accounting", <CostCenters />)} />
         <Route path="/accounting/journal-entries" element={guard("accounting", <JournalEntries />)} />
         <Route path="/accounting/periods" element={guard("accounting", <FiscalPeriods />)} />
         <Route path="/accounting/statements" element={guard("accounting", <FinancialStatements />)} />
+        <Route path="/treasury/accounts" element={guard("treasury", <TreasuryAccounts />)} />
+        <Route path="/expenses" element={guard("expenses", <Expenses />)} />
         <Route path="/settings" element={guard("settings", <Settings />)} />
         <Route path="*" element={<NotFound />} />
       </Routes>

@@ -33,6 +33,7 @@ import { AttachmentsPanel } from "@/components/AttachmentsPanel";
 import {
   useAccountingMutations,
   useAccountsQuery,
+  useCostCentersQuery,
   useCurrenciesQuery,
   useJournalEntriesPageQuery,
   type JournalEntryDto,
@@ -41,6 +42,7 @@ import {
 interface DraftLine {
   key: string;
   accountId: string;
+  costCenterId: string;
   debit: number;
   credit: number;
   currency: string;
@@ -52,6 +54,7 @@ let lineSeq = 1;
 const emptyLine = (currency: string): DraftLine => ({
   key: `je-draft-${lineSeq++}`,
   accountId: "",
+  costCenterId: "none",
   debit: 0,
   credit: 0,
   currency,
@@ -83,6 +86,7 @@ export default function JournalEntries() {
   const filteredEntries = journalPage?.entries ?? [];
   const pageInfo = journalPage?.pageInfo;
   const { data: accounts = [] } = useAccountsQuery();
+  const { data: costCenters = [] } = useCostCentersQuery();
   const { data: currencyData } = useCurrenciesQuery();
   const { createJournalEntry, reverseJournalEntry } = useAccountingMutations();
 
@@ -104,6 +108,7 @@ export default function JournalEntries() {
   const canEdit = can("accounting", "edit");
 
   const accountById = useMemo(() => new Map(accounts.map((a) => [a.id, a])), [accounts]);
+  const costCenterById = useMemo(() => new Map(costCenters.map((cc) => [cc.id, cc])), [costCenters]);
   const branchById = useMemo(() => new Map(branches.map((b) => [b.branchId, b.branch_name])), [branches]);
   const currencies = useMemo(() => {
     const list = currencyData?.currencies ?? [];
@@ -161,6 +166,7 @@ export default function JournalEntries() {
         memo: memo.trim(),
         lines: validLines.map((l) => ({
           accountId: l.accountId,
+          costCenterId: l.costCenterId && l.costCenterId !== "none" ? l.costCenterId : null,
           debit: Number(l.debit) || 0,
           credit: Number(l.credit) || 0,
           currency: l.currency || settings.currency || "USD",
@@ -400,6 +406,7 @@ export default function JournalEntries() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>{t("accounting.accounts.name", "Account")}</TableHead>
+                    <TableHead>{t("accounting.costCenters.title", "Cost Center")}</TableHead>
                     <TableHead>{t("common.description", "Description")}</TableHead>
                     <TableHead className="text-end">{t("accounting.journals.debit", "Debit")}</TableHead>
                     <TableHead className="text-end">{t("accounting.journals.credit", "Credit")}</TableHead>
@@ -408,11 +415,15 @@ export default function JournalEntries() {
                 <TableBody>
                   {selectedEntry.lines.map((line) => {
                     const acct = accountById.get(line.accountId);
+                    const cc = line.costCenterId ? costCenterById.get(line.costCenterId) : null;
                     return (
                       <TableRow key={line.id}>
                         <TableCell>
                           <span className="font-mono text-xs me-2 text-muted-foreground">{acct?.code}</span>
                           <span className="font-medium">{acct?.name ?? line.accountId}</span>
+                        </TableCell>
+                        <TableCell className="text-xs font-mono text-muted-foreground">
+                          {cc ? `${cc.code} · ${cc.name}` : "—"}
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">
                           {line.description || "—"}
@@ -490,6 +501,7 @@ export default function JournalEntries() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>{t("accounting.accounts.name", "Account")}</TableHead>
+                    <TableHead className="w-36">{t("accounting.costCenters.title", "Cost Center")}</TableHead>
                     <TableHead className="w-28">{t("settings.currency", "CCY")}</TableHead>
                     <TableHead className="w-24">FX</TableHead>
                     <TableHead className="w-28">{t("accounting.journals.debit", "Debit")}</TableHead>
@@ -515,6 +527,26 @@ export default function JournalEntries() {
                               .map((a) => (
                                 <SelectItem key={a.id} value={a.id}>
                                   {a.code} — {a.name}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>
+                        <Select
+                          value={line.costCenterId}
+                          onValueChange={(val) => updateLine(line.key, { costCenterId: val })}
+                        >
+                          <SelectTrigger className="min-w-[140px]">
+                            <SelectValue placeholder={t("common.none", "None")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">{t("common.none", "None")}</SelectItem>
+                            {costCenters
+                              .filter((cc) => cc.isActive)
+                              .map((cc) => (
+                                <SelectItem key={cc.id} value={cc.id}>
+                                  {cc.code} — {cc.name}
                                 </SelectItem>
                               ))}
                           </SelectContent>

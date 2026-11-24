@@ -1,11 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import {
   createAccountSchema,
+  createCostCenterSchema,
   createExchangeRateSchema,
   createFiscalYearSchema,
   createJournalEntrySchema,
   createTaxCodeSchema,
   updateAccountSchema,
+  updateCostCenterSchema,
   updateGlMappingSchema,
   updateTaxCodeSchema,
   upsertCurrencySchema,
@@ -19,6 +21,11 @@ import {
   getProfitAndLoss,
   getTrialBalance,
 } from "../services/accounting-reports.service.ts";
+import {
+  createCostCenter,
+  listCostCenters,
+  updateCostCenter,
+} from "../services/cost-centers.service.ts";
 import {
   createAccount,
   createFiscalYear,
@@ -65,6 +72,41 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     eventBroadcaster.broadcast("accounting_updated", { accountId: id }, actorCompanyId(req.authUser!));
     return { account };
   });
+
+  // ---------------- Cost Centers ----------------
+  app.get("/api/accounting/cost-centers", { preHandler: requireAuth }, async (req) => {
+    const q = req.query as { activeOnly?: string };
+    return {
+      costCenters: await listCostCenters(getDb(), req.authUser!, {
+        activeOnly: q.activeOnly === "true",
+      }),
+    };
+  });
+
+  app.post(
+    "/api/accounting/cost-centers",
+    { preHandler: requirePermission("accounting", "create") },
+    async (req, reply) => {
+      const data = parseOrThrow(createCostCenterSchema, req.body, "Invalid cost center");
+      if (data.branchId) assertBranchAccess(req.authUser!, data.branchId);
+      const costCenter = await createCostCenter(getDb(), req.authUser!, data, req.ip);
+      eventBroadcaster.broadcast("accounting_updated", { costCenterId: costCenter.id }, actorCompanyId(req.authUser!));
+      return reply.status(201).send({ costCenter });
+    }
+  );
+
+  app.put(
+    "/api/accounting/cost-centers/:id",
+    { preHandler: requirePermission("accounting", "edit") },
+    async (req) => {
+      const id = (req.params as { id: string }).id;
+      const data = parseOrThrow(updateCostCenterSchema, req.body, "Invalid cost center update");
+      if (data.branchId) assertBranchAccess(req.authUser!, data.branchId);
+      const costCenter = await updateCostCenter(getDb(), req.authUser!, id, data, req.ip);
+      eventBroadcaster.broadcast("accounting_updated", { costCenterId: id }, actorCompanyId(req.authUser!));
+      return { costCenter };
+    }
+  );
 
   // ---------------- GL Account Mappings ----------------
   app.get("/api/accounting/mappings", { preHandler: requirePermission("accounting", "view") }, async (req) => {
@@ -148,15 +190,17 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------------- Financial Statements & Ledger ----------------
   app.get("/api/accounting/reports/trial-balance", { preHandler: requirePermission("accounting", "view") }, async (req) => {
-    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string };
+    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string; costCenterId?: string };
     if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
-    return getTrialBalance(getDb(), req.authUser!, q);
+    const normalizedCc = q.costCenterId && q.costCenterId !== "all" ? q.costCenterId : undefined;
+    return getTrialBalance(getDb(), req.authUser!, { ...q, costCenterId: normalizedCc });
   });
 
   app.get("/api/accounting/reports/profit-loss", { preHandler: requirePermission("accounting", "view") }, async (req) => {
-    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string };
+    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string; costCenterId?: string };
     if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
-    return getProfitAndLoss(getDb(), req.authUser!, q);
+    const normalizedCc = q.costCenterId && q.costCenterId !== "all" ? q.costCenterId : undefined;
+    return getProfitAndLoss(getDb(), req.authUser!, { ...q, costCenterId: normalizedCc });
   });
 
   app.get("/api/accounting/reports/balance-sheet", { preHandler: requirePermission("accounting", "view") }, async (req) => {
@@ -167,13 +211,15 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/accounting/reports/ledger/:accountId", { preHandler: requirePermission("accounting", "view") }, async (req) => {
     const accountId = (req.params as { accountId: string }).accountId;
-    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string; cursor?: string; limit?: string };
+    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string; costCenterId?: string; cursor?: string; limit?: string };
     if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
     const parsedLimit = q.limit ? Number(q.limit) : undefined;
+    const normalizedCc = q.costCenterId && q.costCenterId !== "all" ? q.costCenterId : undefined;
     return getAccountLedger(getDb(), req.authUser!, accountId, {
       fromDate: q.fromDate,
       toDate: q.toDate,
       branchId: q.branchId,
+      costCenterId: normalizedCc,
       cursor: q.cursor,
       limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
     });

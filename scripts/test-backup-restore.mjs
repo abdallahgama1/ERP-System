@@ -581,15 +581,22 @@ async function main() {
       const dstUrl = await createScratchDb(dstDbName);
       pgRestoreFromFile(dstDbName, `pre0007_${runTag}.dump`);
 
-      // Apply migration 0007 to restored scratch DB and verify
+      // Apply migration 0007 to restored scratch DB and verify exact 0007 preservation,
+      // then apply all subsequent migrations (0008..latest) and verify idempotency + ledger integrity
       const dstSql = postgres(dstUrl, { max: 1 });
       let post0007Snapshot;
+      let postLatestSnapshot;
       let backfillReport;
       try {
         await applyJournalMigrations(dstSql, [mig0007Entry]);
-        // Re-running full journal must be an idempotent no-op
-        await applyJournalMigrations(dstSql, journal.entries);
+        // Re-running 0000..0007 must be an idempotent no-op
+        await applyJournalMigrations(dstSql, [...pre0007Entries, mig0007Entry]);
         post0007Snapshot = await captureSnapshot(dstSql);
+
+        // Apply all remaining migrations (0008..latest) and re-run full journal for idempotency
+        await applyJournalMigrations(dstSql, journal.entries);
+        await applyJournalMigrations(dstSql, journal.entries);
+        postLatestSnapshot = await captureSnapshot(dstSql);
         backfillReport = await verifyComp01Backfill(dstSql);
       } finally {
         await dstSql.end();
@@ -599,19 +606,32 @@ async function main() {
         assert.equal(
           post0007Snapshot.counts[t],
           pre0007Snapshot.counts[t],
-          `Row count mismatch on public.${t}: before=${pre0007Snapshot.counts[t]}, after=${post0007Snapshot.counts[t]}`
+          `Row count mismatch after 0007 on public.${t}: before=${pre0007Snapshot.counts[t]}, after=${post0007Snapshot.counts[t]}`
         );
+        if (t === "chart_of_accounts") {
+          assert.ok(
+            postLatestSnapshot.counts[t] >= pre0007Snapshot.counts[t],
+            `Expected public.${t} after latest migrations (${postLatestSnapshot.counts[t]}) >= pre-0007 (${pre0007Snapshot.counts[t]})`
+          );
+        } else {
+          assert.equal(
+            postLatestSnapshot.counts[t],
+            pre0007Snapshot.counts[t],
+            `Row count mismatch after latest migrations on public.${t}: before=${pre0007Snapshot.counts[t]}, after=${postLatestSnapshot.counts[t]}`
+          );
+        }
       }
       assert.equal(post0007Snapshot.trialBalance.isBalanced, true, "Post-0007 trial balance must be balanced");
+      assert.equal(postLatestSnapshot.trialBalance.isBalanced, true, "Post-latest trial balance must be balanced");
       assert.equal(
-        post0007Snapshot.trialBalance.totalDebit,
+        postLatestSnapshot.trialBalance.totalDebit,
         pre0007Snapshot.trialBalance.totalDebit,
-        "Post-0007 total debit must equal pre-0007 total debit"
+        "Post-latest total debit must equal pre-0007 total debit"
       );
       assert.equal(
-        post0007Snapshot.trialBalance.totalCredit,
+        postLatestSnapshot.trialBalance.totalCredit,
         pre0007Snapshot.trialBalance.totalCredit,
-        "Post-0007 total credit must equal pre-0007 total credit"
+        "Post-latest total credit must equal pre-0007 total credit"
       );
 
       // =========================================================================
@@ -650,11 +670,18 @@ async function main() {
         }
 
         for (const t of VERIFY_TABLES) {
-          assert.equal(
-            devAfter.counts[t],
-            devBefore.counts[t],
-            `Dev copy row count mismatch on public.${t}: before=${devBefore.counts[t]}, after=${devAfter.counts[t]}`
-          );
+          if (t === "chart_of_accounts") {
+            assert.ok(
+              devAfter.counts[t] >= devBefore.counts[t],
+              `Dev copy row count decreased on public.${t}: before=${devBefore.counts[t]}, after=${devAfter.counts[t]}`
+            );
+          } else {
+            assert.equal(
+              devAfter.counts[t],
+              devBefore.counts[t],
+              `Dev copy row count mismatch on public.${t}: before=${devBefore.counts[t]}, after=${devAfter.counts[t]}`
+            );
+          }
         }
         assert.equal(devAfter.trialBalance.isBalanced, true, "Dev copy trial balance must be balanced");
         assert.equal(devAfter.trialBalance.totalDebit, devBefore.trialBalance.totalDebit);

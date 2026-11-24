@@ -3,6 +3,8 @@ import { ensureSeededDefaults, resetSeededDefaultsCache } from "../../src/auth/p
 import type { AppDatabase } from "../../src/db/index.ts";
 
 export const CANONICAL_TRUNCATE_SQL = `TRUNCATE TABLE
+  expense_claim_lines, expense_claims, bank_statement_lines, bank_statements,
+  treasury_transfers, treasury_accounts, cost_centers,
   auth_lockouts, document_attachments, user_saved_views, user_mfa, user_companies,
   custom_role_permissions, custom_roles, print_templates,
   einvoice_submissions, pos_return_lines, pos_returns,

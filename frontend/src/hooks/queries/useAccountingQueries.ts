@@ -1,12 +1,16 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AccountTypeShared,
+  CostCenterDto,
   FiscalPeriodStatusShared,
   GlMappingKey,
   JournalEntryStatusShared,
   NormalBalanceShared,
   OffsetPageInfo,
+  createCostCenterSchema,
+  updateCostCenterSchema,
 } from "@erp/shared";
+import type { z } from "zod";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
@@ -35,6 +39,7 @@ export interface JournalLineDto {
   entryId: string;
   accountId: string;
   branchId: string | null;
+  costCenterId?: string | null;
   debitBase: number;
   creditBase: number;
   currency: string;
@@ -175,6 +180,7 @@ export interface ReportFilterParams {
   toDate?: string;
   asOfDate?: string;
   branchId?: string;
+  costCenterId?: string;
 }
 
 function toQueryString(params?: Record<string, string | undefined>): string {
@@ -194,8 +200,52 @@ export function useAccountsQuery(enabled = true) {
     queryKey: erpQueryKeys.accounting.accounts(),
     queryFn: () => apiRequest<{ accounts: ChartAccountDto[] }>("/api/accounting/accounts"),
     select: (data) => data.accounts,
-    enabled: Boolean(user) && enabled && (can("accounting", "view") || can("settings", "view")),
+    enabled:
+      Boolean(user) &&
+      enabled &&
+      (can("accounting", "view") ||
+        can("settings", "view") ||
+        can("treasury", "view") ||
+        can("expenses", "view")),
   });
+}
+
+export function useCostCentersQuery(activeOnly = false, enabled = true) {
+  const { user } = useAuth();
+  return useQuery({
+    queryKey: [...erpQueryKeys.accounting.costCenters(), { activeOnly }],
+    queryFn: () =>
+      apiRequest<{ costCenters: CostCenterDto[] }>(
+        `/api/accounting/cost-centers${activeOnly ? "?activeOnly=true" : ""}`
+      ),
+    select: (data) => data.costCenters,
+    enabled: Boolean(user) && enabled,
+  });
+}
+
+export function useCostCenterMutations() {
+  const qc = useQueryClient();
+  const invalidate = () => void qc.invalidateQueries({ queryKey: erpQueryKeys.accounting.all });
+
+  const createCostCenter = useMutation({
+    mutationFn: (payload: z.input<typeof createCostCenterSchema>) =>
+      apiRequest<{ costCenter: CostCenterDto }>("/api/accounting/cost-centers", {
+        method: "POST",
+        body: payload,
+      }),
+    onSuccess: invalidate,
+  });
+
+  const updateCostCenter = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: z.input<typeof updateCostCenterSchema> }) =>
+      apiRequest<{ costCenter: CostCenterDto }>(`/api/accounting/cost-centers/${id}`, {
+        method: "PUT",
+        body: data,
+      }),
+    onSuccess: invalidate,
+  });
+
+  return { createCostCenter, updateCostCenter };
 }
 
 export function useGlMappingsQuery(enabled = true) {
@@ -276,6 +326,9 @@ export function useTrialBalanceQuery(filters?: ReportFilterParams, enabled = tru
   const { can } = usePermissions();
   const params = {
     ...(filters?.branchId && filters.branchId !== "all" ? { branchId: filters.branchId } : {}),
+    ...(filters?.costCenterId && filters.costCenterId !== "all"
+      ? { costCenterId: filters.costCenterId }
+      : {}),
     ...(filters?.fromDate ? { fromDate: filters.fromDate } : {}),
     ...(filters?.toDate ? { toDate: filters.toDate } : {}),
   };
@@ -294,6 +347,9 @@ export function useProfitLossQuery(filters?: ReportFilterParams, enabled = true)
   const { can } = usePermissions();
   const params = {
     ...(filters?.branchId && filters.branchId !== "all" ? { branchId: filters.branchId } : {}),
+    ...(filters?.costCenterId && filters.costCenterId !== "all"
+      ? { costCenterId: filters.costCenterId }
+      : {}),
     ...(filters?.fromDate ? { fromDate: filters.fromDate } : {}),
     ...(filters?.toDate ? { toDate: filters.toDate } : {}),
   };
@@ -418,6 +474,7 @@ export function useAccountingMutations() {
       lines: Array<{
         accountId: string;
         branchId?: string | null;
+        costCenterId?: string | null;
         debit: number;
         credit: number;
         currency?: string;

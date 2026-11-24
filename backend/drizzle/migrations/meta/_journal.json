@@ -64,6 +64,13 @@
       "when": 1795551320593,
       "tag": "0008_public_spiral",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795559610785,
+      "tag": "0009_happy_swordsman",
+      "breakpoints": true
     }
   ]
 }

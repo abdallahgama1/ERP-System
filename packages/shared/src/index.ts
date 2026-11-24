@@ -8,3 +8,4 @@ export * from "./inventory-extensions.ts";
 export * from "./pagination.ts";
 export * from "./pos.ts";
 export * from "./einvoicing.ts";
+export * from "./finance.ts";

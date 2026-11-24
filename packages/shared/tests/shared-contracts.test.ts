@@ -23,9 +23,13 @@ import {
   calculateDocumentTotals,
   calculateLineAmounts,
   createCompanySchema,
+  createCostCenterSchema,
   createCustomRoleSchema,
+  createExpenseClaimSchema,
   createPrintTemplateSchema,
   createSavedViewSchema,
+  createTreasuryAccountSchema,
+  createTreasuryTransferSchema,
   cursorPageQuerySchema,
   customersListQuerySchema,
   decodeCursor,
@@ -33,9 +37,11 @@ import {
   einvoiceRetrySchema,
   emailDocumentSchema,
   encodeCursor,
+  expenseClaimsListQuerySchema,
   exportParamsSchema,
   exportQuerySchema,
   globalSearchQuerySchema,
+  importBankStatementCsvSchema,
   mfaDisableSchema,
   mfaRegenerateRecoveryCodesSchema,
   mfaVerifyEnrollSchema,
@@ -43,6 +49,7 @@ import {
   normalizeRolePermissionsMap,
   offsetPageQuerySchema,
   parseBackwardCompatibleOffsetQuery,
+  payExpenseClaimSchema,
   posCheckoutSchema,
   posManagerOverrideSchema,
   posReceiptsQuerySchema,
@@ -50,7 +57,9 @@ import {
   posReturnSchema,
   productsListQuerySchema,
   purchaseOrdersListQuerySchema,
+  reconcileStatementLineSchema,
   resolveSearchTerm,
+  reviewExpenseClaimSchema,
   salesOrdersListQuerySchema,
   setCashierPinSchema,
   switchCompanySchema,
@@ -333,9 +342,9 @@ describe("@erp/shared contracts (pricing, pagination, permissions & POS)", () =>
     expect(productsListQuerySchema.safeParse({ sortBy: "invalidCol" }).success).toBe(false);
   });
 
-  it("exposes 18 permission modules, 8 complete system role presets, and permission helpers", () => {
-    expect(PERMISSION_MODULES).toHaveLength(18);
-    for (const mod of ["manufacturing", "approvals", "einvoicing", "audit", "companies", "roles"] as const) {
+  it("exposes 21 permission modules, 8 complete system role presets, and permission helpers", () => {
+    expect(PERMISSION_MODULES).toHaveLength(21);
+    for (const mod of ["manufacturing", "treasury", "expenses", "fixed_assets", "approvals", "einvoicing", "audit", "companies", "roles"] as const) {
       expect(PERMISSION_MODULES).toContain(mod);
       expect(DEFAULT_PERMISSION_MATRIX.admin[mod]).toEqual({
         view: true,
@@ -568,5 +577,77 @@ describe("@erp/shared contracts (pricing, pagination, permissions & POS)", () =>
         subject: "Invoice\nX-Injected: true",
       }).success
     ).toBe(false);
+  });
+
+  it("validates Wave 2A finance contracts (cost centers, treasury, bank reconciliation, operating expenses)", () => {
+    const idA = "11111111-1111-4111-8111-111111111111";
+    const idB = "22222222-2222-4222-8222-222222222222";
+
+    // Cost center uppercases code & rejects invalid characters
+    expect(createCostCenterSchema.parse({ code: "cc-ops", name: "Operations" })).toMatchObject({
+      code: "CC-OPS",
+      name: "Operations",
+      isActive: true,
+    });
+    expect(createCostCenterSchema.safeParse({ code: "bad code!", name: "Ops" }).success).toBe(false);
+
+    // Treasury account & self-transfer rejection
+    expect(createTreasuryAccountSchema.parse({ code: "bnk-cib", name: "CIB Main", accountType: "bank" })).toMatchObject({
+      code: "BNK-CIB",
+      accountType: "bank",
+      currency: "USD",
+      openingBalance: 0,
+    });
+    expect(
+      createTreasuryTransferSchema.safeParse({
+        fromTreasuryAccountId: idA,
+        toTreasuryAccountId: idA,
+        amount: 250,
+      }).success
+    ).toBe(false);
+    expect(
+      createTreasuryTransferSchema.safeParse({
+        fromTreasuryAccountId: idA,
+        toTreasuryAccountId: idB,
+        amount: 250,
+      }).success
+    ).toBe(true);
+
+    // CSV import & reconciliation XOR rule
+    expect(importBankStatementCsvSchema.parse({ csvText: "date,amount\n2026-11-01,100" }).fileName).toBe(
+      "statement.csv"
+    );
+    expect(reconcileStatementLineSchema.safeParse({ journalLineId: idA }).success).toBe(true);
+    expect(
+      reconcileStatementLineSchema.safeParse({ createAdjustment: { counterpartAccountId: idB } }).success
+    ).toBe(true);
+    expect(reconcileStatementLineSchema.safeParse({}).success).toBe(false);
+    expect(
+      reconcileStatementLineSchema.safeParse({
+        journalLineId: idA,
+        createAdjustment: { counterpartAccountId: idB },
+      }).success
+    ).toBe(false);
+
+    // Expense claims & settlement
+    const claim = createExpenseClaimSchema.parse({
+      paymentMode: "employee_reimbursement",
+      payeeName: "Sara Mahmoud",
+      lines: [{ expenseAccountId: idA, description: "Client taxi", netAmount: 100, taxRate: 14 }],
+    });
+    expect(claim.submitNow).toBe(true);
+    expect(claim.lines).toHaveLength(1);
+    expect(createExpenseClaimSchema.safeParse({ lines: [] }).success).toBe(false);
+    expect(reviewExpenseClaimSchema.parse({ decision: "approved" })).toEqual({
+      decision: "approved",
+      comment: "",
+    });
+    expect(payExpenseClaimSchema.safeParse({ treasuryAccountId: idB }).success).toBe(true);
+    expect(expenseClaimsListQuerySchema.parse({ status: "all", paymentMode: "" })).toMatchObject({
+      page: 1,
+      pageSize: 50,
+      status: undefined,
+      paymentMode: undefined,
+    });
   });
 });

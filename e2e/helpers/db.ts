@@ -22,6 +22,8 @@ export function getTestDbUrl(): string {
  * CoA/GL/tax/currency defaults, and document sequences deterministically with zero COMP-02+ leakage.
  */
 export const CANONICAL_TRUNCATE_SQL = `TRUNCATE TABLE
+  expense_claim_lines, expense_claims, bank_statement_lines, bank_statements,
+  treasury_transfers, treasury_accounts, cost_centers,
   auth_lockouts, einvoice_submissions, pos_return_lines, pos_returns,
   pos_tenders, pos_shift_cash_movements, pos_shifts, pos_terminals, user_pos_pins,
   idempotency_keys, notification_user_states, notifications,

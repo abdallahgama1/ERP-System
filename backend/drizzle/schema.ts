@@ -1731,6 +1731,28 @@ export const journalEntries = pgTable(
   ]
 );
 
+export const costCenters = pgTable(
+  "cost_centers",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
+    code: text("code").notNull(),
+    name: text("name").notNull(),
+    branchId: uuid("branch_id").references(() => branches.id, { onDelete: "set null" }),
+    description: text("description").notNull().default(""),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("cost_centers_company_code_uq").on(t.companyId, t.code),
+    index("cost_centers_company_active_idx").on(t.companyId, t.isActive),
+  ]
+);
+
 export const journalLines = pgTable(
   "journal_lines",
   {
@@ -1742,6 +1764,7 @@ export const journalLines = pgTable(
       .notNull()
       .references(() => chartOfAccounts.id, { onDelete: "restrict" }),
     branchId: uuid("branch_id").references(() => branches.id, { onDelete: "restrict" }),
+    costCenterId: uuid("cost_center_id").references(() => costCenters.id, { onDelete: "set null" }),
     debitBase: numeric("debit_base", { precision: 18, scale: 4 }).notNull().default("0"),
     creditBase: numeric("credit_base", { precision: 18, scale: 4 }).notNull().default("0"),
     currency: text("currency").notNull().default("USD"),
@@ -1753,6 +1776,7 @@ export const journalLines = pgTable(
   (t) => [
     index("journal_lines_entry_idx").on(t.entryId),
     index("journal_lines_account_idx").on(t.accountId),
+    index("journal_lines_cost_center_idx").on(t.costCenterId),
   ]
 );
 
@@ -2263,5 +2287,205 @@ export const einvoiceSubmissions = pgTable(
     uniqueIndex("einvoice_sub_pos_return_provider_uq")
       .on(t.posReturnId, t.provider)
       .where(sql`${t.posReturnId} IS NOT NULL`),
+  ]
+);
+
+// ============================================================================
+// Wave 2A: Treasury (Bank & Cashboxes), Bank Reconciliation & Operating Expenses
+// ============================================================================
+
+export const treasuryAccounts = pgTable(
+  "treasury_accounts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
+    code: text("code").notNull(),
+    name: text("name").notNull(),
+    accountType: text("account_type").$type<"bank" | "cashbox">().notNull(),
+    currency: text("currency").notNull().default("USD"),
+    branchId: uuid("branch_id").references(() => branches.id, { onDelete: "set null" }),
+    glAccountId: uuid("gl_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id, { onDelete: "restrict" }),
+    bankName: text("bank_name").notNull().default(""),
+    accountNumber: text("account_number").notNull().default(""),
+    iban: text("iban").notNull().default(""),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("treasury_accounts_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("treasury_accounts_company_gl_uq").on(t.companyId, t.glAccountId),
+    index("treasury_accounts_company_type_idx").on(t.companyId, t.accountType),
+  ]
+);
+
+export const treasuryTransfers = pgTable(
+  "treasury_transfers",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
+    transferNumber: text("transfer_number").notNull(),
+    transferDate: timestamp("transfer_date", { withTimezone: true }).defaultNow().notNull(),
+    fromTreasuryAccountId: uuid("from_treasury_account_id")
+      .notNull()
+      .references(() => treasuryAccounts.id, { onDelete: "restrict" }),
+    toTreasuryAccountId: uuid("to_treasury_account_id")
+      .notNull()
+      .references(() => treasuryAccounts.id, { onDelete: "restrict" }),
+    amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+    currency: text("currency").notNull().default("USD"),
+    reference: text("reference").notNull().default(""),
+    memo: text("memo").notNull().default(""),
+    journalEntryId: uuid("journal_entry_id").references(() => journalEntries.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("treasury_transfers_company_num_uq").on(t.companyId, t.transferNumber),
+    index("treasury_transfers_company_date_idx").on(t.companyId, t.transferDate),
+  ]
+);
+
+export const bankStatements = pgTable(
+  "bank_statements",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
+    treasuryAccountId: uuid("treasury_account_id")
+      .notNull()
+      .references(() => treasuryAccounts.id, { onDelete: "cascade" }),
+    statementNumber: text("statement_number").notNull(),
+    fileName: text("file_name").notNull().default("statement.csv"),
+    fromDate: timestamp("from_date", { withTimezone: true }),
+    toDate: timestamp("to_date", { withTimezone: true }),
+    lineCount: integer("line_count").notNull().default(0),
+    importedBy: uuid("imported_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("bank_statements_company_num_uq").on(t.companyId, t.statementNumber),
+    index("bank_statements_treasury_idx").on(t.treasuryAccountId, t.createdAt),
+  ]
+);
+
+export const bankStatementLines = pgTable(
+  "bank_statement_lines",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
+    statementId: uuid("statement_id")
+      .notNull()
+      .references(() => bankStatements.id, { onDelete: "cascade" }),
+    treasuryAccountId: uuid("treasury_account_id")
+      .notNull()
+      .references(() => treasuryAccounts.id, { onDelete: "cascade" }),
+    lineDate: timestamp("line_date", { withTimezone: true }).notNull(),
+    description: text("description").notNull().default(""),
+    reference: text("reference").notNull().default(""),
+    amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+    runningBalance: numeric("running_balance", { precision: 18, scale: 4 }),
+    fingerprint: text("fingerprint").notNull(),
+    status: text("status").$type<"unmatched" | "reconciled" | "ignored">().notNull().default("unmatched"),
+    matchedJournalLineId: uuid("matched_journal_line_id").references(() => journalLines.id, {
+      onDelete: "set null",
+    }),
+    reconciledBy: uuid("reconciled_by").references(() => users.id, { onDelete: "set null" }),
+    reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("bank_stmt_lines_treasury_fp_uq").on(t.treasuryAccountId, t.fingerprint),
+    uniqueIndex("bank_stmt_lines_matched_jl_uq")
+      .on(t.matchedJournalLineId)
+      .where(sql`${t.matchedJournalLineId} IS NOT NULL`),
+    index("bank_stmt_lines_treasury_status_idx").on(t.treasuryAccountId, t.status, t.lineDate),
+  ]
+);
+
+export const expenseClaims = pgTable(
+  "expense_claims",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
+    claimNumber: text("claim_number").notNull(),
+    claimDate: timestamp("claim_date", { withTimezone: true }).defaultNow().notNull(),
+    branchId: uuid("branch_id").references(() => branches.id, { onDelete: "set null" }),
+    submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    submittedByName: text("submitted_by_name").notNull().default(""),
+    payeeName: text("payee_name").notNull().default(""),
+    paymentMode: text("payment_mode")
+      .$type<"direct_treasury" | "employee_reimbursement">()
+      .notNull()
+      .default("direct_treasury"),
+    treasuryAccountId: uuid("treasury_account_id").references(() => treasuryAccounts.id, {
+      onDelete: "set null",
+    }),
+    status: text("status")
+      .$type<"draft" | "pending_approval" | "approved" | "paid" | "rejected">()
+      .notNull()
+      .default("draft"),
+    subtotal: numeric("subtotal", { precision: 18, scale: 4 }).notNull().default("0"),
+    taxTotal: numeric("tax_total", { precision: 18, scale: 4 }).notNull().default("0"),
+    totalAmount: numeric("total_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+    currency: text("currency").notNull().default("USD"),
+    reference: text("reference").notNull().default(""),
+    notes: text("notes").notNull().default(""),
+    reviewedBy: uuid("reviewed_by").references(() => users.id, { onDelete: "set null" }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewComment: text("review_comment").notNull().default(""),
+    accrualJournalEntryId: uuid("accrual_journal_entry_id").references(() => journalEntries.id, {
+      onDelete: "set null",
+    }),
+    paymentJournalEntryId: uuid("payment_journal_entry_id").references(() => journalEntries.id, {
+      onDelete: "set null",
+    }),
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("expense_claims_company_num_uq").on(t.companyId, t.claimNumber),
+    index("expense_claims_company_status_date_idx").on(t.companyId, t.status, t.claimDate),
+  ]
+);
+
+export const expenseClaimLines = pgTable(
+  "expense_claim_lines",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    claimId: uuid("claim_id")
+      .notNull()
+      .references(() => expenseClaims.id, { onDelete: "cascade" }),
+    expenseAccountId: uuid("expense_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id, { onDelete: "restrict" }),
+    costCenterId: uuid("cost_center_id").references(() => costCenters.id, { onDelete: "set null" }),
+    description: text("description").notNull().default(""),
+    netAmount: numeric("net_amount", { precision: 18, scale: 4 }).notNull(),
+    taxCodeId: uuid("tax_code_id").references(() => taxCodes.id, { onDelete: "set null" }),
+    taxRate: numeric("tax_rate", { precision: 8, scale: 4 }).notNull().default("0"),
+    taxAmount: numeric("tax_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+    lineTotal: numeric("line_total", { precision: 18, scale: 4 }).notNull(),
+  },
+  (t) => [
+    index("expense_claim_lines_claim_idx").on(t.claimId),
+    index("expense_claim_lines_cc_idx").on(t.costCenterId),
   ]
 );

@@ -159,7 +159,7 @@ export default function Roles() {
           <p className="text-muted-foreground">
             {t(
               "roles.description",
-              "Manage system role presets and custom roles with granular 18-module permissions."
+              "Manage system role presets and custom roles with granular 21-module permissions."
             )}
           </p>
         </div>

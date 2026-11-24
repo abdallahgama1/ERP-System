@@ -29,6 +29,7 @@ import { branchRoutes } from "./routes/branches.ts";
 import { companiesRoutes } from "./routes/companies.ts";
 import { einvoicingRoutes } from "./routes/einvoicing.ts";
 import { eventRoutes } from "./routes/events.ts";
+import { expensesRoutes } from "./routes/expenses.ts";
 import { exportRoutes } from "./routes/exports.ts";
 import { inventoryRoutes } from "./routes/inventory.ts";
 import { manufacturingRoutes } from "./routes/manufacturing.ts";
@@ -43,6 +44,7 @@ import { sessionRoutes } from "./routes/sessions.ts";
 import { settingsRoutes } from "./routes/settings.ts";
 import { taxonomyRoutes } from "./routes/taxonomy.ts";
 import { trackingRoutes } from "./routes/tracking.ts";
+import { treasuryRoutes } from "./routes/treasury.ts";
 
 function resolveAuthMetricEvent(routeUrl: string | undefined): AuthMetricEvent | null {
   switch (routeUrl) {
@@ -326,6 +328,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(purchaseRoutes);
   await app.register(salesRoutes);
   await app.register(accountingRoutes);
+  await app.register(treasuryRoutes);
+  await app.register(expensesRoutes);
   await app.register(approvalRoutes);
   await app.register(trackingRoutes);
   await app.register(manufacturingRoutes);
