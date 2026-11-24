@@ -58,28 +58,54 @@ export function generateOpaqueToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
-function shouldUseSecureCookie(): boolean {
-  if (env.COOKIE_SECURE === "true") return true;
-  if (env.COOKIE_SECURE === "false") return false;
-  return env.NODE_ENV === "production" && env.CORS_ORIGIN.startsWith("https://");
+export function shouldUseSecureCookie(opts?: {
+  cookieSecure?: string;
+  nodeEnv?: string;
+  corsOrigin?: string;
+  appBaseUrl?: string;
+  requestProtocol?: string;
+}): boolean {
+  const mode = (opts?.cookieSecure ?? process.env.COOKIE_SECURE ?? env.COOKIE_SECURE)
+    .trim()
+    .toLowerCase();
+  if (mode === "true") return true;
+  if (mode === "false") return false;
+
+  const nodeEnv = (opts?.nodeEnv ?? process.env.NODE_ENV ?? env.NODE_ENV).trim().toLowerCase();
+  if (nodeEnv !== "production") return false;
+
+  const corsRaw = opts?.corsOrigin ?? process.env.CORS_ORIGIN ?? env.CORS_ORIGIN;
+  const appBaseUrl = (opts?.appBaseUrl ?? process.env.APP_BASE_URL ?? env.APP_BASE_URL).trim();
+  const hasHttpsOrigin = corsRaw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .some((s) => s.startsWith("https://"));
+
+  return (
+    hasHttpsOrigin ||
+    appBaseUrl.toLowerCase().startsWith("https://") ||
+    opts?.requestProtocol === "https"
+  );
 }
 
 export function setSessionCookie(reply: FastifyReply, rawToken: string): void {
+  const reqProto = reply.request?.protocol;
   reply.setCookie(env.SESSION_COOKIE_NAME, rawToken, {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
-    secure: shouldUseSecureCookie(),
+    secure: shouldUseSecureCookie({ requestProtocol: reqProto }),
     maxAge: env.SESSION_TTL_DAYS * 86400,
   });
 }
 
 export function clearSessionCookie(reply: FastifyReply): void {
+  const reqProto = reply.request?.protocol;
   reply.clearCookie(env.SESSION_COOKIE_NAME, {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
-    secure: shouldUseSecureCookie(),
+    secure: shouldUseSecureCookie({ requestProtocol: reqProto }),
   });
 }
 

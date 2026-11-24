@@ -57,6 +57,13 @@
       "when": 1795382484006,
       "tag": "0007_enterprise_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795551320593,
+      "tag": "0008_public_spiral",
+      "breakpoints": true
     }
   ]
 }

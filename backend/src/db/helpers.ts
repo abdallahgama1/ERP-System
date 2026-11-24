@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { AUDIT_SENSITIVE_FIELDS } from "@erp/shared";
-import { eq, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { auditLogs, DEFAULT_COMPANY_ID, documentSequences } from "../../drizzle/schema.ts";
 import type { DbOrTx } from "../auth/permissions.ts";
 import { getRequestContext } from "../logging/logger.ts";
@@ -248,14 +249,36 @@ export interface AuditWriteInput {
   ipAddress?: string | null;
 }
 
-export async function writeAuditLog(tx: DbOrTx, input: AuditWriteInput): Promise<void> {
-  const ctx = getRequestContext();
-  const rawDetails = ctx?.reqId ? { reqId: ctx.reqId, ...(input.details ?? {}) } : (input.details ?? {});
-  const details = scrubSensitiveAuditData(rawDetails) as Record<string, unknown>;
-  const diff = computeAuditDiff(input.before ?? input.beforeJson, input.after ?? input.afterJson);
+export const AUDIT_CHAIN_GENESIS_HASH = "GENESIS";
 
-  await tx.insert(auditLogs).values({
-    companyId: input.companyId || DEFAULT_COMPANY_ID,
+export interface AuditChainHashInput {
+  chainSeq: number;
+  prevHash: string;
+  companyId: string;
+  userId: string | null;
+  userName: string;
+  userRole: string | null;
+  branchId: string | null;
+  action: string;
+  entityType: string;
+  entityId: string;
+  entityLabel: string | null;
+  details: Record<string, unknown>;
+  beforeJson: Record<string, unknown> | null;
+  afterJson: Record<string, unknown> | null;
+  changedFields: string[];
+  ipAddress: string | null;
+  createdAt: Date | string;
+}
+
+export function computeAuditEntryHash(input: AuditChainHashInput): string {
+  const createdAtIso =
+    input.createdAt instanceof Date ? input.createdAt.toISOString() : new Date(input.createdAt).toISOString();
+  const canonicalPayload = {
+    v: 1,
+    chainSeq: input.chainSeq,
+    prevHash: input.prevHash,
+    companyId: input.companyId,
     userId: input.userId ?? null,
     userName: input.userName,
     userRole: input.userRole ?? null,
@@ -264,10 +287,212 @@ export async function writeAuditLog(tx: DbOrTx, input: AuditWriteInput): Promise
     entityType: input.entityType,
     entityId: input.entityId,
     entityLabel: input.entityLabel ?? null,
-    details,
-    beforeJson: diff.beforeJson,
-    afterJson: diff.afterJson,
-    changedFields: diff.changedFields,
+    details: canonicalAuditValue(input.details ?? {}),
+    beforeJson: input.beforeJson ? canonicalAuditValue(input.beforeJson) : null,
+    afterJson: input.afterJson ? canonicalAuditValue(input.afterJson) : null,
+    changedFields: Array.isArray(input.changedFields) ? input.changedFields : [],
     ipAddress: input.ipAddress ?? null,
+    createdAt: createdAtIso,
+  };
+  return createHash("sha256").update(JSON.stringify(canonicalPayload), "utf8").digest("hex");
+}
+
+export interface AuditChainVerificationResult {
+  valid: boolean;
+  companyId: string;
+  totalChainedRows: number;
+  legacyUnchainedRows: number;
+  latestChainSeq: number | null;
+  latestEntryHash: string | null;
+  firstBrokenId: string | null;
+  firstBrokenSeq: number | null;
+  reason: string | null;
+}
+
+export async function verifyAuditLogChain(
+  db: DbOrTx,
+  companyId: string = DEFAULT_COMPANY_ID
+): Promise<AuditChainVerificationResult> {
+  const effectiveCompanyId = companyId || DEFAULT_COMPANY_ID;
+
+  const [{ legacyCount }] = await db
+    .select({ legacyCount: sql<number>`count(*)::int` })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.companyId, effectiveCompanyId), isNull(auditLogs.chainSeq)));
+
+  const rows = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.companyId, effectiveCompanyId), isNotNull(auditLogs.chainSeq)))
+    .orderBy(asc(auditLogs.chainSeq));
+
+  let expectedSeq = 1;
+  let expectedPrevHash = AUDIT_CHAIN_GENESIS_HASH;
+  let latestChainSeq: number | null = null;
+  let latestEntryHash: string | null = null;
+
+  for (const row of rows) {
+    const seq = Number(row.chainSeq);
+    if (seq !== expectedSeq) {
+      return {
+        valid: false,
+        companyId: effectiveCompanyId,
+        totalChainedRows: rows.length,
+        legacyUnchainedRows: legacyCount,
+        latestChainSeq,
+        latestEntryHash,
+        firstBrokenId: row.id,
+        firstBrokenSeq: seq,
+        reason: `Sequence gap or reorder detected: expected chain_seq ${expectedSeq}, found ${seq}`,
+      };
+    }
+
+    if (!row.prevHash || !row.entryHash) {
+      return {
+        valid: false,
+        companyId: effectiveCompanyId,
+        totalChainedRows: rows.length,
+        legacyUnchainedRows: legacyCount,
+        latestChainSeq,
+        latestEntryHash,
+        firstBrokenId: row.id,
+        firstBrokenSeq: seq,
+        reason: `Missing hash chain metadata at chain_seq ${seq}`,
+      };
+    }
+
+    if (row.prevHash !== expectedPrevHash) {
+      return {
+        valid: false,
+        companyId: effectiveCompanyId,
+        totalChainedRows: rows.length,
+        legacyUnchainedRows: legacyCount,
+        latestChainSeq,
+        latestEntryHash,
+        firstBrokenId: row.id,
+        firstBrokenSeq: seq,
+        reason: `Broken prev_hash link at chain_seq ${seq}`,
+      };
+    }
+
+    const recomputed = computeAuditEntryHash({
+      chainSeq: seq,
+      prevHash: row.prevHash,
+      companyId: row.companyId,
+      userId: row.userId ?? null,
+      userName: row.userName,
+      userRole: row.userRole ?? null,
+      branchId: row.branchId ?? null,
+      action: row.action,
+      entityType: row.entityType,
+      entityId: row.entityId,
+      entityLabel: row.entityLabel ?? null,
+      details: row.details ?? {},
+      beforeJson: row.beforeJson ?? null,
+      afterJson: row.afterJson ?? null,
+      changedFields: row.changedFields ?? [],
+      ipAddress: row.ipAddress ?? null,
+      createdAt: row.createdAt,
+    });
+
+    if (recomputed !== row.entryHash) {
+      return {
+        valid: false,
+        companyId: effectiveCompanyId,
+        totalChainedRows: rows.length,
+        legacyUnchainedRows: legacyCount,
+        latestChainSeq,
+        latestEntryHash,
+        firstBrokenId: row.id,
+        firstBrokenSeq: seq,
+        reason: `Entry hash mismatch at chain_seq ${seq} (row tampered)`,
+      };
+    }
+
+    expectedSeq += 1;
+    expectedPrevHash = row.entryHash;
+    latestChainSeq = seq;
+    latestEntryHash = row.entryHash;
+  }
+
+  return {
+    valid: true,
+    companyId: effectiveCompanyId,
+    totalChainedRows: rows.length,
+    legacyUnchainedRows: legacyCount,
+    latestChainSeq,
+    latestEntryHash,
+    firstBrokenId: null,
+    firstBrokenSeq: null,
+    reason: null,
+  };
+}
+
+export async function writeAuditLog(tx: DbOrTx, input: AuditWriteInput): Promise<void> {
+  const ctx = getRequestContext();
+  const rawDetails = ctx?.reqId ? { reqId: ctx.reqId, ...(input.details ?? {}) } : (input.details ?? {});
+  const details = scrubSensitiveAuditData(rawDetails) as Record<string, unknown>;
+  const diff = computeAuditDiff(input.before ?? input.beforeJson, input.after ?? input.afterJson);
+  const companyId = input.companyId || DEFAULT_COMPANY_ID;
+
+  await tx.transaction(async (innerTx) => {
+    // Serialize audit-log hash chain appends per company until the outer transaction commits
+    await innerTx.execute(sql`SELECT pg_advisory_xact_lock(749208, hashtext(${companyId}))`);
+
+    const headRows = await innerTx.execute<{
+      chain_seq: string | number;
+      entry_hash: string;
+    }>(sql`
+      SELECT chain_seq, entry_hash
+      FROM audit_logs
+      WHERE company_id = ${companyId} AND chain_seq IS NOT NULL
+      ORDER BY chain_seq DESC
+      LIMIT 1
+    `);
+
+    const head = headRows[0];
+    const chainSeq = head ? Number(head.chain_seq) + 1 : 1;
+    const prevHash = head?.entry_hash ?? AUDIT_CHAIN_GENESIS_HASH;
+    const createdAt = new Date();
+    const entryHash = computeAuditEntryHash({
+      chainSeq,
+      prevHash,
+      companyId,
+      userId: input.userId ?? null,
+      userName: input.userName,
+      userRole: input.userRole ?? null,
+      branchId: input.branchId ?? null,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      entityLabel: input.entityLabel ?? null,
+      details,
+      beforeJson: diff.beforeJson,
+      afterJson: diff.afterJson,
+      changedFields: diff.changedFields,
+      ipAddress: input.ipAddress ?? null,
+      createdAt,
+    });
+
+    await innerTx.insert(auditLogs).values({
+      companyId,
+      userId: input.userId ?? null,
+      userName: input.userName,
+      userRole: input.userRole ?? null,
+      branchId: input.branchId ?? null,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      entityLabel: input.entityLabel ?? null,
+      details,
+      beforeJson: diff.beforeJson,
+      afterJson: diff.afterJson,
+      changedFields: diff.changedFields,
+      ipAddress: input.ipAddress ?? null,
+      chainSeq,
+      prevHash,
+      entryHash,
+      createdAt,
+    });
   });
 }

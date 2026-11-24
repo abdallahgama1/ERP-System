@@ -62,7 +62,7 @@ async function main() {
 
       await db.execute(
         sql.raw(`TRUNCATE TABLE
-          document_attachments, user_saved_views, user_mfa, user_companies,
+          auth_lockouts, document_attachments, user_saved_views, user_mfa, user_companies,
           custom_role_permissions, custom_roles, print_templates,
           einvoice_submissions, pos_return_lines, pos_returns,
           pos_tenders, pos_shift_cash_movements, pos_shifts, pos_terminals, user_pos_pins,

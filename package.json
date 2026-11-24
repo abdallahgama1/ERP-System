@@ -24,7 +24,8 @@
     "test:db:down": "docker compose -f docker-compose.test.yml down -v",
     "db:generate": "npm --prefix backend run db:generate",
     "db:push": "npm --prefix backend run db:push",
-    "db:migrate": "npm --prefix backend run db:migrate"
+    "db:migrate": "npm --prefix backend run db:migrate",
+    "mfa:rotate-key": "node scripts/rotate-mfa-key.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",

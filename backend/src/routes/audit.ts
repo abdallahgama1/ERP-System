@@ -3,9 +3,9 @@ import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gte, ilike, inArray, isNull, lte, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { auditLogs } from "../../drizzle/schema.ts";
-import { AppError, writeAuditLog } from "../db/helpers.ts";
+import { AppError, verifyAuditLogChain, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
-import { assertBranchAccess, requireAuth, requirePermission } from "../middleware/auth.ts";
+import { assertBranchAccess, requireAuth, requirePermission, requireRole } from "../middleware/auth.ts";
 import { buildKeysetCondition, parseCursorOrThrow } from "../services/query-helpers.ts";
 
 export const CLIENT_AUDIT_ALLOWED_ACTIONS = [
@@ -31,6 +31,11 @@ const createAuditSchema = z.object({
 });
 
 export async function auditRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/api/audit-logs/verify", { preHandler: requireRole("admin") }, async (req) => {
+    const actor = req.authUser!;
+    return verifyAuditLogChain(getDb(), actor.activeCompanyId);
+  });
+
   app.get("/api/audit-logs", { preHandler: requirePermission("audit", "view") }, async (req) => {
     const query = req.query as {
       cursor?: string;

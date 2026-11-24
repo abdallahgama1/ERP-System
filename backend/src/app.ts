@@ -67,6 +67,18 @@ export interface BuildAppOptions {
   logger?: boolean;
   loggerStream?: DestinationStream;
   logLevel?: string;
+  enableRateLimit?: boolean;
+  corsOrigin?: string;
+}
+
+export function parseCorsAllowList(raw: string): string[] {
+  const seen = new Set<string>();
+  for (const part of raw.split(",")) {
+    const normalized = part.trim().replace(/\/+$/, "");
+    if (!normalized || normalized === "*") continue;
+    seen.add(normalized);
+  }
+  return Array.from(seen);
 }
 
 /**
@@ -99,6 +111,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.addHook("onSend", async (req, reply, payload) => {
     reply.header("x-request-id", req.id);
+    if (!reply.getHeader("permissions-policy")) {
+      reply.header("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+    }
+    const reqPath = req.url.split("?")[0] ?? "";
+    if (reqPath.startsWith("/api/auth/") && !reply.getHeader("cache-control")) {
+      reply.header("cache-control", "no-store");
+    }
     return payload;
   });
 
@@ -145,12 +164,27 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
+  const effectiveNodeEnv = process.env.NODE_ENV ?? env.NODE_ENV;
   await app.register(helmet, {
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'none'"],
+        baseUri: ["'none'"],
+        formAction: ["'none'"],
+        frameAncestors: ["'none'"],
+      },
+    },
+    frameguard: { action: "deny" },
+    noSniff: true,
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
     crossOriginResourcePolicy: { policy: "same-site" },
+    hsts: effectiveNodeEnv === "production" ? { maxAge: 31536000, includeSubDomains: true } : false,
   });
 
-  if (env.NODE_ENV !== "test" && !env.DISABLE_RATE_LIMIT) {
+  const rateLimitActive =
+    options.enableRateLimit ?? (env.NODE_ENV !== "test" && !env.DISABLE_RATE_LIMIT);
+
+  if (rateLimitActive) {
     await app.register(rateLimit, {
       global: true,
       max: 300,
@@ -168,13 +202,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   }
 
-  const allowedOrigins = env.CORS_ORIGIN.split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const allowedOrigins = parseCorsAllowList(
+    options.corsOrigin ?? process.env.CORS_ORIGIN ?? env.CORS_ORIGIN
+  );
 
   await app.register(cors, {
     origin: (origin, cb) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin) {
+        cb(null, true);
+        return;
+      }
+      const normalizedOrigin = origin.trim().replace(/\/+$/, "");
+      if (allowedOrigins.includes(normalizedOrigin)) {
         cb(null, true);
         return;
       }
@@ -221,6 +260,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       } else {
         req.log.warn(logPayload, "app.rejected");
       }
+      if (err.code === "ACCOUNT_LOCKED") {
+        const retryAfter = (err.details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
+        if (typeof retryAfter === "number" && retryAfter > 0) {
+          reply.header("retry-after", String(retryAfter));
+        }
+      }
       return reply.status(err.statusCode).send({
         message: err.message,
         code: err.code,
@@ -264,7 +309,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   await app.register(eventRoutes);
   await app.register(metricsRoutes);
-  await app.register(authRoutes);
+  await app.register(authRoutes, { enableRateLimit: rateLimitActive });
   await app.register(adminRoutes);
   await app.register(companiesRoutes);
   await app.register(settingsRoutes);

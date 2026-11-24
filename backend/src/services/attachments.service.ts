@@ -32,6 +32,7 @@ import {
   putStorageObject,
   sanitizeFileName,
 } from "./storage.service.ts";
+import { scanAttachmentBuffer } from "./virus-scan.service.ts";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -203,6 +204,63 @@ export async function assertEntityBelongsToCompany(
   }
 }
 
+const UTF8_FATAL_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+export function detectBinaryMagicKind(buffer: Buffer): string | null {
+  if (buffer.length >= 5 && buffer.subarray(0, 5).toString("ascii") === "%PDF-") {
+    return "application/pdf";
+  }
+  if (
+    buffer.length >= 8 &&
+    buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return "image/png";
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  if (
+    buffer.length >= 6 &&
+    (buffer.subarray(0, 6).toString("ascii") === "GIF87a" ||
+      buffer.subarray(0, 6).toString("ascii") === "GIF89a")
+  ) {
+    return "image/gif";
+  }
+  if (
+    buffer.length >= 4 &&
+    buffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
+  ) {
+    return "application/zip";
+  }
+  if (buffer.length >= 2 && buffer[0] === 0x4d && buffer[1] === 0x5a) {
+    return "application/x-msdownload";
+  }
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x7f &&
+    buffer[1] === 0x45 &&
+    buffer[2] === 0x4c &&
+    buffer[3] === 0x46
+  ) {
+    return "application/x-elf";
+  }
+  if (
+    buffer.length >= 4 &&
+    ((buffer[0] === 0xfe && buffer[1] === 0xed && buffer[2] === 0xfa && (buffer[3] === 0xce || buffer[3] === 0xcf)) ||
+      (buffer[0] === 0xcf && buffer[1] === 0xfa && buffer[2] === 0xed && buffer[3] === 0xfe))
+  ) {
+    return "application/x-mach-binary";
+  }
+  return null;
+}
+
 export function validateAttachmentBinary(
   fileName: string,
   mimeType: string,
@@ -226,41 +284,37 @@ export function validateAttachmentBinary(
     throw new AppError(400, `File extension '${ext}' is not allowed`, "DISALLOWED_EXTENSION");
   }
 
-  // Magic-byte sanity verification
+  const detectedMagic = detectBinaryMagicKind(buffer);
+
+  // Magic-byte verification against declared MIME type
   switch (normalizedMime as AttachmentAllowedMimeType) {
     case "application/pdf": {
-      if (buffer.length < 5 || buffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
+      if (detectedMagic !== "application/pdf") {
         throw new AppError(400, "File content does not match PDF header signature", "INVALID_FILE_SIGNATURE");
       }
       break;
     }
     case "image/png": {
-      const pngSig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-      if (buffer.length < 8 || !buffer.subarray(0, 8).equals(pngSig)) {
+      if (detectedMagic !== "image/png") {
         throw new AppError(400, "File content does not match PNG header signature", "INVALID_FILE_SIGNATURE");
       }
       break;
     }
     case "image/jpeg": {
-      if (buffer.length < 3 || buffer[0] !== 0xff || buffer[1] !== 0xd8 || buffer[2] !== 0xff) {
+      if (detectedMagic !== "image/jpeg") {
         throw new AppError(400, "File content does not match JPEG header signature", "INVALID_FILE_SIGNATURE");
       }
       break;
     }
     case "image/webp": {
-      if (
-        buffer.length < 12 ||
-        buffer.subarray(0, 4).toString("ascii") !== "RIFF" ||
-        buffer.subarray(8, 12).toString("ascii") !== "WEBP"
-      ) {
+      if (detectedMagic !== "image/webp") {
         throw new AppError(400, "File content does not match WebP header signature", "INVALID_FILE_SIGNATURE");
       }
       break;
     }
     case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
     case "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
-      const zipSig = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
-      if (buffer.length < 4 || !buffer.subarray(0, 4).equals(zipSig)) {
+      if (detectedMagic !== "application/zip") {
         throw new AppError(400, "File content does not match OOXML/ZIP header signature", "INVALID_FILE_SIGNATURE");
       }
       break;
@@ -269,6 +323,18 @@ export function validateAttachmentBinary(
     case "text/csv": {
       if (buffer.includes(0x00)) {
         throw new AppError(400, "Text/CSV files must not contain binary null bytes", "INVALID_FILE_SIGNATURE");
+      }
+      if (detectedMagic !== null) {
+        throw new AppError(
+          400,
+          `Text/CSV file content matches disallowed binary signature (${detectedMagic})`,
+          "INVALID_FILE_SIGNATURE"
+        );
+      }
+      try {
+        UTF8_FATAL_DECODER.decode(buffer);
+      } catch {
+        throw new AppError(400, "Text/CSV files must be valid UTF-8 text", "INVALID_FILE_SIGNATURE");
       }
       break;
     }
@@ -320,6 +386,37 @@ export async function uploadAttachment(
   );
 
   const entityCtx = await assertEntityBelongsToCompany(db, actor, fields.entityType, fields.entityId);
+
+  const scanResult = await scanAttachmentBuffer(input.buffer, {
+    fileName: safeFileName,
+    mimeType: normalizedMime,
+    sizeBytes: input.buffer.length,
+  });
+  if (!scanResult.clean) {
+    await writeAuditLog(db, {
+      companyId: entityCtx.companyId,
+      userId: actor.id,
+      userName: actor.name,
+      userRole: actor.role,
+      branchId: entityCtx.branchId,
+      action: "attachment.malware_rejected",
+      entityType: fields.entityType,
+      entityId: fields.entityId,
+      entityLabel: safeFileName,
+      details: {
+        mimeType: normalizedMime,
+        sizeBytes: input.buffer.length,
+        scanner: scanResult.scanner,
+        threat: scanResult.threat ?? "unknown",
+      },
+      ipAddress,
+    });
+    throw new AppError(422, "Uploaded file failed virus screening and was rejected", "MALWARE_DETECTED", {
+      threat: scanResult.threat ?? "unknown",
+      scanner: scanResult.scanner,
+    });
+  }
+
   const storageKey = buildStorageKey(entityCtx.companyId, fields.entityType, fields.entityId, safeFileName);
   const stored = await putStorageObject(storageKey, input.buffer, normalizedMime);
 

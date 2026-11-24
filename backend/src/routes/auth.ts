@@ -37,10 +37,15 @@ import {
   revokeSessionByToken,
   setSessionCookie,
 } from "../auth/sessions.ts";
-import { env } from "../config.ts";
+import { env, getAuthHardeningConfig } from "../config.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { requireAuth } from "../middleware/auth.ts";
+import {
+  assertNotLocked,
+  clearAuthLockout,
+  recordFailedAuthAttempt,
+} from "../services/auth-lockout.service.ts";
 import { sendPasswordResetEmail } from "../services/email.service.ts";
 import {
   consumeMfaChallengeJti,
@@ -84,11 +89,46 @@ const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, "Password must be at least 8 characters").max(128),
 });
 
-export async function authRoutes(app: FastifyInstance): Promise<void> {
-  const authRateLimit =
-    env.NODE_ENV !== "test" && !env.DISABLE_RATE_LIMIT
-      ? { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } }
-      : {};
+export async function authRoutes(
+  app: FastifyInstance,
+  opts: { enableRateLimit?: boolean } = {}
+): Promise<void> {
+  const authCfg = getAuthHardeningConfig();
+  const rateLimitActive =
+    opts.enableRateLimit ?? (env.NODE_ENV !== "test" && !env.DISABLE_RATE_LIMIT);
+
+  const authRateLimit = rateLimitActive
+    ? {
+        config: {
+          rateLimit: {
+            max: authCfg.loginRateLimitMax,
+            timeWindow: authCfg.loginRateLimitWindowMs,
+          },
+        },
+      }
+    : {};
+
+  const mfaRateLimit = rateLimitActive
+    ? {
+        config: {
+          rateLimit: {
+            max: authCfg.mfaRateLimitMax,
+            timeWindow: authCfg.mfaRateLimitWindowMs,
+          },
+        },
+      }
+    : {};
+
+  const passwordResetRateLimit = rateLimitActive
+    ? {
+        config: {
+          rateLimit: {
+            max: authCfg.passwordResetRateLimitMax,
+            timeWindow: authCfg.passwordResetRateLimitWindowMs,
+          },
+        },
+      }
+    : {};
 
   app.get("/api/auth/me", async (req) => {
     if (!req.authUser) {
@@ -241,18 +281,23 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const { email, password } = parsed.data;
     const db = getDb();
 
+    await assertNotLocked(db, "login", email);
+
     const [userRow] = await db.select().from(users).where(eq(users.email, email)).limit(1);
     const valid = userRow
       ? await verifyPassword(password, userRow.passwordHash)
       : await verifyPassword(password, DUMMY_PASSWORD_HASH).then(() => false);
 
     if (!userRow || !valid) {
+      await recordFailedAuthAttempt(db, "login", email);
       throw new AppError(401, "Invalid email or password", "INVALID_CREDENTIALS");
     }
 
     if (!userRow.isActive) {
       throw new AppError(403, "This account has been deactivated. Please contact an administrator.", "ACCOUNT_DISABLED");
     }
+
+    await clearAuthLockout(db, "login", email);
 
     const [mfaRow] = await db
       .select({ isEnabled: userMfa.isEnabled })
@@ -300,85 +345,138 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return { user: authUser };
   });
 
-  app.post("/api/auth/mfa/verify-login", authRateLimit, async (req, reply) => {
+  app.post("/api/auth/mfa/verify-login", mfaRateLimit, async (req, reply) => {
     const parsed = parseOrThrow(mfaVerifyLoginSchema, req.body, "Invalid MFA verification payload");
     const challenge = verifyMfaChallengeToken(parsed.mfaChallengeToken);
     const db = getDb();
 
-    const { authUser, rawToken } = await db.transaction(async (tx) => {
-      const [userRow] = await tx
-        .select()
-        .from(users)
-        .where(eq(users.id, challenge.userId))
-        .limit(1);
+    await assertNotLocked(db, "mfa_login", challenge.userId);
 
-      if (!userRow || !userRow.isActive) {
-        throw new AppError(403, "Account inactive or unavailable", "ACCOUNT_DISABLED");
-      }
+    let result: { authUser: Awaited<ReturnType<typeof loadAuthUserById>>; rawToken: string };
+    try {
+      result = await db.transaction(async (tx) => {
+        const [userRow] = await tx
+          .select()
+          .from(users)
+          .where(eq(users.id, challenge.userId))
+          .limit(1);
 
-      const mfaResult = await verifyMfaCodeOrRecovery(tx, userRow.id, parsed.code);
-      consumeMfaChallengeJti(challenge.jti, challenge.exp);
+        if (!userRow || !userRow.isActive) {
+          throw new AppError(403, "Account inactive or unavailable", "ACCOUNT_DISABLED");
+        }
 
-      await ensureSeededDefaults(tx);
-      const primaryCompanyId =
-        (await resolvePrimaryCompanyIdForUser(tx, userRow.id)) ?? DEFAULT_COMPANY_ID;
-      const loadedUser = await loadAuthUserById(tx, userRow.id, primaryCompanyId);
-      if (!loadedUser) {
-        throw new AppError(403, "Account inactive or unavailable", "ACCOUNT_DISABLED");
-      }
+        const mfaResult = await verifyMfaCodeOrRecovery(tx, userRow.id, parsed.code);
+        consumeMfaChallengeJti(challenge.jti, challenge.exp);
 
-      const session = await createSessionRecord(tx, {
-        userId: userRow.id,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"] ?? null,
-        activeCompanyId: loadedUser.activeCompanyId,
+        await ensureSeededDefaults(tx);
+        const primaryCompanyId =
+          (await resolvePrimaryCompanyIdForUser(tx, userRow.id)) ?? DEFAULT_COMPANY_ID;
+        const loadedUser = await loadAuthUserById(tx, userRow.id, primaryCompanyId);
+        if (!loadedUser) {
+          throw new AppError(403, "Account inactive or unavailable", "ACCOUNT_DISABLED");
+        }
+
+        const session = await createSessionRecord(tx, {
+          userId: userRow.id,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"] ?? null,
+          activeCompanyId: loadedUser.activeCompanyId,
+        });
+
+        await writeAuditLog(tx, {
+          companyId: loadedUser.activeCompanyId,
+          userId: loadedUser.id,
+          userName: loadedUser.name,
+          userRole: loadedUser.role,
+          action: "auth.login",
+          entityType: "user",
+          entityId: loadedUser.id,
+          entityLabel: loadedUser.email,
+          details: { mfaMethod: mfaResult.method },
+          ipAddress: req.ip,
+        });
+
+        return { authUser: loadedUser, rawToken: session.rawToken };
       });
+    } catch (err) {
+      if (err instanceof AppError && err.code === "INVALID_MFA_CODE") {
+        await recordFailedAuthAttempt(db, "mfa_login", challenge.userId);
+      }
+      throw err;
+    }
 
-      await writeAuditLog(tx, {
-        companyId: loadedUser.activeCompanyId,
-        userId: loadedUser.id,
-        userName: loadedUser.name,
-        userRole: loadedUser.role,
-        action: "auth.login",
-        entityType: "user",
-        entityId: loadedUser.id,
-        entityLabel: loadedUser.email,
-        details: { mfaMethod: mfaResult.method },
-        ipAddress: req.ip,
-      });
-
-      return { authUser: loadedUser, rawToken: session.rawToken };
-    });
-
-    setSessionCookie(reply, rawToken);
-    return { user: authUser };
+    await clearAuthLockout(db, "mfa_login", challenge.userId);
+    setSessionCookie(reply, result.rawToken);
+    return { user: result.authUser };
   });
 
   app.get("/api/auth/mfa/status", { preHandler: requireAuth }, async (req) => {
     return getMfaStatus(getDb(), req.authUser!.id);
   });
 
-  app.post("/api/auth/mfa/enroll", { preHandler: requireAuth }, async (req) => {
+  app.post("/api/auth/mfa/enroll", { preHandler: requireAuth, ...mfaRateLimit }, async (req) => {
     return enrollMfa(getDb(), req.authUser!, req.ip);
   });
 
-  app.post("/api/auth/mfa/verify", { preHandler: requireAuth }, async (req) => {
+  app.post("/api/auth/mfa/verify", { preHandler: requireAuth, ...mfaRateLimit }, async (req) => {
     const parsed = parseOrThrow(mfaVerifyEnrollSchema, req.body, "Invalid TOTP verification code");
-    return verifyMfaEnrollment(getDb(), req.authUser!, parsed.code, req.ip);
+    const db = getDb();
+    const actor = req.authUser!;
+    await assertNotLocked(db, "mfa_enroll_verify", actor.id);
+    try {
+      const res = await verifyMfaEnrollment(db, actor, parsed.code, req.ip);
+      await clearAuthLockout(db, "mfa_enroll_verify", actor.id);
+      return res;
+    } catch (err) {
+      if (err instanceof AppError && err.code === "INVALID_MFA_CODE") {
+        await recordFailedAuthAttempt(db, "mfa_enroll_verify", actor.id);
+      }
+      throw err;
+    }
   });
 
-  app.post("/api/auth/mfa/disable", { preHandler: requireAuth }, async (req) => {
+  app.post("/api/auth/mfa/disable", { preHandler: requireAuth, ...mfaRateLimit }, async (req) => {
     const parsed = parseOrThrow(mfaDisableSchema, req.body, "Invalid MFA disable payload");
-    return disableMfa(getDb(), req.authUser!, parsed, req.ip);
+    const db = getDb();
+    const actor = req.authUser!;
+    await assertNotLocked(db, "mfa_disable", actor.id);
+    try {
+      const res = await disableMfa(db, actor, parsed, req.ip);
+      await clearAuthLockout(db, "mfa_disable", actor.id);
+      return res;
+    } catch (err) {
+      if (
+        err instanceof AppError &&
+        (err.code === "INVALID_PASSWORD" || err.code === "INVALID_MFA_CODE")
+      ) {
+        await recordFailedAuthAttempt(db, "mfa_disable", actor.id);
+      }
+      throw err;
+    }
   });
 
-  app.post("/api/auth/mfa/recovery-codes", { preHandler: requireAuth }, async (req) => {
+  app.post("/api/auth/mfa/recovery-codes", { preHandler: requireAuth, ...mfaRateLimit }, async (req) => {
     const parsed = parseOrThrow(
       mfaRegenerateRecoveryCodesSchema,
       req.body,
       "Current password or verification code is required."
     );
-    return regenerateMfaRecoveryCodes(getDb(), req.authUser!, parsed, req.ip);
+    const db = getDb();
+    const actor = req.authUser!;
+    await assertNotLocked(db, "mfa_recovery", actor.id);
+    try {
+      const res = await regenerateMfaRecoveryCodes(db, actor, parsed, req.ip);
+      await clearAuthLockout(db, "mfa_recovery", actor.id);
+      return res;
+    } catch (err) {
+      if (
+        err instanceof AppError &&
+        (err.code === "INVALID_PASSWORD" || err.code === "INVALID_MFA_CODE")
+      ) {
+        await recordFailedAuthAttempt(db, "mfa_recovery", actor.id);
+      }
+      throw err;
+    }
   });
 
   app.post("/api/auth/switch-company", { preHandler: requireAuth }, async (req) => {
@@ -658,13 +756,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true };
   });
 
-  app.post("/api/auth/forgot-password", authRateLimit, async (req) => {
+  app.post("/api/auth/forgot-password", passwordResetRateLimit, async (req) => {
     const parsed = forgotPasswordSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues[0]?.message ?? "Valid email is required", "VALIDATION_ERROR");
     }
 
     const db = getDb();
+    await assertNotLocked(db, "forgot_password", parsed.data.email);
+    await recordFailedAuthAttempt(db, "forgot_password", parsed.data.email);
+
     const [userRow] = await db
       .select({ id: users.id, email: users.email, isActive: users.isActive })
       .from(users)
@@ -695,64 +796,75 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.post("/api/auth/reset-password", authRateLimit, async (req) => {
+  app.post("/api/auth/reset-password", passwordResetRateLimit, async (req) => {
     const parsed = resetPasswordSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid reset request", "VALIDATION_ERROR");
     }
 
     const db = getDb();
+    const lockoutKey = req.ip || "unknown";
+    await assertNotLocked(db, "password_reset", lockoutKey);
+
     const tokenHash = hashToken(parsed.data.token);
 
-    await db.transaction(async (tx) => {
-      const [tokenRow] = await tx
-        .select()
-        .from(passwordResetTokens)
-        .where(
-          and(
-            eq(passwordResetTokens.tokenHash, tokenHash),
-            isNull(passwordResetTokens.usedAt),
-            gt(passwordResetTokens.expiresAt, new Date())
+    try {
+      await db.transaction(async (tx) => {
+        const [tokenRow] = await tx
+          .select()
+          .from(passwordResetTokens)
+          .where(
+            and(
+              eq(passwordResetTokens.tokenHash, tokenHash),
+              isNull(passwordResetTokens.usedAt),
+              gt(passwordResetTokens.expiresAt, new Date())
+            )
           )
-        )
-        .limit(1);
+          .limit(1);
 
-      if (!tokenRow) {
-        throw new AppError(400, "Reset token is invalid or has expired", "INVALID_RESET_TOKEN");
-      }
+        if (!tokenRow) {
+          throw new AppError(400, "Reset token is invalid or has expired", "INVALID_RESET_TOKEN");
+        }
 
-      const [userRow] = await tx.select().from(users).where(eq(users.id, tokenRow.userId)).limit(1);
-      if (!userRow) {
-        throw new AppError(404, "User account not found", "NOT_FOUND");
-      }
+        const [userRow] = await tx.select().from(users).where(eq(users.id, tokenRow.userId)).limit(1);
+        if (!userRow) {
+          throw new AppError(404, "User account not found", "NOT_FOUND");
+        }
 
-      const newHash = await hashPassword(parsed.data.newPassword);
-      await tx
-        .update(users)
-        .set({ passwordHash: newHash, updatedAt: new Date() })
-        .where(eq(users.id, userRow.id));
+        const newHash = await hashPassword(parsed.data.newPassword);
+        await tx
+          .update(users)
+          .set({ passwordHash: newHash, updatedAt: new Date() })
+          .where(eq(users.id, userRow.id));
 
-      await tx
-        .update(passwordResetTokens)
-        .set({ usedAt: new Date() })
-        .where(eq(passwordResetTokens.id, tokenRow.id));
+        await tx
+          .update(passwordResetTokens)
+          .set({ usedAt: new Date() })
+          .where(eq(passwordResetTokens.id, tokenRow.id));
 
-      await tx
-        .update(userSessions)
-        .set({ revokedAt: new Date() })
-        .where(and(eq(userSessions.userId, userRow.id), isNull(userSessions.revokedAt)));
+        await tx
+          .update(userSessions)
+          .set({ revokedAt: new Date() })
+          .where(and(eq(userSessions.userId, userRow.id), isNull(userSessions.revokedAt)));
 
-      await writeAuditLog(tx, {
-        userId: userRow.id,
-        userName: userRow.name,
-        action: "auth.password_reset",
-        entityType: "user",
-        entityId: userRow.id,
-        entityLabel: userRow.email,
-        ipAddress: req.ip,
+        await writeAuditLog(tx, {
+          userId: userRow.id,
+          userName: userRow.name,
+          action: "auth.password_reset",
+          entityType: "user",
+          entityId: userRow.id,
+          entityLabel: userRow.email,
+          ipAddress: req.ip,
+        });
       });
-    });
+    } catch (err) {
+      if (err instanceof AppError && err.code === "INVALID_RESET_TOKEN") {
+        await recordFailedAuthAttempt(db, "password_reset", lockoutKey);
+      }
+      throw err;
+    }
 
+    await clearAuthLockout(db, "password_reset", lockoutKey);
     return { ok: true };
   });
 }

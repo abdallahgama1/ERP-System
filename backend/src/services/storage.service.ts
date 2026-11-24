@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -73,20 +73,13 @@ export function assertSafeStorageKey(rawKey: string): string {
 }
 
 export function buildStorageKey(
-  companyId: string,
-  entityType: string,
-  entityId: string,
-  fileName: string
+  _companyId?: string,
+  _entityType?: string,
+  _entityId?: string,
+  _fileName?: string
 ): string {
-  const safeCompany = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
-  const safeEntity = entityType.replace(/[^a-zA-Z0-9_-]/g, "");
-  const safeEntityId = entityId.replace(/[^a-zA-Z0-9_-]/g, "");
-  const ext = path.posix
-    .extname(sanitizeFileName(fileName))
-    .toLowerCase()
-    .replace(/[^a-z0-9.]/g, "")
-    .slice(0, 16);
-  const key = `${safeCompany}/${safeEntity}/${safeEntityId}/${randomUUID()}${ext}`;
+  const token = randomBytes(24).toString("hex");
+  const key = `objects/${token.slice(0, 2)}/${token.slice(2, 4)}/${token}`;
   return assertSafeStorageKey(key);
 }
 

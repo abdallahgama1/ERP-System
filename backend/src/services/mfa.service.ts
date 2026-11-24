@@ -14,7 +14,7 @@ import { userMfa, users } from "../../drizzle/schema.ts";
 import type { DbOrTx } from "../auth/permissions.ts";
 import { verifyPassword } from "../auth/password.ts";
 import type { AuthUser } from "../auth/sessions.ts";
-import { env, resolveMfaEncryptionKey } from "../config.ts";
+import { env, resolveMfaKeyRing } from "../config.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 
@@ -152,8 +152,7 @@ export function maskTotpSecret(secretBase32: string): string {
   return `${secretBase32.slice(0, 4)}••••••••${secretBase32.slice(-4)}`;
 }
 
-export function encryptMfaSecret(plaintextSecret: string): string {
-  const key = resolveMfaEncryptionKey();
+export function encryptMfaSecretWithKey(plaintextSecret: string, key: Buffer): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const encrypted = Buffer.concat([cipher.update(plaintextSecret, "utf8"), cipher.final()]);
@@ -161,7 +160,29 @@ export function encryptMfaSecret(plaintextSecret: string): string {
   return `v1:${iv.toString("base64")}:${tag.toString("base64")}:${encrypted.toString("base64")}`;
 }
 
-export function decryptMfaSecret(payload: string): string {
+export function encryptMfaSecretWithVersion(plaintextSecret: string): {
+  ciphertext: string;
+  keyVersion: number;
+} {
+  const ring = resolveMfaKeyRing();
+  return {
+    ciphertext: encryptMfaSecretWithKey(plaintextSecret, ring.currentKey),
+    keyVersion: ring.currentVersion,
+  };
+}
+
+export function encryptMfaSecret(plaintextSecret: string): string {
+  return encryptMfaSecretWithVersion(plaintextSecret).ciphertext;
+}
+
+function decryptWithKey(iv: Buffer, tag: Buffer, ciphertext: Buffer, key: Buffer): string {
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return decrypted.toString("utf8");
+}
+
+export function decryptMfaSecret(payload: string, keyVersion?: number): string {
   const parts = payload.split(":");
   if (parts.length !== 4 || parts[0] !== "v1") {
     throw new AppError(500, "Malformed encrypted MFA secret payload", "INVALID_MFA_CIPHERTEXT");
@@ -175,11 +196,41 @@ export function decryptMfaSecret(payload: string): string {
     throw new AppError(500, "Invalid MFA ciphertext metadata", "INVALID_MFA_CIPHERTEXT");
   }
 
-  const key = resolveMfaEncryptionKey();
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return decrypted.toString("utf8");
+  const ring = resolveMfaKeyRing();
+
+  if (keyVersion !== undefined) {
+    const exactKey = ring.keys.get(keyVersion);
+    if (!exactKey) {
+      throw new AppError(
+        500,
+        `MFA encryption key version ${keyVersion} is not configured in the active key ring`,
+        "MFA_KEY_VERSION_MISSING"
+      );
+    }
+    try {
+      return decryptWithKey(iv, tag, ciphertext, exactKey);
+    } catch {
+      throw new AppError(500, "Failed to decrypt MFA secret with configured key", "MFA_DECRYPTION_FAILED");
+    }
+  }
+
+  // When no explicit keyVersion is provided, try current key first then any previous keys
+  const orderedKeys: Buffer[] = [ring.currentKey];
+  for (const [ver, key] of Array.from(ring.keys.entries()).sort((a, b) => b[0] - a[0])) {
+    if (ver !== ring.currentVersion) {
+      orderedKeys.push(key);
+    }
+  }
+
+  for (const key of orderedKeys) {
+    try {
+      return decryptWithKey(iv, tag, ciphertext, key);
+    } catch {
+      // try next key in ring
+    }
+  }
+
+  throw new AppError(500, "Failed to decrypt MFA secret with configured key ring", "MFA_DECRYPTION_FAILED");
 }
 
 export function normalizeRecoveryCode(code: string): string {
@@ -356,7 +407,7 @@ export async function enrollMfa(
   ipAddress?: string
 ): Promise<MfaEnrollResponseDto> {
   const secretBase32 = encodeBase32(randomBytes(20));
-  const encryptedSecret = encryptMfaSecret(secretBase32);
+  const { ciphertext: encryptedSecret, keyVersion } = encryptMfaSecretWithVersion(secretBase32);
   const recoveryCodes = generateRecoveryCodes(8);
   const recoveryCodesHashes = recoveryCodes.map(hashRecoveryCode);
   const now = new Date();
@@ -378,6 +429,7 @@ export async function enrollMfa(
         userId: actor.id,
         isEnabled: false,
         totpSecretEncrypted: encryptedSecret,
+        keyVersion,
         recoveryCodesHashes,
         enrolledAt: now,
         verifiedAt: null,
@@ -389,6 +441,7 @@ export async function enrollMfa(
         set: {
           isEnabled: false,
           totpSecretEncrypted: encryptedSecret,
+          keyVersion,
           recoveryCodesHashes,
           enrolledAt: now,
           verifiedAt: null,
@@ -431,8 +484,9 @@ export async function verifyMfaEnrollment(
       user_id: string;
       is_enabled: boolean;
       totp_secret_encrypted: string;
+      key_version: number;
     }>(sql`
-      SELECT user_id, is_enabled, totp_secret_encrypted
+      SELECT user_id, is_enabled, totp_secret_encrypted, key_version
       FROM user_mfa
       WHERE user_id = ${actor.id}
       FOR UPDATE
@@ -446,7 +500,7 @@ export async function verifyMfaEnrollment(
       throw new AppError(409, "Two-factor authentication is already verified", "MFA_ALREADY_ENABLED");
     }
 
-    const secret = decryptMfaSecret(mfaRow.totp_secret_encrypted);
+    const secret = decryptMfaSecret(mfaRow.totp_secret_encrypted, Number(mfaRow.key_version));
     if (!verifyTotp(secret, code)) {
       throw new AppError(400, "Invalid TOTP verification code", "INVALID_MFA_CODE");
     }
@@ -491,9 +545,10 @@ export async function verifyMfaCodeOrRecovery(
     user_id: string;
     is_enabled: boolean;
     totp_secret_encrypted: string;
+    key_version: number;
     recovery_codes_hashes: string[];
   }>(sql`
-    SELECT user_id, is_enabled, totp_secret_encrypted, recovery_codes_hashes
+    SELECT user_id, is_enabled, totp_secret_encrypted, key_version, recovery_codes_hashes
     FROM user_mfa
     WHERE user_id = ${userId}
     FOR UPDATE
@@ -504,7 +559,7 @@ export async function verifyMfaCodeOrRecovery(
     throw new AppError(400, "Two-factor authentication is not enabled for this account", "MFA_NOT_ENABLED");
   }
 
-  const secret = decryptMfaSecret(mfaRow.totp_secret_encrypted);
+  const secret = decryptMfaSecret(mfaRow.totp_secret_encrypted, Number(mfaRow.key_version));
   const now = new Date();
   const trimmed = code.trim();
 
@@ -680,4 +735,72 @@ export async function regenerateMfaRecoveryCodes(
   });
 
   return { recoveryCodes };
+}
+
+export interface MfaKeyRotationResult {
+  targetVersion: number;
+  scanned: number;
+  rotated: number;
+  skipped: number;
+  dryRun: boolean;
+}
+
+/**
+ * Re-encrypts all user_mfa rows whose key_version differs from the active
+ * MFA_ENCRYPTION_KEY_VERSION using the current MFA_ENCRYPTION_KEY.
+ * Requires the previous key versions to be configured via MFA_ENCRYPTION_PREVIOUS_KEYS.
+ */
+export async function rotateMfaEncryptionKeys(
+  db: AppDatabase,
+  options: { dryRun?: boolean } = {}
+): Promise<MfaKeyRotationResult> {
+  const dryRun = Boolean(options.dryRun);
+  const ring = resolveMfaKeyRing();
+  const targetVersion = ring.currentVersion;
+  const now = new Date();
+
+  return db.transaction(async (tx) => {
+    const rows = await tx.execute<{
+      user_id: string;
+      totp_secret_encrypted: string;
+      key_version: number;
+    }>(sql`
+      SELECT user_id, totp_secret_encrypted, key_version
+      FROM user_mfa
+      FOR UPDATE
+    `);
+
+    let rotated = 0;
+    let skipped = 0;
+
+    for (const row of rows) {
+      const rowVersion = Number(row.key_version);
+      if (rowVersion === targetVersion) {
+        skipped += 1;
+        continue;
+      }
+
+      const plaintext = decryptMfaSecret(row.totp_secret_encrypted, rowVersion);
+      if (!dryRun) {
+        const reEncrypted = encryptMfaSecretWithKey(plaintext, ring.currentKey);
+        await tx
+          .update(userMfa)
+          .set({
+            totpSecretEncrypted: reEncrypted,
+            keyVersion: targetVersion,
+            updatedAt: now,
+          })
+          .where(eq(userMfa.userId, row.user_id));
+      }
+      rotated += 1;
+    }
+
+    return {
+      targetVersion,
+      scanned: rows.length,
+      rotated,
+      skipped,
+      dryRun,
+    };
+  });
 }

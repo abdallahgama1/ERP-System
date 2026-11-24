@@ -6,6 +6,7 @@ import {
   text,
   boolean,
   integer,
+  bigint,
   numeric,
   timestamp,
   jsonb,
@@ -188,6 +189,7 @@ export const userMfa = pgTable("user_mfa", {
     .references(() => users.id, { onDelete: "cascade" }),
   isEnabled: boolean("is_enabled").notNull().default(false),
   totpSecretEncrypted: text("totp_secret_encrypted").notNull(),
+  keyVersion: integer("key_version").notNull().default(1),
   recoveryCodesHashes: jsonb("recovery_codes_hashes").$type<string[]>().notNull().default([]),
   enrolledAt: timestamp("enrolled_at", { withTimezone: true }),
   verifiedAt: timestamp("verified_at", { withTimezone: true }),
@@ -195,6 +197,22 @@ export const userMfa = pgTable("user_mfa", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
+
+export const authLockouts = pgTable(
+  "auth_lockouts",
+  {
+    scope: text("scope").notNull(),
+    identifier: text("identifier").notNull(),
+    failedAttempts: integer("failed_attempts").notNull().default(0),
+    firstFailedAt: timestamp("first_failed_at", { withTimezone: true }).defaultNow().notNull(),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.scope, t.identifier] }),
+    index("auth_lockouts_locked_until_idx").on(t.lockedUntil),
+  ]
+);
 
 export const userRoles = pgTable(
   "user_roles",
@@ -367,6 +385,9 @@ export const auditLogs = pgTable(
     afterJson: jsonb("after_json").$type<Record<string, unknown> | null>(),
     changedFields: jsonb("changed_fields").$type<string[]>().notNull().default([]),
     ipAddress: text("ip_address"),
+    chainSeq: bigint("chain_seq", { mode: "number" }),
+    prevHash: text("prev_hash"),
+    entryHash: text("entry_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
@@ -377,6 +398,7 @@ export const auditLogs = pgTable(
     index("audit_logs_entity_created_id_idx").on(t.entityType, t.createdAt, t.id),
     index("audit_logs_branch_created_id_idx").on(t.branchId, t.createdAt, t.id),
     index("audit_logs_company_created_id_idx").on(t.companyId, t.createdAt, t.id),
+    uniqueIndex("audit_logs_company_chain_seq_uq").on(t.companyId, t.chainSeq),
   ]
 );
 
