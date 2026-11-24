@@ -2,7 +2,7 @@
 
 The single authoritative handbook for **Count It Keep It ERP**: covering system/container architecture, local development (native hot-reload and local Docker Compose), production VPS + Managed PostgreSQL deployment, GitHub Actions CI/CD, day-to-day container control, backups/restore, third-party integrations, and troubleshooting.
 
-> **Quick links:** [Repository README](../README.md) · [Production Deployment Runbook](./PRODUCTION_DEPLOYMENT_RUNBOOK.md) · [Verification Walkthrough](./WALKTHROUGH.md)
+> **Quick links:** [Repository README](../README.md) · [Production Deployment Runbook](./PRODUCTION_DEPLOYMENT_RUNBOOK.md) · [Backup, Restore & Rollback Guide](./BACKUP_RESTORE_AND_ROLLBACK.md) · [Verification Walkthrough](./WALKTHROUGH.md)
 
 ---
 

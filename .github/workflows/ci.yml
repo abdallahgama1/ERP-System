@@ -60,6 +60,15 @@ jobs:
       - name: Run Vitest unit & integration suite
         run: npm test
 
+      - name: Run PostgreSQL backup/restore & migration 0007 upgrade verification
+        env:
+          RESTORE_TEST_ADMIN_URL: postgresql://erp:erp_ci_password@127.0.0.1:5432/postgres
+        run: |
+          if ! command -v pg_dump >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          fi
+          npm run test:restore
+
       - name: Build production bundle
         run: npm run build
 
@@ -202,6 +211,7 @@ jobs:
             -e RUN_MIGRATIONS=true \
             -e DATABASE_URL=postgresql://erp:erp_ci_password@127.0.0.1:5432/erp_test \
             -e AUTH_COOKIE_SECRET=ci-test-cookie-secret-at-least-32-characters-long \
+            -e MFA_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
             count-it-keep-it-backend:ci
 
           for i in $(seq 1 30); do
@@ -222,7 +232,7 @@ jobs:
         run: docker rm -f erp-backend-smoke || true
 
       - name: Trivy scan backend image (fail on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: count-it-keep-it-backend:ci
           format: table
@@ -231,7 +241,7 @@ jobs:
           exit-code: "1"
 
       - name: Trivy scan backend image (report HIGH)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: count-it-keep-it-backend:ci
           format: table
@@ -240,7 +250,7 @@ jobs:
           exit-code: "0"
 
       - name: Trivy scan frontend image (fail on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: count-it-keep-it-frontend:ci
           format: table
@@ -249,7 +259,7 @@ jobs:
           exit-code: "1"
 
       - name: Trivy scan frontend image (report HIGH)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: count-it-keep-it-frontend:ci
           format: table

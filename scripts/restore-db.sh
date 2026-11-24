@@ -3,10 +3,12 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/restore-db.sh [--yes|-y] <backup-file>
+Usage: scripts/restore-db.sh [--yes|-y] [--uploads <uploads.tar.gz>] [--uploads-volume <vol> | --uploads-dir <dir>] <backup-file>
 
 Restores a PostgreSQL backup (.dump, .sql.gz, or .sql) into TARGET_DATABASE_URL
-or DATABASE_URL. Verifies SHA-256 checksum and archive integrity before restoring.
+or DATABASE_URL, and optionally restores a companion erp_uploads (.tar.gz) archive
+into a Docker volume or local directory. Verifies SHA-256 checksums and archive
+integrity before performing any destructive restore.
 
 Safety guards (one required to proceed with destructive --clean restore):
   --yes / -y             Skip interactive prompt
@@ -16,17 +18,37 @@ Safety guards (one required to proceed with destructive --clean restore):
 Required environment variable:
   TARGET_DATABASE_URL    Target PostgreSQL URL (falls back to DATABASE_URL in env;
                          intentionally does NOT auto-read backend/.env)
+
+Optional uploads restore options/env vars:
+  --uploads <file>       Companion erp_uploads_*.tar.gz archive (or UPLOADS_ARCHIVE)
+  --uploads-volume <vol> Target Docker volume name (or UPLOADS_VOLUME; auto-detects *erp_uploads)
+  --uploads-dir <dir>    Target host directory (or STORAGE_LOCAL_DIR)
 EOF
 }
 
 AUTO_YES=false
 BACKUP_FILE=""
+UPLOADS_ARCHIVE="${UPLOADS_ARCHIVE:-}"
+UPLOADS_VOLUME="${UPLOADS_VOLUME:-}"
+UPLOADS_DIR="${STORAGE_LOCAL_DIR:-}"
 
 while (( $# > 0 )); do
   case "$1" in
     --yes|-y)
       AUTO_YES=true
       shift
+      ;;
+    --uploads)
+      UPLOADS_ARCHIVE="${2:-}"
+      shift 2
+      ;;
+    --uploads-volume)
+      UPLOADS_VOLUME="${2:-}"
+      shift 2
+      ;;
+    --uploads-dir)
+      UPLOADS_DIR="${2:-}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -122,10 +144,37 @@ case "$BACKUP_FILE" in
     ;;
 esac
 
+if [[ -n "$UPLOADS_ARCHIVE" ]]; then
+  if [[ ! -f "$UPLOADS_ARCHIVE" || ! -s "$UPLOADS_ARCHIVE" ]]; then
+    echo "Error: uploads archive does not exist or is empty: $UPLOADS_ARCHIVE" >&2
+    exit 1
+  fi
+  UPLOADS_SHA_FILE="${UPLOADS_ARCHIVE}.sha256"
+  if [[ ! -f "$UPLOADS_SHA_FILE" ]]; then
+    echo "Error: uploads checksum file missing: $UPLOADS_SHA_FILE" >&2
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    (
+      cd "$(dirname "$UPLOADS_ARCHIVE")"
+      sha256sum -c "$(basename "$UPLOADS_SHA_FILE")"
+    )
+  else
+    (
+      cd "$(dirname "$UPLOADS_ARCHIVE")"
+      shasum -a 256 -c "$(basename "$UPLOADS_SHA_FILE")"
+    )
+  fi
+  gzip -t "$UPLOADS_ARCHIVE"
+fi
+
 REDACTED_TARGET="$(printf '%s' "$TARGET_URL" | sed -E 's#(postgres(ql)?://[^:/@]+):[^@]+@#\1:[REDACTED]@#')"
 
 echo "WARNING: Destructive restore (--clean --if-exists) about to run:"
 echo "  Backup: $BACKUP_FILE"
+if [[ -n "$UPLOADS_ARCHIVE" ]]; then
+  echo "  Uploads: $UPLOADS_ARCHIVE"
+fi
 echo "  Target: $REDACTED_TARGET"
 echo "  Tip:    Stop backend containers/workers first (e.g., docker compose -f docker-compose.prod.yml stop backend)."
 
@@ -161,5 +210,31 @@ case "$FORMAT" in
     psql -v ON_ERROR_STOP=1 --single-transaction "$TARGET_URL" -f "$BACKUP_FILE"
     ;;
 esac
+
+if [[ -n "$UPLOADS_ARCHIVE" ]]; then
+  UPLOADS_ARCHIVE_ABS="$(cd "$(dirname "$UPLOADS_ARCHIVE")" && pwd)/$(basename "$UPLOADS_ARCHIVE")"
+  if [[ -n "$UPLOADS_DIR" ]]; then
+    echo "Restoring uploads archive into local directory '$UPLOADS_DIR'..."
+    mkdir -p "$UPLOADS_DIR"
+    find "$UPLOADS_DIR" -mindepth 1 -delete
+    tar -xzf "$UPLOADS_ARCHIVE_ABS" -C "$UPLOADS_DIR"
+  else
+    RESOLVED_VOLUME="$UPLOADS_VOLUME"
+    if [[ -z "$RESOLVED_VOLUME" ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+      RESOLVED_VOLUME="$(docker volume ls --format '{{.Name}}' | grep -E '(^|_)erp_uploads$' | head -n 1 || true)"
+    fi
+    if [[ -z "$RESOLVED_VOLUME" ]]; then
+      echo "Error: specify --uploads-volume <vol> or --uploads-dir <dir> to restore $UPLOADS_ARCHIVE." >&2
+      exit 1
+    fi
+    echo "Restoring uploads archive into Docker volume '$RESOLVED_VOLUME'..."
+    docker run --rm \
+      -v "${RESOLVED_VOLUME}:/uploads" \
+      -v "$(dirname "$UPLOADS_ARCHIVE_ABS"):/backups:ro" \
+      alpine:3.21 \
+      sh -c "find /uploads -mindepth 1 -delete && tar -xzf \"/backups/$(basename "$UPLOADS_ARCHIVE_ABS")\" -C /uploads"
+  fi
+  echo "Uploads archive restored successfully."
+fi
 
 echo "Database restore completed successfully into $REDACTED_TARGET"

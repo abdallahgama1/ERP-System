@@ -2,7 +2,7 @@
 
 This runbook covers production provisioning, deployment, backup/restore, rollback, and observability for **Count It Keep It ERP** on a single VPS (Docker Compose + Caddy automatic HTTPS) backed by Managed PostgreSQL (Neon or AWS RDS with Point-In-Time Recovery).
 
-> **Looking for the all-in-one handbook?** See **[docs/SETUP_AND_OPERATIONS_GUIDE.md](./SETUP_AND_OPERATIONS_GUIDE.md)** for **Local Development Setup** (native + Docker Compose), **Production VPS Setup**, **Container Control Commands**, **Background Workers**, and **Troubleshooting** in one document.
+> **Looking for the all-in-one handbook?** See **[docs/SETUP_AND_OPERATIONS_GUIDE.md](./SETUP_AND_OPERATIONS_GUIDE.md)** for **Local Development Setup** (native + Docker Compose), **Production VPS Setup**, **Container Control Commands**, **Background Workers**, and **Troubleshooting** in one document. For **pg_dump + `erp_uploads` volume backups, automated restore testing, and Migration 0007 rollback**, see **[docs/BACKUP_RESTORE_AND_ROLLBACK.md](./BACKUP_RESTORE_AND_ROLLBACK.md)**.
 
 ---
 
@@ -23,6 +23,7 @@ Internet (HTTPS :443 / HTTP :80)
 
 - **No Redis required**: Background schedulers (overdue & lot-expiry sweep, DB housekeeping, ETA e-Receipt retry worker) coordinate via PostgreSQL advisory locks.
 - **Compiled backend runtime**: `backend/Dockerfile` compiles `backend/src/index.ts` → `backend/dist/server.mjs` and `backend/src/db/migrate.ts` → `backend/dist/migrate.mjs` (`esbuild`), then installs production-only dependencies (`npm ci --omit=dev`) under non-root user `node`.
+- **Deprecated legacy RBAC endpoints**: `GET /api/roles/permissions` (requires `roles.view`) and `PUT /api/roles/permissions` (admin-only) are **deprecated** (`Deprecation: true` header) and retained only for backward compatibility; use `/api/custom-roles` for role management.
 
 ---
 
