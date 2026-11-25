@@ -128,7 +128,8 @@
       "costCenters": "Cost Centers",
       "journalEntries": "Journal Entries",
       "fiscalPeriods": "Fiscal Periods",
-      "financialStatements": "Financial Statements"
+      "financialStatements": "Financial Statements",
+      "fixedAssets": "Fixed Assets"
     },
     "treasury": {
       "accounts": "Treasury & Bank"

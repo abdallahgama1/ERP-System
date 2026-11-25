@@ -72,6 +72,7 @@ const QUICK_NAV_ITEMS: readonly QuickNavItem[] = [
   { id: "accounts", labelKey: "nav.accounting.accounts", fallbackLabel: "Chart of Accounts", route: "/accounting/accounts", keywords: "coa gl", module: "accounting", icon: BookOpen },
   { id: "cost-centers", labelKey: "nav.accounting.costCenters", fallbackLabel: "Cost Centers", route: "/accounting/cost-centers", keywords: "cost center department dimension", module: "accounting", icon: Target },
   { id: "journals", labelKey: "nav.accounting.journalEntries", fallbackLabel: "Journal Entries", route: "/accounting/journal-entries", keywords: "je ledger", module: "accounting", icon: BookOpen },
+  { id: "fixed-assets", labelKey: "nav.accounting.fixedAssets", fallbackLabel: "Fixed Assets", route: "/accounting/fixed-assets", keywords: "depreciation capex asset disposal", module: "fixed_assets", icon: Building2 },
   { id: "treasury", labelKey: "nav.treasury.accounts", fallbackLabel: "Treasury & Bank", route: "/treasury/accounts", keywords: "bank cashbox transfer reconciliation statement", module: "treasury", icon: Landmark },
   { id: "expenses", labelKey: "nav.expenses", fallbackLabel: "Operating Expenses", route: "/expenses", keywords: "petty cash reimbursement expense claim", module: "expenses", icon: Receipt },
   { id: "approvals", labelKey: "nav.admin.approvals", fallbackLabel: "Approvals", route: "/approvals", keywords: "workflow approve", module: "approvals", icon: FileCheck },

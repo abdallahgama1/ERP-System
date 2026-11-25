@@ -31,6 +31,7 @@ import { einvoicingRoutes } from "./routes/einvoicing.ts";
 import { eventRoutes } from "./routes/events.ts";
 import { expensesRoutes } from "./routes/expenses.ts";
 import { exportRoutes } from "./routes/exports.ts";
+import { fixedAssetsRoutes } from "./routes/fixed-assets.ts";
 import { inventoryRoutes } from "./routes/inventory.ts";
 import { manufacturingRoutes } from "./routes/manufacturing.ts";
 import { notificationRoutes } from "./routes/notifications.ts";
@@ -330,6 +331,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(accountingRoutes);
   await app.register(treasuryRoutes);
   await app.register(expensesRoutes);
+  await app.register(fixedAssetsRoutes);
   await app.register(approvalRoutes);
   await app.register(trackingRoutes);
   await app.register(manufacturingRoutes);

@@ -1,13 +1,19 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AccountTypeShared,
+  CashFlowStatementDto,
   CostCenterDto,
   FiscalPeriodStatusShared,
+  FxRevaluationPreviewDto,
+  FxRevaluationResultDto,
   GlMappingKey,
   JournalEntryStatusShared,
   NormalBalanceShared,
   OffsetPageInfo,
+  VatReturnReportDto,
+  YearEndCloseResultDto,
   createCostCenterSchema,
+  runFxRevaluationSchema,
   updateCostCenterSchema,
 } from "@erp/shared";
 import type { z } from "zod";
@@ -108,6 +114,9 @@ export interface TrialBalanceResponse {
 
 export interface StatementAccountRowDto extends TrialBalanceRowDto {
   balance: number;
+  priorBalance?: number;
+  variance?: number;
+  variancePct?: number | null;
 }
 
 export interface ProfitLossResponse {
@@ -118,6 +127,19 @@ export interface ProfitLossResponse {
   grossProfit: number;
   operatingExpenses: number;
   netIncome: number;
+  comparative?: {
+    fromDate: string | null;
+    toDate: string | null;
+    totalRevenue: number;
+    cogsTotal: number;
+    grossProfit: number;
+    operatingExpenses: number;
+    netIncome: number;
+    revenueVariance: number;
+    revenueVariancePct: number | null;
+    netIncomeVariance: number;
+    netIncomeVariancePct: number | null;
+  };
 }
 
 export interface BalanceSheetResponse {
@@ -179,6 +201,8 @@ export interface ReportFilterParams {
   fromDate?: string;
   toDate?: string;
   asOfDate?: string;
+  compareFromDate?: string;
+  compareToDate?: string;
   branchId?: string;
   costCenterId?: string;
 }
@@ -206,7 +230,8 @@ export function useAccountsQuery(enabled = true) {
       (can("accounting", "view") ||
         can("settings", "view") ||
         can("treasury", "view") ||
-        can("expenses", "view")),
+        can("expenses", "view") ||
+        can("fixed_assets", "view")),
   });
 }
 
@@ -352,6 +377,8 @@ export function useProfitLossQuery(filters?: ReportFilterParams, enabled = true)
       : {}),
     ...(filters?.fromDate ? { fromDate: filters.fromDate } : {}),
     ...(filters?.toDate ? { toDate: filters.toDate } : {}),
+    ...(filters?.compareFromDate ? { compareFromDate: filters.compareFromDate } : {}),
+    ...(filters?.compareToDate ? { compareToDate: filters.compareToDate } : {}),
   };
   return useQuery({
     queryKey: erpQueryKeys.accounting.statement("profit-loss", params),
@@ -360,6 +387,55 @@ export function useProfitLossQuery(filters?: ReportFilterParams, enabled = true)
         `/api/accounting/reports/profit-loss${toQueryString(params)}`
       ),
     enabled: Boolean(user) && enabled && can("accounting", "view"),
+  });
+}
+
+export function useCashFlowQuery(filters?: ReportFilterParams, enabled = true) {
+  const { user } = useAuth();
+  const { can } = usePermissions();
+  const params = {
+    ...(filters?.branchId && filters.branchId !== "all" ? { branchId: filters.branchId } : {}),
+    ...(filters?.fromDate ? { fromDate: filters.fromDate } : {}),
+    ...(filters?.toDate ? { toDate: filters.toDate } : {}),
+  };
+  return useQuery({
+    queryKey: erpQueryKeys.accounting.statement("cash-flow", params),
+    queryFn: () =>
+      apiRequest<CashFlowStatementDto>(
+        `/api/accounting/reports/cash-flow${toQueryString(params)}`
+      ),
+    enabled: Boolean(user) && enabled && can("accounting", "view"),
+  });
+}
+
+export function useVatReturnQuery(filters?: ReportFilterParams, enabled = true) {
+  const { user } = useAuth();
+  const { can } = usePermissions();
+  const params = {
+    ...(filters?.branchId && filters.branchId !== "all" ? { branchId: filters.branchId } : {}),
+    ...(filters?.fromDate ? { fromDate: filters.fromDate } : {}),
+    ...(filters?.toDate ? { toDate: filters.toDate } : {}),
+  };
+  return useQuery({
+    queryKey: erpQueryKeys.accounting.statement("vat-return", params),
+    queryFn: () =>
+      apiRequest<VatReturnReportDto>(
+        `/api/accounting/reports/vat-return${toQueryString(params)}`
+      ),
+    enabled: Boolean(user) && enabled && can("accounting", "view"),
+  });
+}
+
+export function useFxRevaluationPreviewQuery(asOfDate: string, enabled = true) {
+  const { user } = useAuth();
+  const { can } = usePermissions();
+  return useQuery({
+    queryKey: erpQueryKeys.accounting.statement("fx-reval-preview", { asOfDate }),
+    queryFn: () =>
+      apiRequest<FxRevaluationPreviewDto>(
+        `/api/accounting/fx-revaluation/preview${toQueryString({ asOfDate })}`
+      ),
+    enabled: Boolean(user) && Boolean(asOfDate) && enabled && can("accounting", "view"),
   });
 }
 
@@ -506,6 +582,24 @@ export function useAccountingMutations() {
     onSuccess: invalidateAccounting,
   });
 
+  const closeFiscalYear = useMutation({
+    mutationFn: ({ id, memo }: { id: string; memo?: string }) =>
+      apiRequest<YearEndCloseResultDto>(`/api/accounting/fiscal-years/${id}/close`, {
+        method: "POST",
+        body: { memo: memo ?? "" },
+      }),
+    onSuccess: invalidateAccounting,
+  });
+
+  const runFxRevaluation = useMutation({
+    mutationFn: (payload: z.input<typeof runFxRevaluationSchema>) =>
+      apiRequest<FxRevaluationResultDto>("/api/accounting/fx-revaluation", {
+        method: "POST",
+        body: payload,
+      }),
+    onSuccess: invalidateAccounting,
+  });
+
   const createTaxCode = useMutation({
     mutationFn: (body: {
       code: string;
@@ -571,6 +665,8 @@ export function useAccountingMutations() {
     reverseJournalEntry,
     createFiscalYear,
     togglePeriodLock,
+    closeFiscalYear,
+    runFxRevaluation,
     createTaxCode,
     updateTaxCode,
     deleteTaxCode,

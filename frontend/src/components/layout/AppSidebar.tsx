@@ -110,6 +110,7 @@ const accountingItems: Array<{ titleKey: string; url: string; icon: typeof BookO
   { titleKey: "nav.accounting.journalEntries", url: "/accounting/journal-entries", icon: FileText, module: "accounting" },
   { titleKey: "nav.accounting.fiscalPeriods", url: "/accounting/periods", icon: CalendarClock, module: "accounting" },
   { titleKey: "nav.accounting.financialStatements", url: "/accounting/statements", icon: Scale, module: "accounting" },
+  { titleKey: "nav.accounting.fixedAssets", url: "/accounting/fixed-assets", icon: Building2, module: "fixed_assets" },
   { titleKey: "nav.treasury.accounts", url: "/treasury/accounts", icon: Landmark, module: "treasury" },
   { titleKey: "nav.expenses", url: "/expenses", icon: Receipt, module: "expenses" },
 ];

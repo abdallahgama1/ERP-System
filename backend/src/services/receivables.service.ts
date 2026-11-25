@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
   calculateLineAmounts,
+  roundCurrency,
   type applyAmountSchema,
   type receivedPaymentSchema,
   type retainerSchema,
@@ -109,16 +110,21 @@ export async function createReceivedPayment(
       })
       .returning();
 
+    let allocatedTxSum = 0;
+    let allocatedArBaseSum = 0;
+
     for (const alloc of data.allocations) {
       const invRows = await tx.execute<{
         id: string;
+        currency: string;
+        fx_rate: string;
         total_amount: string;
         paid_amount: string;
         credit_applied_amount: string;
         retainer_applied_amount: string;
         status: string;
       }>(sql`
-        SELECT id, total_amount, paid_amount, credit_applied_amount, retainer_applied_amount, status
+        SELECT id, currency, fx_rate, total_amount, paid_amount, credit_applied_amount, retainer_applied_amount, status
         FROM sales_invoices WHERE id = ${alloc.invoiceId} AND company_id = ${companyId} FOR UPDATE
       `);
       const inv = invRows[0];
@@ -145,22 +151,55 @@ export async function createReceivedPayment(
         invoiceId: inv.id,
         amount: toNumeric(alloc.amount, 4),
       });
+
+      allocatedTxSum = roundCurrency(allocatedTxSum + alloc.amount, 4);
+      const invFx = inv.currency.toUpperCase() === data.currency.toUpperCase() ? num(inv.fx_rate) : data.fxRate;
+      allocatedArBaseSum = roundCurrency(allocatedArBaseSum + alloc.amount * invFx, 4);
     }
 
-    await postMappedJournal(tx, {
-      companyId,
-      branchId: rp.branchId,
-      entryDate: rp.paymentDate,
-      sourceType: "received_payment",
-      sourceId: rp.id,
-      referenceNumber: rp.paymentNumber,
-      memo: `Customer payment received ${rp.paymentNumber}`,
-      createdBy: actor.id,
-      lines: [
-        { mappingKey: "default_cash_bank", debit: data.amount, currency: data.currency, fxRate: data.fxRate },
-        { mappingKey: "accounts_receivable", credit: data.amount, currency: data.currency, fxRate: data.fxRate },
-      ],
-    });
+    const unallocatedTx = Math.max(0, roundCurrency(data.amount - allocatedTxSum, 4));
+    const cashBase = roundCurrency(data.amount * data.fxRate, 4);
+    const arCreditBase = roundCurrency(allocatedArBaseSum + unallocatedTx * data.fxRate, 4);
+    const realizedFxGainLoss = roundCurrency(cashBase - arCreditBase, 4);
+
+    if (Math.abs(realizedFxGainLoss) >= 0.01) {
+      await postMappedJournal(tx, {
+        companyId,
+        branchId: rp.branchId,
+        entryDate: rp.paymentDate,
+        sourceType: "received_payment",
+        sourceId: rp.id,
+        referenceNumber: rp.paymentNumber,
+        memo: `Customer payment received ${rp.paymentNumber} (with realized FX)`,
+        createdBy: actor.id,
+        lines: [
+          { mappingKey: "default_cash_bank", debit: cashBase, fxRate: 1 },
+          { mappingKey: "accounts_receivable", credit: arCreditBase, fxRate: 1 },
+          {
+            mappingKey: "realized_fx",
+            debit: realizedFxGainLoss < 0 ? Math.abs(realizedFxGainLoss) : 0,
+            credit: realizedFxGainLoss > 0 ? realizedFxGainLoss : 0,
+            fxRate: 1,
+            description: `Realized FX ${realizedFxGainLoss > 0 ? "gain" : "loss"} on ${rp.paymentNumber}`,
+          },
+        ],
+      });
+    } else {
+      await postMappedJournal(tx, {
+        companyId,
+        branchId: rp.branchId,
+        entryDate: rp.paymentDate,
+        sourceType: "received_payment",
+        sourceId: rp.id,
+        referenceNumber: rp.paymentNumber,
+        memo: `Customer payment received ${rp.paymentNumber}`,
+        createdBy: actor.id,
+        lines: [
+          { mappingKey: "default_cash_bank", debit: data.amount, currency: data.currency, fxRate: data.fxRate },
+          { mappingKey: "accounts_receivable", credit: data.amount, currency: data.currency, fxRate: data.fxRate },
+        ],
+      });
+    }
 
     await writeAuditLog(tx, {
       companyId,

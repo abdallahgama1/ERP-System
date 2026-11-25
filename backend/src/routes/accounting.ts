@@ -1,11 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import {
+  closeFiscalYearSchema,
   createAccountSchema,
   createCostCenterSchema,
   createExchangeRateSchema,
   createFiscalYearSchema,
   createJournalEntrySchema,
   createTaxCodeSchema,
+  runFxRevaluationSchema,
   updateAccountSchema,
   updateCostCenterSchema,
   updateGlMappingSchema,
@@ -18,8 +20,10 @@ import { assertBranchAccess, requireAuth, requirePermission } from "../middlewar
 import {
   getAccountLedger,
   getBalanceSheet,
+  getCashFlowStatement,
   getProfitAndLoss,
   getTrialBalance,
+  getVatReturnSummary,
 } from "../services/accounting-reports.service.ts";
 import {
   createCostCenter,
@@ -27,6 +31,11 @@ import {
   updateCostCenter,
 } from "../services/cost-centers.service.ts";
 import {
+  previewFxRevaluation,
+  runFxRevaluation,
+} from "../services/fx-revaluation.service.ts";
+import {
+  closeFiscalYear,
   createAccount,
   createFiscalYear,
   createManualJournal,
@@ -188,6 +197,40 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     return { period };
   });
 
+  app.post(
+    "/api/accounting/fiscal-years/:id/close",
+    { preHandler: requirePermission("accounting", "approve") },
+    async (req) => {
+      const id = (req.params as { id: string }).id;
+      const data = parseOrThrow(closeFiscalYearSchema, req.body ?? {}, "Invalid fiscal year closing payload");
+      const result = await closeFiscalYear(getDb(), req.authUser!, id, data, req.ip);
+      eventBroadcaster.broadcast("accounting_updated", { fiscalYearId: id }, actorCompanyId(req.authUser!));
+      return result;
+    }
+  );
+
+  // ---------------- Period-End FX Revaluation ----------------
+  app.get(
+    "/api/accounting/fx-revaluation/preview",
+    { preHandler: requirePermission("accounting", "view") },
+    async (req) => {
+      const q = req.query as { asOfDate?: string };
+      const asOfDate = q.asOfDate || new Date().toISOString().slice(0, 10);
+      return previewFxRevaluation(getDb(), req.authUser!, asOfDate);
+    }
+  );
+
+  app.post(
+    "/api/accounting/fx-revaluation",
+    { preHandler: requirePermission("accounting", "approve") },
+    async (req, reply) => {
+      const data = parseOrThrow(runFxRevaluationSchema, req.body, "Invalid FX revaluation payload");
+      const result = await runFxRevaluation(getDb(), req.authUser!, data, req.ip);
+      eventBroadcaster.broadcast("accounting_updated", {}, actorCompanyId(req.authUser!));
+      return reply.status(201).send(result);
+    }
+  );
+
   // ---------------- Financial Statements & Ledger ----------------
   app.get("/api/accounting/reports/trial-balance", { preHandler: requirePermission("accounting", "view") }, async (req) => {
     const q = req.query as { fromDate?: string; toDate?: string; branchId?: string; costCenterId?: string };
@@ -197,7 +240,14 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/accounting/reports/profit-loss", { preHandler: requirePermission("accounting", "view") }, async (req) => {
-    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string; costCenterId?: string };
+    const q = req.query as {
+      fromDate?: string;
+      toDate?: string;
+      compareFromDate?: string;
+      compareToDate?: string;
+      branchId?: string;
+      costCenterId?: string;
+    };
     if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
     const normalizedCc = q.costCenterId && q.costCenterId !== "all" ? q.costCenterId : undefined;
     return getProfitAndLoss(getDb(), req.authUser!, { ...q, costCenterId: normalizedCc });
@@ -207,6 +257,18 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     const q = req.query as { asOfDate?: string; branchId?: string };
     if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
     return getBalanceSheet(getDb(), req.authUser!, q);
+  });
+
+  app.get("/api/accounting/reports/cash-flow", { preHandler: requirePermission("accounting", "view") }, async (req) => {
+    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string };
+    if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
+    return getCashFlowStatement(getDb(), req.authUser!, q);
+  });
+
+  app.get("/api/accounting/reports/vat-return", { preHandler: requirePermission("accounting", "view") }, async (req) => {
+    const q = req.query as { fromDate?: string; toDate?: string; branchId?: string };
+    if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
+    return getVatReturnSummary(getDb(), req.authUser!, q);
   });
 
   app.get("/api/accounting/reports/ledger/:accountId", { preHandler: requirePermission("accounting", "view") }, async (req) => {

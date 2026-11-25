@@ -1,4 +1,4 @@
-import { buildOffsetPageInfo, roundCurrency, type AccountTypeShared, type GlMappingKey, type NormalBalanceShared, type OffsetPageInfo, type createAccountSchema, type createFiscalYearSchema, type createJournalEntrySchema } from "@erp/shared";
+import { buildOffsetPageInfo, roundCurrency, type AccountTypeShared, type GlMappingKey, type NormalBalanceShared, type OffsetPageInfo, type YearEndCloseResultDto, type closeFiscalYearSchema, type createAccountSchema, type createFiscalYearSchema, type createJournalEntrySchema } from "@erp/shared";
 import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import {
@@ -35,6 +35,8 @@ export const DEFAULT_COA: DefaultAccountDef[] = [
   { code: "1210", name: "In-Transit Inventory", accountType: "asset", normalBalance: "debit", mappingKey: "in_transit_inventory" },
   { code: "1220", name: "Work in Progress (WIP) Inventory", accountType: "asset", normalBalance: "debit", mappingKey: "wip_inventory" },
   { code: "1300", name: "Input VAT Recoverable", accountType: "asset", normalBalance: "debit", mappingKey: "input_vat" },
+  { code: "1500", name: "Fixed Assets — Cost", accountType: "asset", normalBalance: "debit", mappingKey: "fixed_assets_cost" },
+  { code: "1510", name: "Accumulated Depreciation", accountType: "asset", normalBalance: "credit", mappingKey: "accumulated_depreciation" },
   { code: "2000", name: "Accounts Payable", accountType: "liability", normalBalance: "credit", mappingKey: "accounts_payable" },
   { code: "2100", name: "Goods Received Not Invoiced (GRNI)", accountType: "liability", normalBalance: "credit", mappingKey: "grni" },
   { code: "2200", name: "Customer Retainers & Advances", accountType: "liability", normalBalance: "credit", mappingKey: "retainer_liability" },
@@ -48,6 +50,10 @@ export const DEFAULT_COA: DefaultAccountDef[] = [
   { code: "5200", name: "Inventory Write-Off Expense", accountType: "expense", normalBalance: "debit", mappingKey: "write_off_expense" },
   { code: "5400", name: "Cash Over & Short", accountType: "expense", normalBalance: "debit", mappingKey: "cash_over_short" },
   { code: "5500", name: "General Operating Expenses", accountType: "expense", normalBalance: "debit", mappingKey: "operating_expenses" },
+  { code: "5600", name: "Realized FX Gain & Loss", accountType: "expense", normalBalance: "debit", mappingKey: "realized_fx" },
+  { code: "5610", name: "Unrealized FX Gain & Loss", accountType: "expense", normalBalance: "debit", mappingKey: "unrealized_fx" },
+  { code: "5700", name: "Depreciation Expense", accountType: "expense", normalBalance: "debit", mappingKey: "depreciation_expense" },
+  { code: "5710", name: "Gain & Loss on Asset Disposal", accountType: "expense", normalBalance: "debit", mappingKey: "asset_disposal_gain_loss" },
   { code: "5900", name: "Purchase Price & Rounding Variance", accountType: "expense", normalBalance: "debit", mappingKey: "rounding_variance" },
 ];
 
@@ -975,6 +981,9 @@ export async function setFiscalPeriodLock(
       .where(and(eq(fiscalPeriods.id, periodId), eq(fiscalPeriods.companyId, companyId)))
       .limit(1);
     if (!current) throw new AppError(404, "Fiscal period not found", "NOT_FOUND");
+    if (!locked && current.status === "closed") {
+      throw new AppError(409, "Cannot unlock a period belonging to a closed fiscal year", "FISCAL_YEAR_CLOSED");
+    }
 
     const [updated] = await tx
       .update(fiscalPeriods)
@@ -998,6 +1007,199 @@ export async function setFiscalPeriodLock(
       ipAddress,
     });
     return updated;
+  });
+}
+
+/**
+ * Year-End Fiscal Closing Wizard: sweeps all Revenue and Expense account balances
+ * within the fiscal year into 3100 Retained Earnings, then permanently closes the
+ * fiscal year and locks all of its periods.
+ */
+export async function closeFiscalYear(
+  db: AppDatabase,
+  actor: RequestActor,
+  fiscalYearId: string,
+  data: z.infer<typeof closeFiscalYearSchema>,
+  ipAddress?: string
+): Promise<YearEndCloseResultDto> {
+  const companyId = actorCompanyId(actor);
+
+  return db.transaction(async (tx) => {
+    await ensureAccountingDefaults(tx, companyId);
+
+    const [fy] = await tx
+      .select()
+      .from(fiscalYears)
+      .where(and(eq(fiscalYears.id, fiscalYearId), eq(fiscalYears.companyId, companyId)))
+      .limit(1);
+    if (!fy) throw new AppError(404, "Fiscal year not found", "NOT_FOUND");
+    if (fy.status === "closed") {
+      throw new AppError(409, `Fiscal year '${fy.name}' is already closed`, "ALREADY_CLOSED");
+    }
+
+    const glMap = await getGlAccountMap(tx, companyId);
+    const retainedEarningsId = glMap.retained_earnings;
+    if (!retainedEarningsId) {
+      throw new AppError(500, "Missing GL mapping for retained_earnings", "MISSING_GL_MAPPING");
+    }
+
+    const [baseCcy] = await tx
+      .select({ code: currencies.code })
+      .from(currencies)
+      .where(and(eq(currencies.companyId, companyId), eq(currencies.isBase, true)))
+      .limit(1);
+    const currency = baseCcy?.code || "USD";
+
+    // Temporarily open any locked periods inside this fiscal year so the year-end closing entry can post on fy.endDate
+    await tx
+      .update(fiscalPeriods)
+      .set({ status: "open" })
+      .where(and(eq(fiscalPeriods.fiscalYearId, fy.id), eq(fiscalPeriods.companyId, companyId)));
+
+    const grouped = await tx
+      .select({
+        accountId: chartOfAccounts.id,
+        code: chartOfAccounts.code,
+        name: chartOfAccounts.name,
+        accountType: chartOfAccounts.accountType,
+        totalDebit: sql<string>`coalesce(sum(${journalLines.debitBase}), 0)`,
+        totalCredit: sql<string>`coalesce(sum(${journalLines.creditBase}), 0)`,
+      })
+      .from(journalLines)
+      .innerJoin(journalEntries, eq(journalEntries.id, journalLines.entryId))
+      .innerJoin(chartOfAccounts, eq(chartOfAccounts.id, journalLines.accountId))
+      .where(
+        and(
+          eq(journalEntries.companyId, companyId),
+          eq(journalEntries.status, "posted"),
+          inArray(chartOfAccounts.accountType, ["revenue", "expense"]),
+          gte(journalEntries.entryDate, fy.startDate),
+          lte(journalEntries.entryDate, fy.endDate)
+        )
+      )
+      .groupBy(
+        chartOfAccounts.id,
+        chartOfAccounts.code,
+        chartOfAccounts.name,
+        chartOfAccounts.accountType
+      );
+
+    const closingLines: JournalLineSpec[] = [];
+    let totalRevenueClosed = 0;
+    let totalExpensesClosed = 0;
+    let totalClosingDebits = 0;
+    let totalClosingCredits = 0;
+
+    for (const r of grouped) {
+      const dr = roundCurrency(num(r.totalDebit), 4);
+      const cr = roundCurrency(num(r.totalCredit), 4);
+      const netDrMinusCr = roundCurrency(dr - cr, 4);
+      if (Math.abs(netDrMinusCr) < 0.0001) continue;
+
+      if (r.accountType === "revenue") {
+        totalRevenueClosed = roundCurrency(totalRevenueClosed + (cr - dr), 4);
+      } else {
+        totalExpensesClosed = roundCurrency(totalExpensesClosed + (dr - cr), 4);
+      }
+
+      // To zero an account whose net (Dr - Cr) is positive, we Credit it; if negative (net credit), we Debit it!
+      const closeDr = netDrMinusCr < 0 ? Math.abs(netDrMinusCr) : 0;
+      const closeCr = netDrMinusCr > 0 ? netDrMinusCr : 0;
+      totalClosingDebits = roundCurrency(totalClosingDebits + closeDr, 4);
+      totalClosingCredits = roundCurrency(totalClosingCredits + closeCr, 4);
+
+      closingLines.push({
+        accountId: r.accountId,
+        debit: closeDr,
+        credit: closeCr,
+        currency,
+        fxRate: 1,
+        description: `Year-end close ${fy.name}: ${r.code} ${r.name}`,
+      });
+    }
+
+    const netIncomeTransferred = roundCurrency(totalRevenueClosed - totalExpensesClosed, 4);
+    const retainedDiff = roundCurrency(totalClosingDebits - totalClosingCredits, 4);
+
+    let jeId: string | null = null;
+    let jeNumber: string | null = null;
+
+    if (closingLines.length > 0) {
+      if (Math.abs(retainedDiff) >= 0.0001) {
+        closingLines.push({
+          accountId: retainedEarningsId,
+          debit: retainedDiff < 0 ? Math.abs(retainedDiff) : 0,
+          credit: retainedDiff > 0 ? retainedDiff : 0,
+          currency,
+          fxRate: 1,
+          description: `Transfer net ${retainedDiff >= 0 ? "income" : "loss"} to Retained Earnings (${fy.name})`,
+        });
+      }
+
+      if (closingLines.length >= 2) {
+        const je = await postJournalEntry(tx, {
+          companyId,
+          entryDate: fy.endDate,
+          sourceType: "year_end_close",
+          sourceId: fy.id,
+          referenceNumber: `CLOSE-${fy.name.replace(/\s+/g, "-")}`,
+          memo: data.memo || `Year-end closing entry for ${fy.name}`,
+          createdBy: actor.id,
+          lines: closingLines,
+        });
+        jeId = je.id;
+        jeNumber = je.entryNumber;
+      }
+    }
+
+    const closedPeriods = await tx
+      .update(fiscalPeriods)
+      .set({
+        status: "closed",
+        lockedBy: actor.id,
+        lockedAt: new Date(),
+      })
+      .where(and(eq(fiscalPeriods.fiscalYearId, fy.id), eq(fiscalPeriods.companyId, companyId)))
+      .returning({ id: fiscalPeriods.id });
+
+    await tx
+      .update(fiscalYears)
+      .set({
+        status: "closed",
+      })
+      .where(eq(fiscalYears.id, fy.id));
+
+    await writeAuditLog(tx, {
+      companyId,
+      userId: actor.id,
+      userName: actor.name,
+      userRole: actor.role,
+      action: "fiscal_year.closed",
+      entityType: "accounting",
+      entityId: fy.id,
+      entityLabel: fy.name,
+      after: {
+        status: "closed",
+        entryNumber: jeNumber,
+        totalRevenueClosed,
+        totalExpensesClosed,
+        netIncomeTransferred,
+        periodsClosed: closedPeriods.length,
+      },
+      ipAddress,
+    });
+
+    return {
+      fiscalYearId: fy.id,
+      fiscalYearName: fy.name,
+      status: "closed",
+      journalEntryId: jeId,
+      entryNumber: jeNumber,
+      totalRevenueClosed,
+      totalExpensesClosed,
+      netIncomeTransferred,
+      periodsClosed: closedPeriods.length,
+    };
   });
 }
 

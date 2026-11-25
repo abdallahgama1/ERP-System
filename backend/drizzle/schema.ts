@@ -577,7 +577,7 @@ export const fiscalPeriods = pgTable(
     name: text("name").notNull(),
     startDate: timestamp("start_date", { withTimezone: true }).notNull(),
     endDate: timestamp("end_date", { withTimezone: true }).notNull(),
-    status: text("status").$type<"open" | "locked">().notNull().default("open"),
+    status: text("status").$type<"open" | "locked" | "closed">().notNull().default("open"),
     lockedBy: uuid("locked_by").references(() => users.id, { onDelete: "set null" }),
     lockedAt: timestamp("locked_at", { withTimezone: true }),
   },
@@ -2487,5 +2487,95 @@ export const expenseClaimLines = pgTable(
   (t) => [
     index("expense_claim_lines_claim_idx").on(t.claimId),
     index("expense_claim_lines_cc_idx").on(t.costCenterId),
+  ]
+);
+
+// ============================================================================
+// Wave 2B: Fixed Assets & Automated Depreciation
+// ============================================================================
+
+export const fixedAssets = pgTable(
+  "fixed_assets",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
+    assetCode: text("asset_code").notNull(),
+    name: text("name").notNull(),
+    category: text("category").notNull().default("Equipment"),
+    serialNumber: text("serial_number").notNull().default(""),
+    branchId: uuid("branch_id").references(() => branches.id, { onDelete: "set null" }),
+    costCenterId: uuid("cost_center_id").references(() => costCenters.id, { onDelete: "set null" }),
+    acquisitionDate: timestamp("acquisition_date", { withTimezone: true }).notNull(),
+    inServiceDate: timestamp("in_service_date", { withTimezone: true }).notNull(),
+    acquisitionCost: numeric("acquisition_cost", { precision: 18, scale: 4 }).notNull(),
+    salvageValue: numeric("salvage_value", { precision: 18, scale: 4 }).notNull().default("0"),
+    usefulLifeMonths: integer("useful_life_months").notNull(),
+    depreciationMethod: text("depreciation_method")
+      .$type<"straight_line" | "declining_balance">()
+      .notNull()
+      .default("straight_line"),
+    decliningRatePct: numeric("declining_rate_pct", { precision: 8, scale: 4 }).notNull().default("200"),
+    accumulatedDepreciation: numeric("accumulated_depreciation", { precision: 18, scale: 4 })
+      .notNull()
+      .default("0"),
+    netBookValue: numeric("net_book_value", { precision: 18, scale: 4 }).notNull(),
+    status: text("status")
+      .$type<"active" | "fully_depreciated" | "disposed">()
+      .notNull()
+      .default("active"),
+    assetAccountId: uuid("asset_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id, { onDelete: "restrict" }),
+    accumDepAccountId: uuid("accum_dep_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id, { onDelete: "restrict" }),
+    depExpenseAccountId: uuid("dep_expense_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id, { onDelete: "restrict" }),
+    acquisitionJournalEntryId: uuid("acquisition_journal_entry_id").references(() => journalEntries.id, {
+      onDelete: "set null",
+    }),
+    disposedAt: timestamp("disposed_at", { withTimezone: true }),
+    disposalProceeds: numeric("disposal_proceeds", { precision: 18, scale: 4 }),
+    disposalJournalEntryId: uuid("disposal_journal_entry_id").references(() => journalEntries.id, {
+      onDelete: "set null",
+    }),
+    notes: text("notes").notNull().default(""),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("fixed_assets_company_code_uq").on(t.companyId, t.assetCode),
+    index("fixed_assets_company_status_idx").on(t.companyId, t.status),
+  ]
+);
+
+export const fixedAssetDepreciationEntries = pgTable(
+  "fixed_asset_depreciation_entries",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
+    assetId: uuid("asset_id")
+      .notNull()
+      .references(() => fixedAssets.id, { onDelete: "cascade" }),
+    periodKey: text("period_key").notNull(),
+    depreciationDate: timestamp("depreciation_date", { withTimezone: true }).notNull(),
+    depreciationAmount: numeric("depreciation_amount", { precision: 18, scale: 4 }).notNull(),
+    accumulatedAfter: numeric("accumulated_after", { precision: 18, scale: 4 }).notNull(),
+    netBookValueAfter: numeric("net_book_value_after", { precision: 18, scale: 4 }).notNull(),
+    journalEntryId: uuid("journal_entry_id").references(() => journalEntries.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("fixed_asset_dep_asset_period_uq").on(t.assetId, t.periodKey),
+    index("fixed_asset_dep_company_period_idx").on(t.companyId, t.periodKey),
   ]
 );

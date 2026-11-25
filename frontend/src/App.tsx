@@ -73,6 +73,7 @@ const CostCenters = lazy(() => import("./pages/accounting/CostCenters"));
 const JournalEntries = lazy(() => import("./pages/accounting/JournalEntries"));
 const FiscalPeriods = lazy(() => import("./pages/accounting/FiscalPeriods"));
 const FinancialStatements = lazy(() => import("./pages/accounting/FinancialStatements"));
+const FixedAssets = lazy(() => import("./pages/accounting/FixedAssets"));
 const TreasuryAccounts = lazy(() => import("./pages/treasury/TreasuryAccounts"));
 const Expenses = lazy(() => import("./pages/expenses/Expenses"));
 const PosRegister = lazy(() => import("./pages/pos/PosRegister"));
@@ -162,6 +163,7 @@ const BackOfficeWorkspace = () => (
         <Route path="/accounting/journal-entries" element={guard("accounting", <JournalEntries />)} />
         <Route path="/accounting/periods" element={guard("accounting", <FiscalPeriods />)} />
         <Route path="/accounting/statements" element={guard("accounting", <FinancialStatements />)} />
+        <Route path="/accounting/fixed-assets" element={guard("fixed_assets", <FixedAssets />)} />
         <Route path="/treasury/accounts" element={guard("treasury", <TreasuryAccounts />)} />
         <Route path="/expenses" element={guard("expenses", <Expenses />)} />
         <Route path="/settings" element={guard("settings", <Settings />)} />

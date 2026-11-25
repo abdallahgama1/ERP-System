@@ -122,6 +122,12 @@ export const erpQueryKeys = {
     detail: (id: string) => ["expenses", "detail", id] as const,
   },
 
+  fixedAssets: {
+    all: ["fixedAssets"] as const,
+    list: () => ["fixedAssets", "list"] as const,
+    schedule: (id: string) => ["fixedAssets", "schedule", id] as const,
+  },
+
   approvals: {
     all: ["approvals"] as const,
     rules: () => ["approvals", "rules"] as const,
@@ -175,6 +181,8 @@ export function queryKeysForServerEvent(eventType?: string): ReadonlyArray<reado
       return [erpQueryKeys.treasury.all, erpQueryKeys.accounting.all];
     case "expenses_updated":
       return [erpQueryKeys.expenses.all, erpQueryKeys.treasury.all, erpQueryKeys.accounting.all];
+    case "fixed_assets_updated":
+      return [erpQueryKeys.fixedAssets.all, erpQueryKeys.accounting.all];
     case "approvals_updated":
       return [erpQueryKeys.approvals.all, erpQueryKeys.notifications];
     case "tracking_updated":

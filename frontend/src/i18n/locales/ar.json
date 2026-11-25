@@ -128,7 +128,8 @@
       "costCenters": "مراكز التكلفة",
       "journalEntries": "قيود اليومية",
       "fiscalPeriods": "الفترات المالية",
-      "financialStatements": "القوائم المالية"
+      "financialStatements": "القوائم المالية",
+      "fixedAssets": "الأصول الثابتة"
     },
     "treasury": {
       "accounts": "الخزينة والبنوك"

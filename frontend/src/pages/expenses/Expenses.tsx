@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Receipt, Plus, Trash2, Check, X, CreditCard } from "lucide-react";
 import { toast } from "sonner";
@@ -74,6 +74,10 @@ export default function Expenses() {
     () => accounts.filter((a) => a.isActive && a.accountType === "expense"),
     [accounts]
   );
+  const defaultExpenseAccountId = useMemo(
+    () => expenseGlAccounts.find((a) => a.code === "5500")?.id ?? expenseGlAccounts[0]?.id ?? "",
+    [expenseGlAccounts]
+  );
 
   const [createOpen, setCreateOpen] = useState(false);
   const [paymentMode, setPaymentMode] = useState<ExpensePaymentMode>("direct_treasury");
@@ -84,20 +88,27 @@ export default function Expenses() {
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<DraftExpenseLine[]>(() => [makeEmptyLine()]);
 
+  useEffect(() => {
+    if (!defaultExpenseAccountId) return;
+    setLines((prev) =>
+      prev.some((l) => !l.expenseAccountId)
+        ? prev.map((l) => (l.expenseAccountId ? l : { ...l, expenseAccountId: defaultExpenseAccountId }))
+        : prev
+    );
+  }, [defaultExpenseAccountId]);
+
   const [payTarget, setPayTarget] = useState<ExpenseClaimDto | null>(null);
   const [settleTreasuryId, setSettleTreasuryId] = useState("");
   const [settleRef, setSettleRef] = useState("");
 
   const openCreateDialog = () => {
-    const defaultExpId =
-      expenseGlAccounts.find((a) => a.code === "5500")?.id ?? expenseGlAccounts[0]?.id ?? "";
     setPaymentMode("direct_treasury");
     setTreasuryAccountId(treasuryAccounts[0]?.id ?? "none");
     setBranchId("none");
     setPayeeName("");
     setReference("");
     setNotes("");
-    setLines([makeEmptyLine(defaultExpId)]);
+    setLines([makeEmptyLine(defaultExpenseAccountId)]);
     setCreateOpen(true);
   };
 

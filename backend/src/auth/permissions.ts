@@ -279,6 +279,7 @@ export async function seedCompanyDefaults(
     { docType: "TRFT", prefix: "TRFT-", padding: 4 },
     { docType: "BST", prefix: "BST-", padding: 4 },
     { docType: "EXP", prefix: "EXP-", padding: 4 },
+    { docType: "FA", prefix: "FA-", padding: 4 },
   ];
 
   await tx

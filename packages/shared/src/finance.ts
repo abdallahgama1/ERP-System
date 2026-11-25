@@ -296,3 +296,216 @@ export interface ExpenseClaimDto {
   createdAt: string;
   lines: ExpenseClaimLineDto[];
 }
+
+// ============================================================================
+// Wave 2B: Cash Flow, VAT Return, Year-End Close, FX Revaluation & Fixed Assets
+// ============================================================================
+
+export const FIXED_ASSET_DEPRECIATION_METHODS = ["straight_line", "declining_balance"] as const;
+export type FixedAssetDepreciationMethod = (typeof FIXED_ASSET_DEPRECIATION_METHODS)[number];
+
+export const FIXED_ASSET_STATUSES = ["active", "fully_depreciated", "disposed"] as const;
+export type FixedAssetStatus = (typeof FIXED_ASSET_STATUSES)[number];
+
+export interface CashFlowLineDto {
+  code: string;
+  label: string;
+  amount: number;
+}
+
+export interface CashFlowStatementDto {
+  fromDate: string | null;
+  toDate: string | null;
+  openingCash: number;
+  closingCash: number;
+  netCashChange: number;
+  operating: {
+    netIncome: number;
+    nonCashAdjustments: CashFlowLineDto[];
+    workingCapitalChanges: CashFlowLineDto[];
+    total: number;
+  };
+  investing: {
+    items: CashFlowLineDto[];
+    total: number;
+  };
+  financing: {
+    items: CashFlowLineDto[];
+    total: number;
+  };
+  isReconciled: boolean;
+}
+
+export interface VatReturnRateBucketDto {
+  taxRate: number;
+  taxableAmount: number;
+  vatAmount: number;
+  documentCount: number;
+}
+
+export interface VatReturnReportDto {
+  fromDate: string | null;
+  toDate: string | null;
+  outputSales: VatReturnRateBucketDto[];
+  inputPurchasesAndExpenses: VatReturnRateBucketDto[];
+  totalOutputTaxable: number;
+  totalOutputVat: number;
+  totalInputTaxable: number;
+  totalInputVat: number;
+  netVatPayable: number;
+  glOutputVatBalance: number;
+  glInputVatBalance: number;
+  glNetVatPayable: number;
+}
+
+export const closeFiscalYearSchema = z.object({
+  memo: z.string().trim().max(300).optional().default(""),
+});
+
+export interface YearEndCloseResultDto {
+  fiscalYearId: string;
+  fiscalYearName: string;
+  status: "closed";
+  journalEntryId: string | null;
+  entryNumber: string | null;
+  totalRevenueClosed: number;
+  totalExpensesClosed: number;
+  netIncomeTransferred: number;
+  periodsClosed: number;
+}
+
+// ---------------- Period-End FX Revaluation ----------------
+
+export const fxRevaluationRateOverrideSchema = z.object({
+  currency: z.string().trim().toUpperCase().min(3).max(10),
+  closingRate: z.number().positive("Closing FX rate must be positive"),
+});
+
+export const runFxRevaluationSchema = z.object({
+  asOfDate: z.string().min(1, "Valuation date is required"),
+  autoReverse: z.boolean().optional().default(true),
+  memo: z.string().trim().max(300).optional().default(""),
+  rates: z.array(fxRevaluationRateOverrideSchema).optional().default([]),
+});
+
+export interface FxExposureLineDto {
+  entityType: "sales_invoice" | "vendor_bill" | "treasury_account";
+  entityId: string;
+  documentNumber: string;
+  currency: string;
+  foreignBalance: number;
+  bookedRate: number;
+  closingRate: number;
+  bookedBaseAmount: number;
+  revaluedBaseAmount: number;
+  unrealizedGainLoss: number;
+  glAccountId: string;
+}
+
+export interface FxRevaluationPreviewDto {
+  asOfDate: string;
+  baseCurrency: string;
+  lines: FxExposureLineDto[];
+  totalUnrealizedGainLoss: number;
+}
+
+export interface FxRevaluationResultDto extends FxRevaluationPreviewDto {
+  journalEntryId: string | null;
+  entryNumber: string | null;
+  reversalJournalEntryId: string | null;
+  reversalEntryNumber: string | null;
+}
+
+// ---------------- Fixed Assets & Automated Depreciation ----------------
+
+export const createFixedAssetSchema = z
+  .object({
+    name: z.string().trim().min(1, "Asset name is required").max(160),
+    category: z.string().trim().min(1).max(80).optional().default("Equipment"),
+    serialNumber: z.string().trim().max(100).optional().default(""),
+    branchId: z.string().uuid().nullable().optional(),
+    costCenterId: z.string().uuid().nullable().optional(),
+    acquisitionDate: z.string().min(1, "Acquisition date is required"),
+    inServiceDate: z.string().optional(),
+    acquisitionCost: z.number().positive("Acquisition cost must be positive"),
+    salvageValue: z.number().min(0, "Salvage value cannot be negative").optional().default(0),
+    usefulLifeMonths: z.number().int().min(1, "Useful life must be at least 1 month").max(1200),
+    depreciationMethod: z.enum(FIXED_ASSET_DEPRECIATION_METHODS).optional().default("straight_line"),
+    decliningRatePct: z.number().min(100).max(500).optional().default(200),
+    assetAccountId: z.string().uuid().nullable().optional(),
+    accumDepAccountId: z.string().uuid().nullable().optional(),
+    depExpenseAccountId: z.string().uuid().nullable().optional(),
+    fundingAccountId: z.string().uuid().nullable().optional(),
+    postAcquisitionEntry: z.boolean().optional().default(true),
+    notes: z.string().trim().max(500).optional().default(""),
+  })
+  .refine((d) => d.salvageValue < d.acquisitionCost, {
+    message: "Salvage value must be strictly less than acquisition cost",
+    path: ["salvageValue"],
+  });
+
+export const runDepreciationSchema = z.object({
+  periodKey: z
+    .string()
+    .trim()
+    .regex(/^\d{4}-(0[1-9]|1[0-2])$/, "periodKey must be formatted as YYYY-MM"),
+  postingDate: z.string().optional(),
+});
+
+export const disposeFixedAssetSchema = z.object({
+  disposalDate: z.string().min(1, "Disposal date is required"),
+  proceedsAmount: z.number().min(0).optional().default(0),
+  depositAccountId: z.string().uuid().nullable().optional(),
+  notes: z.string().trim().max(400).optional().default(""),
+});
+
+export interface FixedAssetDepreciationEntryDto {
+  id: string;
+  assetId: string;
+  periodKey: string;
+  depreciationDate: string;
+  depreciationAmount: number;
+  accumulatedAfter: number;
+  netBookValueAfter: number;
+  journalEntryId: string | null;
+  createdAt: string;
+}
+
+export interface FixedAssetDto {
+  id: string;
+  assetCode: string;
+  name: string;
+  category: string;
+  serialNumber: string;
+  branchId: string | null;
+  branchName: string | null;
+  costCenterId: string | null;
+  costCenterCode: string | null;
+  acquisitionDate: string;
+  inServiceDate: string;
+  acquisitionCost: number;
+  salvageValue: number;
+  usefulLifeMonths: number;
+  depreciationMethod: FixedAssetDepreciationMethod;
+  decliningRatePct: number;
+  accumulatedDepreciation: number;
+  netBookValue: number;
+  status: FixedAssetStatus;
+  assetAccountId: string;
+  accumDepAccountId: string;
+  depExpenseAccountId: string;
+  acquisitionJournalEntryId: string | null;
+  disposedAt: string | null;
+  disposalProceeds: number | null;
+  disposalJournalEntryId: string | null;
+  notes: string;
+  createdAt: string;
+}
+
+export interface DepreciationRunResultDto {
+  periodKey: string;
+  processedAssets: number;
+  skippedAlreadyPosted: number;
+  totalDepreciationPosted: number;
+  entries: FixedAssetDepreciationEntryDto[];
+}

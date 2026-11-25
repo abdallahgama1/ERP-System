@@ -6,7 +6,7 @@ export type AccountTypeShared = (typeof ACCOUNT_TYPES)[number];
 export const NORMAL_BALANCES = ["debit", "credit"] as const;
 export type NormalBalanceShared = (typeof NORMAL_BALANCES)[number];
 
-export const FISCAL_PERIOD_STATUSES = ["open", "locked"] as const;
+export const FISCAL_PERIOD_STATUSES = ["open", "locked", "closed"] as const;
 export type FiscalPeriodStatusShared = (typeof FISCAL_PERIOD_STATUSES)[number];
 
 export const JOURNAL_ENTRY_STATUSES = ["posted", "reversed"] as const;
@@ -21,6 +21,8 @@ export const GL_MAPPING_KEYS = [
   "in_transit_inventory",
   "wip_inventory",
   "input_vat",
+  "fixed_assets_cost",
+  "accumulated_depreciation",
   "accounts_payable",
   "grni",
   "retainer_liability",
@@ -34,6 +36,10 @@ export const GL_MAPPING_KEYS = [
   "write_off_expense",
   "cash_over_short",
   "operating_expenses",
+  "realized_fx",
+  "unrealized_fx",
+  "depreciation_expense",
+  "asset_disposal_gain_loss",
   "rounding_variance",
 ] as const;
 export type GlMappingKey = (typeof GL_MAPPING_KEYS)[number];

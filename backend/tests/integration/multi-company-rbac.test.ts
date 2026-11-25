@@ -190,9 +190,9 @@ describe.skipIf(!testDbUrl)(
 
       expect(comp2Branches).toHaveLength(1);
       expect(comp2Roles).toHaveLength(SYSTEM_ROLE_PRESETS.length);
-      expect(comp2Seqs).toHaveLength(26);
-      expect(comp2Coa).toHaveLength(22);
-      expect(comp2Mappings.length).toBeGreaterThanOrEqual(22);
+      expect(comp2Seqs).toHaveLength(27);
+      expect(comp2Coa).toHaveLength(28);
+      expect(comp2Mappings.length).toBeGreaterThanOrEqual(28);
       expect(comp2Currencies[0]?.code).toBe("EUR");
       expect(comp2Tax).toHaveLength(1);
       expect(comp2Fy).toHaveLength(2);

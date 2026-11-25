@@ -501,14 +501,19 @@ export async function createPaymentMade(
       })
       .returning();
 
+    let allocatedTxSum = 0;
+    let allocatedApBaseSum = 0;
+
     for (const alloc of data.allocations) {
       const billRows = await tx.execute<{
         id: string;
+        currency: string;
+        fx_rate: string;
         total_amount: string;
         paid_amount: string;
         status: string;
       }>(
-        sql`SELECT id, total_amount, paid_amount, status FROM vendor_bills WHERE id = ${alloc.billId} AND company_id = ${companyId} FOR UPDATE`
+        sql`SELECT id, currency, fx_rate, total_amount, paid_amount, status FROM vendor_bills WHERE id = ${alloc.billId} AND company_id = ${companyId} FOR UPDATE`
       );
       const bill = billRows[0];
       if (!bill) throw new AppError(404, "Referenced bill not found", "NOT_FOUND");
@@ -532,22 +537,56 @@ export async function createPaymentMade(
         billId: bill.id,
         amount: toNumeric(alloc.amount, 4),
       });
+
+      allocatedTxSum = roundCurrency(allocatedTxSum + alloc.amount, 4);
+      const billFx = bill.currency.toUpperCase() === data.currency.toUpperCase() ? num(bill.fx_rate) : data.fxRate;
+      allocatedApBaseSum = roundCurrency(allocatedApBaseSum + alloc.amount * billFx, 4);
     }
 
-    await postMappedJournal(tx, {
-      companyId,
-      branchId: pm.branchId,
-      entryDate: pm.paymentDate,
-      sourceType: "payment_made",
-      sourceId: pm.id,
-      referenceNumber: pm.paymentNumber,
-      memo: `Payment made ${pm.paymentNumber}`,
-      createdBy: actor.id,
-      lines: [
-        { mappingKey: "accounts_payable", debit: data.amount, currency: data.currency, fxRate: data.fxRate },
-        { mappingKey: "default_cash_bank", credit: data.amount, currency: data.currency, fxRate: data.fxRate },
-      ],
-    });
+    const unallocatedTx = Math.max(0, roundCurrency(data.amount - allocatedTxSum, 4));
+    const cashCreditBase = roundCurrency(data.amount * data.fxRate, 4);
+    const apDebitBase = roundCurrency(allocatedApBaseSum + unallocatedTx * data.fxRate, 4);
+    // Paying less base currency than booked AP (apDebitBase > cashCreditBase) is a Realized FX Gain (+)
+    const realizedFxGainLoss = roundCurrency(apDebitBase - cashCreditBase, 4);
+
+    if (Math.abs(realizedFxGainLoss) >= 0.01) {
+      await postMappedJournal(tx, {
+        companyId,
+        branchId: pm.branchId,
+        entryDate: pm.paymentDate,
+        sourceType: "payment_made",
+        sourceId: pm.id,
+        referenceNumber: pm.paymentNumber,
+        memo: `Payment made ${pm.paymentNumber} (with realized FX)`,
+        createdBy: actor.id,
+        lines: [
+          { mappingKey: "accounts_payable", debit: apDebitBase, fxRate: 1 },
+          { mappingKey: "default_cash_bank", credit: cashCreditBase, fxRate: 1 },
+          {
+            mappingKey: "realized_fx",
+            debit: realizedFxGainLoss < 0 ? Math.abs(realizedFxGainLoss) : 0,
+            credit: realizedFxGainLoss > 0 ? realizedFxGainLoss : 0,
+            fxRate: 1,
+            description: `Realized FX ${realizedFxGainLoss > 0 ? "gain" : "loss"} on ${pm.paymentNumber}`,
+          },
+        ],
+      });
+    } else {
+      await postMappedJournal(tx, {
+        companyId,
+        branchId: pm.branchId,
+        entryDate: pm.paymentDate,
+        sourceType: "payment_made",
+        sourceId: pm.id,
+        referenceNumber: pm.paymentNumber,
+        memo: `Payment made ${pm.paymentNumber}`,
+        createdBy: actor.id,
+        lines: [
+          { mappingKey: "accounts_payable", debit: data.amount, currency: data.currency, fxRate: data.fxRate },
+          { mappingKey: "default_cash_bank", credit: data.amount, currency: data.currency, fxRate: data.fxRate },
+        ],
+      });
+    }
 
     await writeAuditLog(tx, {
       companyId,

@@ -22,10 +22,12 @@ import {
   buildOffsetPageInfo,
   calculateDocumentTotals,
   calculateLineAmounts,
+  closeFiscalYearSchema,
   createCompanySchema,
   createCostCenterSchema,
   createCustomRoleSchema,
   createExpenseClaimSchema,
+  createFixedAssetSchema,
   createPrintTemplateSchema,
   createSavedViewSchema,
   createTreasuryAccountSchema,
@@ -33,6 +35,7 @@ import {
   cursorPageQuerySchema,
   customersListQuerySchema,
   decodeCursor,
+  disposeFixedAssetSchema,
   einvoiceQueueQuerySchema,
   einvoiceRetrySchema,
   emailDocumentSchema,
@@ -60,6 +63,8 @@ import {
   reconcileStatementLineSchema,
   resolveSearchTerm,
   reviewExpenseClaimSchema,
+  runDepreciationSchema,
+  runFxRevaluationSchema,
   salesOrdersListQuerySchema,
   setCashierPinSchema,
   switchCompanySchema,
@@ -648,6 +653,45 @@ describe("@erp/shared contracts (pricing, pagination, permissions & POS)", () =>
       pageSize: 50,
       status: undefined,
       paymentMode: undefined,
+    });
+  });
+
+  it("validates Wave 2B contracts (fixed assets, depreciation, FX revaluation, year-end close)", () => {
+    expect(
+      createFixedAssetSchema.parse({
+        name: "Toyota Hilux Delivery Van",
+        acquisitionDate: "2026-11-01",
+        acquisitionCost: 24000,
+        salvageValue: 3000,
+        usefulLifeMonths: 60,
+      })
+    ).toMatchObject({
+      depreciationMethod: "straight_line",
+      postAcquisitionEntry: true,
+    });
+    // Salvage >= Cost must be rejected
+    expect(
+      createFixedAssetSchema.safeParse({
+        name: "Invalid Salvage",
+        acquisitionDate: "2026-11-01",
+        acquisitionCost: 1000,
+        salvageValue: 1000,
+        usefulLifeMonths: 12,
+      }).success
+    ).toBe(false);
+
+    expect(runDepreciationSchema.safeParse({ periodKey: "2026-11" }).success).toBe(true);
+    expect(runDepreciationSchema.safeParse({ periodKey: "2026-13" }).success).toBe(false);
+    expect(disposeFixedAssetSchema.parse({ disposalDate: "2026-12-01" }).proceedsAmount).toBe(0);
+    expect(closeFiscalYearSchema.parse({})).toEqual({ memo: "" });
+    expect(
+      runFxRevaluationSchema.parse({
+        asOfDate: "2026-11-30",
+        rates: [{ currency: "eur", closingRate: 1.18 }],
+      })
+    ).toMatchObject({
+      autoReverse: true,
+      rates: [{ currency: "EUR", closingRate: 1.18 }],
     });
   });
 });

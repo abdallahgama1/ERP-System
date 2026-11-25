@@ -5,6 +5,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -14,9 +16,11 @@ import { formatMoney } from "@/lib/money";
 import { csvTimestamp, downloadCsv } from "@/lib/export/csv";
 import {
   useBalanceSheetQuery,
+  useCashFlowQuery,
   useCostCentersQuery,
   useProfitLossQuery,
   useTrialBalanceQuery,
+  useVatReturnQuery,
 } from "@/hooks/queries/useAccountingQueries";
 
 export default function FinancialStatements() {
@@ -30,18 +34,26 @@ export default function FinancialStatements() {
   const [costCenterFilter, setCostCenterFilter] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [compareEnabled, setCompareEnabled] = useState(false);
+  const [compareFromDate, setCompareFromDate] = useState("");
+  const [compareToDate, setCompareToDate] = useState("");
 
+  const supportsCostCenter = tab === "trial-balance" || tab === "profit-loss";
   const filter = {
     branchId: branchFilter,
-    costCenterId: tab === "balance-sheet" ? undefined : costCenterFilter,
+    costCenterId: supportsCostCenter ? costCenterFilter : undefined,
     fromDate: fromDate || undefined,
     toDate: toDate || undefined,
     asOfDate: toDate || undefined,
+    compareFromDate: tab === "profit-loss" && compareEnabled && compareFromDate ? compareFromDate : undefined,
+    compareToDate: tab === "profit-loss" && compareEnabled && compareToDate ? compareToDate : undefined,
   };
 
   const { data: tb, isLoading: loadingTb } = useTrialBalanceQuery(filter, tab === "trial-balance");
   const { data: pnl, isLoading: loadingPnl } = useProfitLossQuery(filter, tab === "profit-loss");
   const { data: bs, isLoading: loadingBs } = useBalanceSheetQuery(filter, tab === "balance-sheet");
+  const { data: cf, isLoading: loadingCf } = useCashFlowQuery(filter, tab === "cash-flow");
+  const { data: vat, isLoading: loadingVat } = useVatReturnQuery(filter, tab === "vat-return");
 
   const ccy = settings.currency || "USD";
   const grossMarginPct =
@@ -78,6 +90,34 @@ export default function FinancialStatements() {
         { header: "Section", value: (r) => r.accountType },
         { header: "Balance", value: (r) => r.balance.toFixed(2) },
       ]);
+      return;
+    }
+    if (tab === "cash-flow" && cf) {
+      const rows = [
+        { section: "Operating", label: "Net Income", amount: cf.operating.netIncome },
+        ...cf.operating.nonCashAdjustments.map((i) => ({ section: "Operating", label: i.label, amount: i.amount })),
+        ...cf.operating.workingCapitalChanges.map((i) => ({ section: "Operating", label: i.label, amount: i.amount })),
+        ...cf.investing.items.map((i) => ({ section: "Investing", label: i.label, amount: i.amount })),
+        ...cf.financing.items.map((i) => ({ section: "Financing", label: i.label, amount: i.amount })),
+      ];
+      downloadCsv(`cash-flow-${csvTimestamp()}`, rows, [
+        { header: "Section", value: (r) => r.section },
+        { header: "Line", value: (r) => r.label },
+        { header: "Amount", value: (r) => r.amount.toFixed(2) },
+      ]);
+      return;
+    }
+    if (tab === "vat-return" && vat) {
+      const rows = [
+        ...vat.outputSales.map((b) => ({ direction: "Output VAT", ...b })),
+        ...vat.inputPurchasesAndExpenses.map((b) => ({ direction: "Input VAT", ...b })),
+      ];
+      downloadCsv(`vat-return-${csvTimestamp()}`, rows, [
+        { header: "Direction", value: (r) => r.direction },
+        { header: "Rate %", value: (r) => r.taxRate.toFixed(2) },
+        { header: "Taxable", value: (r) => r.taxableAmount.toFixed(2) },
+        { header: "VAT", value: (r) => r.vatAmount.toFixed(2) },
+      ]);
     }
   };
 
@@ -92,7 +132,7 @@ export default function FinancialStatements() {
           <p className="text-muted-foreground">
             {t(
               "accounting.statements.description",
-              "Real-time Trial Balance, Profit & Loss (COGS gross margin), and Balance Sheet derived directly from posted GL journals."
+              "Real-time Trial Balance, Comparative P&L, Balance Sheet, Indirect Cash Flow, and VAT Return Summary."
             )}
           </p>
         </div>
@@ -118,7 +158,7 @@ export default function FinancialStatements() {
                 ))}
               </SelectContent>
             </Select>
-            {tab !== "balance-sheet" && (
+            {supportsCostCenter && (
               <Select value={costCenterFilter} onValueChange={setCostCenterFilter}>
                 <SelectTrigger
                   className="w-[220px]"
@@ -155,12 +195,43 @@ export default function FinancialStatements() {
               onChange={(e) => setToDate(e.target.value)}
               aria-label={tab === "balance-sheet" ? "As of date" : "To date"}
             />
+
+            {tab === "profit-loss" && (
+              <div className="flex items-center gap-2 ms-auto">
+                <Switch
+                  id="pnl-compare-toggle"
+                  checked={compareEnabled}
+                  onCheckedChange={setCompareEnabled}
+                />
+                <Label htmlFor="pnl-compare-toggle" className="text-sm">
+                  Compare Prior Period
+                </Label>
+                {compareEnabled && (
+                  <>
+                    <Input
+                      type="date"
+                      className="w-36"
+                      value={compareFromDate}
+                      onChange={(e) => setCompareFromDate(e.target.value)}
+                      aria-label="Compare from date"
+                    />
+                    <Input
+                      type="date"
+                      className="w-36"
+                      value={compareToDate}
+                      onChange={(e) => setCompareToDate(e.target.value)}
+                      aria-label="Compare to date"
+                    />
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </CardHeader>
       </Card>
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
+        <TabsList className="flex-wrap h-auto">
           <TabsTrigger value="trial-balance">
             {t("accounting.statements.trialBalance", "Trial Balance")}
           </TabsTrigger>
@@ -170,6 +241,12 @@ export default function FinancialStatements() {
           <TabsTrigger value="balance-sheet">
             {t("accounting.statements.balanceSheet", "Balance Sheet")}
           </TabsTrigger>
+          <TabsTrigger value="cash-flow">
+            {t("accounting.statements.cashFlow", "Cash Flow")}
+          </TabsTrigger>
+          <TabsTrigger value="vat-return">
+            {t("accounting.statements.vatReturn", "VAT Return")}
+          </TabsTrigger>
         </TabsList>
 
         {/* Trial Balance */}
@@ -178,12 +255,16 @@ export default function FinancialStatements() {
             <CardHeader className="flex flex-row items-center justify-between gap-4">
               <div>
                 <CardTitle>{t("accounting.statements.trialBalance", "Trial Balance")}</CardTitle>
-                <CardDescription>{t("accounting.statements.trialBalanceDesc", "Posted period totals and net closing balances")}</CardDescription>
+                <CardDescription>
+                  {t("accounting.statements.trialBalanceDesc", "Posted period totals and net closing balances")}
+                </CardDescription>
               </div>
               {tb && (
                 <Badge variant={tb.isBalanced ? "default" : "destructive"} className="gap-1">
                   {tb.isBalanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
-                  {tb.isBalanced ? t("accounting.journals.balanced", "Balanced") : t("accounting.statements.outOfBalance", "Out of Balance")}
+                  {tb.isBalanced
+                    ? t("accounting.journals.balanced", "Balanced")
+                    : t("accounting.statements.outOfBalance", "Out of Balance")}
                 </Badge>
               )}
             </CardHeader>
@@ -211,8 +292,12 @@ export default function FinancialStatements() {
                         <TableCell className="capitalize text-muted-foreground">{r.accountType}</TableCell>
                         <TableCell className="text-end font-mono">{formatMoney(r.debit, ccy)}</TableCell>
                         <TableCell className="text-end font-mono">{formatMoney(r.credit, ccy)}</TableCell>
-                        <TableCell className="text-end font-mono">{r.closingDebit > 0 ? formatMoney(r.closingDebit, ccy) : "—"}</TableCell>
-                        <TableCell className="text-end font-mono">{r.closingCredit > 0 ? formatMoney(r.closingCredit, ccy) : "—"}</TableCell>
+                        <TableCell className="text-end font-mono">
+                          {r.closingDebit > 0 ? formatMoney(r.closingDebit, ccy) : "—"}
+                        </TableCell>
+                        <TableCell className="text-end font-mono">
+                          {r.closingCredit > 0 ? formatMoney(r.closingCredit, ccy) : "—"}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -236,7 +321,7 @@ export default function FinancialStatements() {
           </Card>
         </TabsContent>
 
-        {/* Profit & Loss */}
+        {/* Profit & Loss (with optional Comparative Prior Period) */}
         <TabsContent value="profit-loss" className="space-y-4">
           {loadingPnl || !pnl ? (
             <Card>
@@ -249,6 +334,13 @@ export default function FinancialStatements() {
                   <CardHeader className="pb-2">
                     <CardDescription>{t("accounting.statements.revenue", "Revenue")}</CardDescription>
                     <CardTitle className="text-2xl">{formatMoney(pnl.totalRevenue, ccy)}</CardTitle>
+                    {pnl.comparative && (
+                      <div className="text-xs text-muted-foreground">
+                        Prior: {formatMoney(pnl.comparative.totalRevenue, ccy)} (
+                        {pnl.comparative.revenueVariance >= 0 ? "+" : ""}
+                        {formatMoney(pnl.comparative.revenueVariance, ccy)})
+                      </div>
+                    )}
                   </CardHeader>
                 </Card>
                 <Card>
@@ -272,6 +364,13 @@ export default function FinancialStatements() {
                     <CardTitle className={`text-2xl ${pnl.netIncome < 0 ? "text-destructive" : "text-green-600"}`}>
                       {formatMoney(pnl.netIncome, ccy)}
                     </CardTitle>
+                    {pnl.comparative && (
+                      <div className="text-xs text-muted-foreground">
+                        Prior: {formatMoney(pnl.comparative.netIncome, ccy)} (
+                        {pnl.comparative.netIncomeVariance >= 0 ? "+" : ""}
+                        {formatMoney(pnl.comparative.netIncomeVariance, ccy)})
+                      </div>
+                    )}
                   </CardHeader>
                 </Card>
               </div>
@@ -283,12 +382,34 @@ export default function FinancialStatements() {
                       {t("accounting.statements.revenue", "Revenue")}
                     </h3>
                     <Table>
+                      {pnl.comparative && (
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="w-24">Code</TableHead>
+                            <TableHead>Account</TableHead>
+                            <TableHead className="text-end">Current</TableHead>
+                            <TableHead className="text-end">Prior</TableHead>
+                            <TableHead className="text-end">Variance</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                      )}
                       <TableBody>
                         {pnl.revenueAccounts.map((a) => (
                           <TableRow key={a.accountId}>
                             <TableCell className="w-24 font-mono">{a.code}</TableCell>
                             <TableCell>{a.name}</TableCell>
                             <TableCell className="text-end font-mono">{formatMoney(a.balance, ccy)}</TableCell>
+                            {pnl.comparative && (
+                              <>
+                                <TableCell className="text-end font-mono text-muted-foreground">
+                                  {formatMoney(a.priorBalance ?? 0, ccy)}
+                                </TableCell>
+                                <TableCell className="text-end font-mono">
+                                  {(a.variance ?? 0) >= 0 ? "+" : ""}
+                                  {formatMoney(a.variance ?? 0, ccy)}
+                                </TableCell>
+                              </>
+                            )}
                           </TableRow>
                         ))}
                       </TableBody>
@@ -306,6 +427,17 @@ export default function FinancialStatements() {
                             <TableCell className="w-24 font-mono">{a.code}</TableCell>
                             <TableCell>{a.name}</TableCell>
                             <TableCell className="text-end font-mono">{formatMoney(a.balance, ccy)}</TableCell>
+                            {pnl.comparative && (
+                              <>
+                                <TableCell className="text-end font-mono text-muted-foreground">
+                                  {formatMoney(a.priorBalance ?? 0, ccy)}
+                                </TableCell>
+                                <TableCell className="text-end font-mono">
+                                  {(a.variance ?? 0) >= 0 ? "+" : ""}
+                                  {formatMoney(a.variance ?? 0, ccy)}
+                                </TableCell>
+                              </>
+                            )}
                           </TableRow>
                         ))}
                       </TableBody>
@@ -348,7 +480,9 @@ export default function FinancialStatements() {
                 </div>
                 <Badge variant={bs.isBalanced ? "default" : "destructive"} className="gap-1">
                   {bs.isBalanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
-                  {bs.isBalanced ? t("accounting.journals.balanced", "Assets = L + E") : t("accounting.statements.outOfBalance", "Out of Balance")}
+                  {bs.isBalanced
+                    ? t("accounting.journals.balanced", "Assets = L + E")
+                    : t("accounting.statements.outOfBalance", "Out of Balance")}
                 </Badge>
               </div>
 
@@ -370,8 +504,12 @@ export default function FinancialStatements() {
                       </TableBody>
                       <TableFooter>
                         <TableRow>
-                          <TableCell colSpan={2} className="font-semibold">{t("accounting.statements.assets", "Total Assets")}</TableCell>
-                          <TableCell className="text-end font-mono font-bold">{formatMoney(bs.totalAssets, ccy)}</TableCell>
+                          <TableCell colSpan={2} className="font-semibold">
+                            {t("accounting.statements.assets", "Total Assets")}
+                          </TableCell>
+                          <TableCell className="text-end font-mono font-bold">
+                            {formatMoney(bs.totalAssets, ccy)}
+                          </TableCell>
                         </TableRow>
                       </TableFooter>
                     </Table>
@@ -419,6 +557,270 @@ export default function FinancialStatements() {
                           </TableCell>
                         </TableRow>
                       </TableFooter>
+                    </Table>
+                  </CardContent>
+                </Card>
+              </div>
+            </>
+          )}
+        </TabsContent>
+
+        {/* Indirect Cash Flow Statement */}
+        <TabsContent value="cash-flow" className="space-y-4">
+          {loadingCf || !cf ? (
+            <Card>
+              <CardContent className="py-10 text-center text-muted-foreground">{t("common.loading")}</CardContent>
+            </Card>
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div className="grid gap-4 md:grid-cols-3 flex-1">
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardDescription>Opening Cash & Bank</CardDescription>
+                      <CardTitle className="text-2xl">{formatMoney(cf.openingCash, ccy)}</CardTitle>
+                    </CardHeader>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardDescription>Net Change in Cash</CardDescription>
+                      <CardTitle className="text-2xl">{formatMoney(cf.netCashChange, ccy)}</CardTitle>
+                    </CardHeader>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardDescription>Closing Cash & Bank</CardDescription>
+                      <CardTitle className="text-2xl text-primary">{formatMoney(cf.closingCash, ccy)}</CardTitle>
+                    </CardHeader>
+                  </Card>
+                </div>
+                <Badge variant={cf.isReconciled ? "default" : "destructive"} className="gap-1">
+                  {cf.isReconciled ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+                  {cf.isReconciled ? "Reconciled to Cash GL" : "Out of Reconciliation"}
+                </Badge>
+              </div>
+
+              <Card>
+                <CardContent className="pt-6 space-y-6">
+                  <div>
+                    <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                      Operating Activities
+                    </h3>
+                    <Table>
+                      <TableBody>
+                        <TableRow>
+                          <TableCell className="font-medium">Net Income</TableCell>
+                          <TableCell className="text-end font-mono">
+                            {formatMoney(cf.operating.netIncome, ccy)}
+                          </TableCell>
+                        </TableRow>
+                        {cf.operating.nonCashAdjustments.map((item) => (
+                          <TableRow key={`nc-${item.code}`}>
+                            <TableCell>{item.label}</TableCell>
+                            <TableCell className="text-end font-mono">{formatMoney(item.amount, ccy)}</TableCell>
+                          </TableRow>
+                        ))}
+                        {cf.operating.workingCapitalChanges.map((item) => (
+                          <TableRow key={`wc-${item.code}`}>
+                            <TableCell>{item.label}</TableCell>
+                            <TableCell className="text-end font-mono">{formatMoney(item.amount, ccy)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                      <TableFooter>
+                        <TableRow>
+                          <TableCell className="font-semibold">Net Cash from Operating Activities</TableCell>
+                          <TableCell className="text-end font-mono font-bold">
+                            {formatMoney(cf.operating.total, ccy)}
+                          </TableCell>
+                        </TableRow>
+                      </TableFooter>
+                    </Table>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                      Investing Activities
+                    </h3>
+                    <Table>
+                      <TableBody>
+                        {cf.investing.items.length === 0 ? (
+                          <TableRow>
+                            <TableCell className="text-muted-foreground">No capital expenditure movements</TableCell>
+                            <TableCell className="text-end font-mono">{formatMoney(0, ccy)}</TableCell>
+                          </TableRow>
+                        ) : (
+                          cf.investing.items.map((item) => (
+                            <TableRow key={`inv-${item.code}`}>
+                              <TableCell>{item.label}</TableCell>
+                              <TableCell className="text-end font-mono">{formatMoney(item.amount, ccy)}</TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
+                      <TableFooter>
+                        <TableRow>
+                          <TableCell className="font-semibold">Net Cash from Investing Activities</TableCell>
+                          <TableCell className="text-end font-mono font-bold">
+                            {formatMoney(cf.investing.total, ccy)}
+                          </TableCell>
+                        </TableRow>
+                      </TableFooter>
+                    </Table>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                      Financing Activities
+                    </h3>
+                    <Table>
+                      <TableBody>
+                        {cf.financing.items.length === 0 ? (
+                          <TableRow>
+                            <TableCell className="text-muted-foreground">No equity financing movements</TableCell>
+                            <TableCell className="text-end font-mono">{formatMoney(0, ccy)}</TableCell>
+                          </TableRow>
+                        ) : (
+                          cf.financing.items.map((item) => (
+                            <TableRow key={`fin-${item.code}`}>
+                              <TableCell>{item.label}</TableCell>
+                              <TableCell className="text-end font-mono">{formatMoney(item.amount, ccy)}</TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
+                      <TableFooter>
+                        <TableRow>
+                          <TableCell className="font-semibold">Net Cash from Financing Activities</TableCell>
+                          <TableCell className="text-end font-mono font-bold">
+                            {formatMoney(cf.financing.total, ccy)}
+                          </TableCell>
+                        </TableRow>
+                      </TableFooter>
+                    </Table>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          )}
+        </TabsContent>
+
+        {/* VAT / Tax Return Summary */}
+        <TabsContent value="vat-return" className="space-y-4">
+          {loadingVat || !vat ? (
+            <Card>
+              <CardContent className="py-10 text-center text-muted-foreground">{t("common.loading")}</CardContent>
+            </Card>
+          ) : (
+            <>
+              <div className="grid gap-4 md:grid-cols-3">
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardDescription>Output VAT (Sales & POS)</CardDescription>
+                    <CardTitle className="text-2xl">{formatMoney(vat.totalOutputVat, ccy)}</CardTitle>
+                    <div className="text-xs text-muted-foreground">
+                      GL 2300 Balance: {formatMoney(vat.glOutputVatBalance, ccy)}
+                    </div>
+                  </CardHeader>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardDescription>Input VAT (Bills & Expenses)</CardDescription>
+                    <CardTitle className="text-2xl">{formatMoney(vat.totalInputVat, ccy)}</CardTitle>
+                    <div className="text-xs text-muted-foreground">
+                      GL 1300 Balance: {formatMoney(vat.glInputVatBalance, ccy)}
+                    </div>
+                  </CardHeader>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardDescription>
+                      {vat.netVatPayable >= 0 ? "Net VAT Payable to Authority" : "Net VAT Refundable Credit"}
+                    </CardDescription>
+                    <CardTitle className="text-2xl text-primary">
+                      {formatMoney(vat.netVatPayable, ccy)}
+                    </CardTitle>
+                  </CardHeader>
+                </Card>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Output VAT by Tax Rate</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Rate %</TableHead>
+                          <TableHead className="text-end">Docs</TableHead>
+                          <TableHead className="text-end">Taxable Sales</TableHead>
+                          <TableHead className="text-end">Output VAT</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {vat.outputSales.length === 0 ? (
+                          <TableRow>
+                            <TableCell colSpan={4} className="text-center text-muted-foreground py-6">
+                              No taxable sales in range
+                            </TableCell>
+                          </TableRow>
+                        ) : (
+                          vat.outputSales.map((b) => (
+                            <TableRow key={`out-${b.taxRate}`}>
+                              <TableCell className="font-mono">{b.taxRate}%</TableCell>
+                              <TableCell className="text-end">{b.documentCount}</TableCell>
+                              <TableCell className="text-end font-mono">
+                                {formatMoney(b.taxableAmount, ccy)}
+                              </TableCell>
+                              <TableCell className="text-end font-mono font-semibold">
+                                {formatMoney(b.vatAmount, ccy)}
+                              </TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Input VAT by Tax Rate</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Rate %</TableHead>
+                          <TableHead className="text-end">Docs</TableHead>
+                          <TableHead className="text-end">Taxable Purchases</TableHead>
+                          <TableHead className="text-end">Input VAT</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {vat.inputPurchasesAndExpenses.length === 0 ? (
+                          <TableRow>
+                            <TableCell colSpan={4} className="text-center text-muted-foreground py-6">
+                              No recoverable input VAT in range
+                            </TableCell>
+                          </TableRow>
+                        ) : (
+                          vat.inputPurchasesAndExpenses.map((b) => (
+                            <TableRow key={`in-${b.taxRate}`}>
+                              <TableCell className="font-mono">{b.taxRate}%</TableCell>
+                              <TableCell className="text-end">{b.documentCount}</TableCell>
+                              <TableCell className="text-end font-mono">
+                                {formatMoney(b.taxableAmount, ccy)}
+                              </TableCell>
+                              <TableCell className="text-end font-mono font-semibold">
+                                {formatMoney(b.vatAmount, ccy)}
+                              </TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
                     </Table>
                   </CardContent>
                 </Card>
