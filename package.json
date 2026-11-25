@@ -9,8 +9,8 @@
     "backend"
   ],
   "scripts": {
-    "dev": "concurrently -k -n backend,frontend -c blue,green \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
-    "dev:backend": "npm --prefix backend run dev",
+    "dev": "npm --prefix backend run db:migrate && concurrently -k -n backend,frontend -c blue,green \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "dev:backend": "npm --prefix backend run db:migrate && npm --prefix backend run dev",
     "dev:frontend": "npm --prefix frontend run dev",
     "build": "npm --prefix packages/shared run typecheck && npm --prefix backend run typecheck && npm --prefix backend run build && npm --prefix frontend run build",
     "typecheck": "npm --prefix packages/shared run typecheck && npm --prefix backend run typecheck && npm --prefix frontend run typecheck",

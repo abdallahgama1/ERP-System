@@ -46,6 +46,23 @@ async function start(): Promise<void> {
     if (etaWorkerTimer) clearInterval(etaWorkerTimer);
   });
 
+  const shutdown = async () => {
+    log.info("Shutting down ERP API gracefully");
+    if (overdueTimer) clearInterval(overdueTimer);
+    if (housekeepingTimer) clearInterval(housekeepingTimer);
+    if (etaWorkerTimer) clearInterval(etaWorkerTimer);
+    await app.close();
+    await closeDatabase();
+    await flushBackendSentry(2000);
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  await app.listen({ port: env.PORT, host: env.HOST });
+  log.info({ host: env.HOST, port: env.PORT }, "ERP API listening");
+
   if (!isDatabaseConfigured()) {
     log.warn("DATABASE_URL is not configured; set DATABASE_URL in backend/.env and run `npm run db:migrate`.");
   } else {
@@ -91,23 +108,6 @@ async function start(): Promise<void> {
       etaWorkerTimer.unref?.();
     }
   }
-
-  const shutdown = async () => {
-    log.info("Shutting down ERP API gracefully");
-    if (overdueTimer) clearInterval(overdueTimer);
-    if (housekeepingTimer) clearInterval(housekeepingTimer);
-    if (etaWorkerTimer) clearInterval(etaWorkerTimer);
-    await app.close();
-    await closeDatabase();
-    await flushBackendSentry(2000);
-    process.exit(0);
-  };
-
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  await app.listen({ port: env.PORT, host: env.HOST });
-  log.info({ host: env.HOST, port: env.PORT }, "ERP API listening");
 }
 
 start().catch((err) => {
