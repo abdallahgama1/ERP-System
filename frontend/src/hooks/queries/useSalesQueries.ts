@@ -29,6 +29,7 @@ export interface ApiCustomer {
   billingAddress: string;
   shippingAddress: string;
   taxNumber: string;
+  etaReceiverType?: "B" | "P" | "F";
   currency: string;
   paymentTermsDays: number;
   creditLimit: number | null;
@@ -176,6 +177,7 @@ export function mapApiCustomer(c: ApiCustomer): Customer {
     email: c.email || undefined,
     phone: c.phone || undefined,
     taxNumber: c.taxNumber || undefined,
+    etaReceiverType: c.etaReceiverType ?? (c.company || c.taxNumber ? "B" : "P"),
     currency: c.currency === "SAR" || c.currency === "AED" || c.currency === "EGP" ? c.currency : "USD",
     paymentTerms: termsFromDays(c.paymentTermsDays),
     creditLimit: c.creditLimit,

@@ -11,6 +11,32 @@ export type EinvoiceDocumentType = (typeof EINVOICE_DOCUMENT_TYPES)[number];
 export const ETA_RECEIPT_TYPES = ["S", "R"] as const;
 export type EtaReceiptType = (typeof ETA_RECEIPT_TYPES)[number];
 
+export const ETA_CODE_TYPES = ["EGS", "GS1"] as const;
+export type EtaCodeType = (typeof ETA_CODE_TYPES)[number];
+
+export const ETA_UNIT_TYPES = ["EA", "KGM", "LTR", "MTR", "BX", "PK", "TNE", "HUR"] as const;
+export type EtaUnitType = (typeof ETA_UNIT_TYPES)[number];
+
+export const ETA_RECEIVER_TYPES = ["B", "P", "F"] as const;
+export type EtaReceiverType = (typeof ETA_RECEIVER_TYPES)[number];
+
+export const ETA_INVOICE_TYPES = ["I", "C", "D"] as const;
+export type EtaInvoiceType = (typeof ETA_INVOICE_TYPES)[number];
+
+export const ETA_INVOICE_VERSIONS = ["1.0", "0.9"] as const;
+export type EtaInvoiceVersion = (typeof ETA_INVOICE_VERSIONS)[number];
+
+export const ETA_DOCUMENT_TYPE_CODES = ["S", "R", "I", "C", "D"] as const;
+export type EtaDocumentTypeCode = (typeof ETA_DOCUMENT_TYPE_CODES)[number];
+
+export const ETA_SIGNATURE_STATUSES = [
+  "signed",
+  "unsigned_v0_9",
+  "pending_signature",
+  "not_required",
+] as const;
+export type EtaSignatureStatus = (typeof ETA_SIGNATURE_STATUSES)[number];
+
 const optionalEnumFilter = <T extends readonly [string, ...string[]]>(values: T) =>
   z
     .union([z.enum(values), z.literal(""), z.literal("all")])
@@ -39,12 +65,16 @@ export interface EtaSubmissionListItemDto {
   id: string;
   invoiceId: string | null;
   posReturnId: string | null;
+  salesReturnId?: string | null;
   documentNumber: string | null;
   branchId: string | null;
   branchName: string | null;
   provider: EinvoiceProvider;
   documentType: EinvoiceDocumentType;
   receiptType: EtaReceiptType | null;
+  etaDocumentTypeCode?: EtaDocumentTypeCode | null;
+  documentVersion?: string | null;
+  signatureStatus?: EtaSignatureStatus | null;
   documentUuid: string;
   submissionUuid: string | null;
   status: EinvoiceSubmissionStatus;
@@ -71,4 +101,6 @@ export interface EinvoiceQueueSummaryDto {
   failed: number;
   total: number;
   etaConfigured: boolean;
+  signerConfigured?: boolean;
+  invoiceVersion?: EtaInvoiceVersion;
 }

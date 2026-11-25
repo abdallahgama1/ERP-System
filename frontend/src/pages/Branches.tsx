@@ -44,7 +44,12 @@ const Branches = () => {
   const [formData, setFormData] = useState({
     branch_name: "",
     branch_location: "",
-    contact_number: ""
+    contact_number: "",
+    etaBranchId: "0",
+    governorate: "",
+    regionCity: "",
+    street: "",
+    buildingNumber: "",
   });
 
   const filteredBranches = branches.filter(branch =>
@@ -57,7 +62,12 @@ const Branches = () => {
     setFormData({
       branch_name: "",
       branch_location: "",
-      contact_number: ""
+      contact_number: "",
+      etaBranchId: "0",
+      governorate: "",
+      regionCity: "",
+      street: "",
+      buildingNumber: "",
     });
     setEditingBranch(null);
   };
@@ -90,7 +100,12 @@ const Branches = () => {
     setFormData({
       branch_name: branch.branch_name,
       branch_location: branch.branch_location,
-      contact_number: branch.contact_number
+      contact_number: branch.contact_number,
+      etaBranchId: branch.etaBranchId ?? "0",
+      governorate: branch.governorate ?? "",
+      regionCity: branch.regionCity ?? "",
+      street: branch.street ?? "",
+      buildingNumber: branch.buildingNumber ?? "",
     });
     setIsAddDialogOpen(true);
   };
@@ -175,6 +190,69 @@ const Branches = () => {
                   placeholder="e.g., +15551234567"
                   required
                 />
+              </div>
+
+              <div className="rounded-md border p-3 space-y-3 bg-muted/20">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {t("branches.etaAddressSection", "ETA Egypt Tax Address (Optional)")}
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <Label htmlFor="etaBranchId" className="text-xs">
+                      {t("branches.etaBranchId", "ETA Branch Code")}
+                    </Label>
+                    <Input
+                      id="etaBranchId"
+                      value={formData.etaBranchId}
+                      onChange={(e) => setFormData({ ...formData, etaBranchId: e.target.value })}
+                      placeholder="0"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="governorate" className="text-xs">
+                      {t("branches.governorate", "Governorate")}
+                    </Label>
+                    <Input
+                      id="governorate"
+                      value={formData.governorate}
+                      onChange={(e) => setFormData({ ...formData, governorate: e.target.value })}
+                      placeholder="Cairo"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="regionCity" className="text-xs">
+                      {t("branches.regionCity", "City / Region")}
+                    </Label>
+                    <Input
+                      id="regionCity"
+                      value={formData.regionCity}
+                      onChange={(e) => setFormData({ ...formData, regionCity: e.target.value })}
+                      placeholder="Nasr City"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="buildingNumber" className="text-xs">
+                      {t("branches.buildingNumber", "Building #")}
+                    </Label>
+                    <Input
+                      id="buildingNumber"
+                      value={formData.buildingNumber}
+                      onChange={(e) => setFormData({ ...formData, buildingNumber: e.target.value })}
+                      placeholder="12"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="street" className="text-xs">
+                    {t("branches.street", "Street")}
+                  </Label>
+                  <Input
+                    id="street"
+                    value={formData.street}
+                    onChange={(e) => setFormData({ ...formData, street: e.target.value })}
+                    placeholder="Makram Ebeid St"
+                  />
+                </div>
               </div>
               
               <div className="flex justify-end gap-2">

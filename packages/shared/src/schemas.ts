@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ETA_CODE_TYPES, ETA_RECEIVER_TYPES } from "./einvoicing.ts";
 import { ITEM_TYPES, PICKING_STRATEGIES, TRACKING_MODES, lotAllocationInputSchema } from "./inventory-extensions.ts";
 import { offsetPageQuerySchema, optionalUuidQuery } from "./pagination.ts";
 import { BRANCH_TYPES } from "./permissions.ts";
@@ -14,6 +15,13 @@ export const branchInputSchema = z.object({
   phone: z.string().trim().max(60).optional().default(""),
   email: z.string().trim().max(120).optional().default(""),
   managerName: z.string().trim().max(120).optional().default(""),
+  etaBranchId: z.string().trim().max(16).optional().default("0"),
+  country: z.string().trim().max(8).optional().default("EG"),
+  governorate: z.string().trim().max(100).optional().default(""),
+  regionCity: z.string().trim().max(100).optional().default(""),
+  street: z.string().trim().max(200).optional().default(""),
+  buildingNumber: z.string().trim().max(40).optional().default(""),
+  postalCode: z.string().trim().max(24).optional().default(""),
   isDefault: z.boolean().optional().default(false),
   isActive: z.boolean().optional().default(true),
 });
@@ -62,6 +70,9 @@ export const createProductSchema = z.object({
   pickingStrategy: z.enum(PICKING_STRATEGIES).optional().default("FEFO"),
   trackLots: z.boolean().optional().default(false),
   trackSerials: z.boolean().optional().default(false),
+  etaCodeType: z.enum(ETA_CODE_TYPES).optional().default("EGS"),
+  etaItemCode: z.string().trim().max(80).optional().default(""),
+  etaUnitType: z.string().trim().max(16).optional().default("EA"),
   initialStock: z.array(initialStockSchema).optional().default([]),
 });
 
@@ -306,6 +317,7 @@ export const customerSchema = z.object({
   billingAddress: z.string().trim().max(300).optional().default(""),
   shippingAddress: z.string().trim().max(300).optional().default(""),
   taxNumber: z.string().trim().max(80).optional().default(""),
+  etaReceiverType: z.enum(ETA_RECEIVER_TYPES).optional(),
   currency: z.string().trim().max(10).optional().default("USD"),
   paymentTermsDays: z.number().int().min(0).max(365).optional().default(30),
   creditLimit: z.number().min(0).nullable().optional().default(null),

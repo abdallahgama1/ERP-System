@@ -29,6 +29,7 @@ const customerSchema = z.object({
   email: z.string().email("Invalid email address").or(z.literal("")),
   phone: z.string().max(20).optional(),
   taxNumber: z.string().max(50).optional(),
+  etaReceiverType: z.enum(["B", "P", "F"]).optional(),
   currency: z.enum(["SAR", "AED", "USD", "EGP"]),
   paymentTerms: z.enum(["NET15", "NET30", "COD"]),
   creditLimit: z.union([z.number().min(0), z.null()]).optional(),
@@ -48,6 +49,7 @@ const initialForm: FormData = {
   email: "",
   phone: "",
   taxNumber: "",
+  etaReceiverType: "B",
   currency: "SAR",
   paymentTerms: "NET30",
   creditLimit: null,
@@ -92,6 +94,7 @@ export default function Customers() {
         email: c.email || undefined,
         phone: c.phone || undefined,
         taxNumber: c.taxNumber || undefined,
+        etaReceiverType: c.etaReceiverType ?? (c.company || c.taxNumber ? "B" : "P"),
         currency: c.currency === "SAR" || c.currency === "AED" || c.currency === "EGP" ? c.currency : "USD",
         paymentTerms: termsFromDays(c.paymentTermsDays),
         creditLimit: c.creditLimit,
@@ -116,6 +119,7 @@ export default function Customers() {
         email: customer.email ?? "",
         phone: customer.phone ?? "",
         taxNumber: customer.taxNumber ?? "",
+        etaReceiverType: customer.etaReceiverType ?? (customer.customerType === "business" ? "B" : "P"),
         currency: customer.currency,
         paymentTerms: customer.paymentTerms,
         creditLimit: customer.creditLimit ?? null,
@@ -153,6 +157,7 @@ export default function Customers() {
       email: form.email,
       phone: form.phone,
       taxNumber: form.taxNumber,
+      etaReceiverType: form.etaReceiverType ?? (form.customerType === "business" ? "B" : "P"),
       currency: form.currency,
       paymentTerms: form.paymentTerms,
       creditLimit: form.creditLimit === undefined ? null : form.creditLimit,
@@ -367,10 +372,26 @@ export default function Customers() {
               </div>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-3">
               <div className="space-y-2">
                 <Label htmlFor="taxNumber">{t("customers.taxNumber")}</Label>
                 <Input id="taxNumber" value={form.taxNumber} onChange={(e) => setForm({ ...form, taxNumber: e.target.value })} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="etaReceiverType">{t("customers.etaReceiverType", "ETA Receiver Type")}</Label>
+                <Select
+                  value={form.etaReceiverType ?? "B"}
+                  onValueChange={(v: "B" | "P" | "F") => setForm({ ...form, etaReceiverType: v })}
+                >
+                  <SelectTrigger id="etaReceiverType">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="B">{t("customers.etaBusiness", "B — Business (RIN)")}</SelectItem>
+                    <SelectItem value="P">{t("customers.etaPerson", "P — Person (National ID)")}</SelectItem>
+                    <SelectItem value="F">{t("customers.etaForeigner", "F — Foreign Buyer")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="creditLimit">
@@ -402,6 +423,7 @@ export default function Customers() {
                     <SelectItem value="SAR">SAR</SelectItem>
                     <SelectItem value="AED">AED</SelectItem>
                     <SelectItem value="USD">USD</SelectItem>
+                    <SelectItem value="EGP">EGP</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

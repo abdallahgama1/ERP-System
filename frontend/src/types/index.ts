@@ -42,6 +42,9 @@ export interface Product {
   requiresExpiry?: boolean;
   shelfLifeDays?: number | null;
   pickingStrategy?: 'FEFO' | 'FIFO' | 'LIFO';
+  etaCodeType?: 'EGS' | 'GS1';
+  etaItemCode?: string;
+  etaUnitType?: string;
   hasBom?: boolean;
 }
 
@@ -52,6 +55,13 @@ export interface Branch {
   contact_number: string;
   code?: string;
   branchType?: 'hq_warehouse' | 'warehouse' | 'retail';
+  etaBranchId?: string;
+  country?: string;
+  governorate?: string;
+  regionCity?: string;
+  street?: string;
+  buildingNumber?: string;
+  postalCode?: string;
   isDefault?: boolean;
   isActive?: boolean;
 }
@@ -68,6 +78,7 @@ export interface Customer {
   email?: string;
   phone?: string;
   taxNumber?: string;
+  etaReceiverType?: 'B' | 'P' | 'F';
   currency: 'SAR' | 'AED' | 'USD' | 'EGP';
   paymentTerms: 'NET15' | 'NET30' | 'COD';
   creditLimit?: number | null;

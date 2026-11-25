@@ -120,7 +120,12 @@ function parseAcceptedDocuments(rawDocs: unknown): EtaAcceptedDocument[] {
     .map((d) => ({
       uuid: typeof d.uuid === "string" ? d.uuid : "",
       longId: typeof d.longId === "string" ? d.longId : null,
-      receiptNumber: typeof d.receiptNumber === "string" ? d.receiptNumber : null,
+      receiptNumber:
+        typeof d.receiptNumber === "string"
+          ? d.receiptNumber
+          : typeof d.internalId === "string"
+            ? d.internalId
+            : null,
       hashKey: typeof d.hashKey === "string" ? d.hashKey : null,
     }))
     .filter((d) => d.uuid.length > 0);
@@ -132,7 +137,12 @@ function parseRejectedDocuments(rawDocs: unknown): EtaRejectedDocument[] {
     .filter((d): d is Record<string, unknown> => Boolean(d && typeof d === "object"))
     .map((d) => ({
       uuid: typeof d.uuid === "string" ? d.uuid : null,
-      receiptNumber: typeof d.receiptNumber === "string" ? d.receiptNumber : null,
+      receiptNumber:
+        typeof d.receiptNumber === "string"
+          ? d.receiptNumber
+          : typeof d.internalId === "string"
+            ? d.internalId
+            : null,
       errorMessage: extractEtaErrorDetails(d.error ?? d),
       rawError: d.error ?? d,
     }));
@@ -330,6 +340,121 @@ export async function getEtaSubmissionStatus(
 
   const status = normalizeRemoteSubmissionStatus(parsed.status ?? parsed.overallStatus);
   const accepted = parseAcceptedDocuments(parsed.acceptedDocuments ?? parsed.receipts);
+  const rejected = parseRejectedDocuments(parsed.rejectedDocuments);
+
+  return {
+    submissionUuid,
+    status,
+    accepted,
+    rejected,
+    rawResponse: parsed,
+  };
+}
+
+/**
+ * Submits one or more ETA Egypt B2B e-Invoice v1.0 / v0.9 documents (`I` / `C` / `D`)
+ * to `POST /api/v1/documentsubmissions`.
+ */
+export async function submitEtaDocuments(
+  documents: Array<Record<string, unknown>>,
+  opts?: EtaClientOptions
+): Promise<EtaReceiptSubmissionResult> {
+  const token = await getEtaAccessToken({ fetchImpl: opts?.fetchImpl });
+  const fetchFn = opts?.fetchImpl ?? globalThis.fetch;
+  const url = `${resolveEtaApiBaseUrl()}/api/v1/documentsubmissions`;
+
+  const response = await fetchFn(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ documents }),
+  });
+
+  const rawText = await response.text();
+  let parsed: Record<string, unknown> = {};
+  if (rawText) {
+    try {
+      parsed = JSON.parse(rawText) as Record<string, unknown>;
+    } catch {
+      parsed = { raw: rawText };
+    }
+  }
+
+  if (!response.ok) {
+    const errMsg = extractEtaErrorDetails(parsed.error ?? parsed);
+    throw new EtaClientError(
+      `ETA document submission failed (${response.status}): ${errMsg}`,
+      response.status,
+      response.status >= 500 || response.status === 429 || response.status === 401,
+      parsed
+    );
+  }
+
+  const submissionUuid =
+    typeof parsed.submissionId === "string"
+      ? parsed.submissionId
+      : typeof parsed.submissionUUID === "string"
+        ? parsed.submissionUUID
+        : typeof parsed.submissionUuid === "string"
+          ? parsed.submissionUuid
+          : null;
+
+  const accepted = parseAcceptedDocuments(parsed.acceptedDocuments);
+  const rejected = parseRejectedDocuments(parsed.rejectedDocuments);
+
+  return {
+    submissionUuid,
+    accepted,
+    rejected,
+    rawResponse: parsed,
+  };
+}
+
+/**
+ * Polls an asynchronous ETA B2B e-Invoice v1.0 submission status via
+ * `GET /api/v1/documentsubmissions/:submissionUuid`.
+ */
+export async function getEtaDocumentSubmissionStatus(
+  submissionUuid: string,
+  opts?: EtaClientOptions
+): Promise<EtaSubmissionStatusResult> {
+  const token = await getEtaAccessToken({ fetchImpl: opts?.fetchImpl });
+  const fetchFn = opts?.fetchImpl ?? globalThis.fetch;
+  const url = `${resolveEtaApiBaseUrl()}/api/v1/documentsubmissions/${encodeURIComponent(submissionUuid)}`;
+
+  const response = await fetchFn(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+  });
+
+  const rawText = await response.text();
+  let parsed: Record<string, unknown> = {};
+  if (rawText) {
+    try {
+      parsed = JSON.parse(rawText) as Record<string, unknown>;
+    } catch {
+      parsed = { raw: rawText };
+    }
+  }
+
+  if (!response.ok) {
+    const errMsg = extractEtaErrorDetails(parsed.error ?? parsed);
+    throw new EtaClientError(
+      `ETA document status poll failed (${response.status}): ${errMsg}`,
+      response.status,
+      response.status >= 500 || response.status === 429 || response.status === 401,
+      parsed
+    );
+  }
+
+  const status = normalizeRemoteSubmissionStatus(parsed.overallStatus ?? parsed.status);
+  const accepted = parseAcceptedDocuments(parsed.documentSummary ?? parsed.acceptedDocuments);
   const rejected = parseRejectedDocuments(parsed.rejectedDocuments);
 
   return {

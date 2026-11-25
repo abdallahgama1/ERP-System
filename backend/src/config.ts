@@ -102,6 +102,12 @@ export const env = {
   ETA_API_BASE_URL: (process.env.ETA_API_BASE_URL ?? "https://api.preprod.invoicing.eta.gov.eg")
     .trim()
     .replace(/\/+$/, ""),
+  ETA_INVOICE_VERSION: ((process.env.ETA_INVOICE_VERSION ?? "").trim() === "0.9" ? "0.9" : "1.0") as
+    | "1.0"
+    | "0.9",
+  ETA_SIGNER_URL: (process.env.ETA_SIGNER_URL ?? "").trim().replace(/\/+$/, ""),
+  ETA_SIGNER_TOKEN: (process.env.ETA_SIGNER_TOKEN ?? "").trim(),
+  ETA_SIGNER_TIMEOUT_MS: parseIntEnv(process.env.ETA_SIGNER_TIMEOUT_MS, 10_000),
   METRICS_TOKEN: (process.env.METRICS_TOKEN ?? "").trim(),
   SENTRY_DSN: (process.env.SENTRY_DSN ?? "").trim(),
   SENTRY_ENVIRONMENT: (process.env.SENTRY_ENVIRONMENT ?? "").trim() || nodeEnv,

@@ -102,10 +102,15 @@ export async function createCustomer(
       throw new AppError(409, `Customer code '${code}' already exists`, "DUPLICATE_CODE");
     }
 
+    const resolvedReceiverType: "B" | "P" | "F" =
+      data.etaReceiverType ??
+      (data.company?.trim() || data.taxNumber?.trim() ? "B" : "P");
+
     const [inserted] = await tx
       .insert(customers)
       .values({
         ...data,
+        etaReceiverType: resolvedReceiverType,
         companyId,
         code,
         creditLimit:

@@ -8,7 +8,9 @@ import {
   type EinvoiceQueueSummaryDto,
   type EinvoiceRetryInput,
   type EinvoiceSubmissionStatus,
+  type EtaDocumentTypeCode,
   type EtaReceiptType,
+  type EtaSignatureStatus,
   type EtaSubmissionDetailDto,
   type EtaSubmissionListItemDto,
   type OffsetPageInfo,
@@ -28,6 +30,8 @@ import {
   products,
   salesInvoiceLines,
   salesInvoices,
+  salesReturnLines,
+  salesReturns,
 } from "../../drizzle/schema.ts";
 import type { DbOrTx } from "../auth/permissions.ts";
 import { AppError, num } from "../db/helpers.ts";
@@ -35,10 +39,18 @@ import { getDb, type AppDatabase } from "../db/index.ts";
 import { createModuleLogger } from "../logging/logger.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import {
+  getEtaDocumentSubmissionStatus,
   getEtaSubmissionStatus,
   isEtaConfigured,
+  submitEtaDocuments,
   submitEtaReceipts,
 } from "./eta-client.service.ts";
+import {
+  computeEtaDocumentCanonicalDigest,
+  isEtaSignerConfigured,
+  resolveEtaInvoiceVersion,
+  signEtaInvoiceIfNeeded,
+} from "./eta-signer.service.ts";
 import { actorCompanyId, parseOrThrow, type RequestActor } from "./stock-locks.ts";
 
 const log = createModuleLogger("einvoicing");
@@ -202,6 +214,11 @@ export function buildEtaEgyptQrUrl(etaUuid: string, dateTimeIssuedIso: string): 
   return `https://invoicing.eta.gov.eg/receipts/search/${etaUuid}/share/${encodeURIComponent(formattedDate)}`;
 }
 
+export function buildEtaEgyptInvoiceShareUrl(etaUuid: string, dateTimeIssuedIso: string): string {
+  const formattedDate = dateTimeIssuedIso.replace(/\.\d{3}Z$/, "Z");
+  return `https://invoicing.eta.gov.eg/documents/${etaUuid}/share/${encodeURIComponent(formattedDate)}`;
+}
+
 export function mapPosPaymentMethodToEta(method?: string | null): "C" | "V" | "CC" | "O" {
   if (method === "card") return "CC";
   if (method === "mobile_wallet") return "V";
@@ -219,9 +236,15 @@ export interface EtaReceiptBuildInput {
   sellerTaxNumber: string;
   branchCode: string;
   branchAddress: string;
+  branchCountry?: string;
+  branchGovernorate?: string;
+  branchRegionCity?: string;
+  branchBuildingNumber?: string;
+  branchPostalCode?: string;
   posSerialNumber: string;
   buyerName: string;
   buyerTaxNumber?: string;
+  buyerType?: "B" | "P" | "F";
   paymentMethod: "C" | "V" | "CC" | "O";
   subtotal: number;
   taxTotal: number;
@@ -229,6 +252,9 @@ export interface EtaReceiptBuildInput {
   lines: Array<{
     description: string;
     itemCode: string;
+    internalCode?: string;
+    itemType?: "EGS" | "GS1";
+    unitType?: string;
     quantity: number;
     unitPrice: number;
     taxRate: number;
@@ -254,6 +280,15 @@ export function buildEtaEgyptReceiptPayload(input: EtaReceiptBuildInput): {
     currency: input.currency || "EGP",
     orderdeliveryMode: "FC",
   };
+  const branchAddressObj: Record<string, unknown> = {
+    country: input.branchCountry || "EG",
+    governate: input.branchGovernorate || "Cairo",
+    regionCity: input.branchRegionCity || "Cairo",
+    street: input.branchAddress || "Main Branch",
+    buildingNumber: input.branchBuildingNumber || "1",
+    ...(input.branchPostalCode ? { postalCode: input.branchPostalCode } : {}),
+  };
+  const resolvedBuyerType = input.buyerType ?? (input.buyerTaxNumber ? "B" : "P");
   const basePayload: Record<string, unknown> = {
     header: headerObj,
     documentType: {
@@ -264,29 +299,23 @@ export function buildEtaEgyptReceiptPayload(input: EtaReceiptBuildInput): {
       rin: input.sellerTaxNumber || "000000000",
       companyTradeName: input.sellerName,
       branchCode: input.branchCode || "0",
-      branchAddress: {
-        country: "EG",
-        governate: "Cairo",
-        regionCity: "Cairo",
-        street: input.branchAddress || "Main Branch",
-        buildingNumber: "1",
-      },
+      branchAddress: branchAddressObj,
       deviceSerialNumber: input.posSerialNumber || "POS-DEV-01",
       activityCode: "4711",
     },
     buyer: {
-      type: input.buyerTaxNumber ? "B" : "P",
+      type: resolvedBuyerType,
       id: input.buyerTaxNumber || "",
       name: input.buyerName || "Walk-in Customer",
     },
     itemData: input.lines.map((line) => {
       const netSale = Math.max(0, Number((line.lineTotal - line.taxAmount).toFixed(5)));
       return {
-        internalCode: line.itemCode || "ITEM",
+        internalCode: line.internalCode || line.itemCode || "ITEM",
         description: line.description || "POS Item",
-        itemType: "EGS",
+        itemType: line.itemType || "EGS",
         itemCode: line.itemCode || "EG-000000000-ITEM",
-        unitType: "EA",
+        unitType: line.unitType || "EA",
         quantity: Number(line.quantity.toFixed(5)),
         unitPrice: Number(line.unitPrice.toFixed(5)),
         netSale,
@@ -327,8 +356,190 @@ export function buildEtaEgyptReceiptPayload(input: EtaReceiptBuildInput): {
   return { payload: basePayload, etaUuid, qrUrl };
 }
 
+export interface EtaB2bInvoiceBuildInput {
+  internalId: string;
+  dateTimeIssuedIso: string;
+  documentType?: "I" | "C" | "D";
+  documentTypeVersion?: "1.0" | "0.9";
+  references?: string[];
+  currency: string;
+  exchangeRate?: number;
+  issuerName: string;
+  issuerRin: string;
+  branchId: string;
+  branchCountry?: string;
+  branchGovernorate?: string;
+  branchRegionCity?: string;
+  branchStreet?: string;
+  branchBuildingNumber?: string;
+  branchPostalCode?: string;
+  activityCode?: string;
+  receiverType: "B" | "P" | "F";
+  receiverId?: string;
+  receiverName: string;
+  receiverStreet?: string;
+  subtotal: number;
+  taxTotal: number;
+  totalAmount: number;
+  lines: Array<{
+    description: string;
+    internalCode: string;
+    itemType?: "EGS" | "GS1";
+    itemCode: string;
+    unitType?: string;
+    quantity: number;
+    unitPrice: number;
+    discount?: number;
+    taxRate: number;
+    taxAmount: number;
+    lineTotal: number;
+  }>;
+}
+
 /**
- * Computes ICV sequence, chained SHA-256 hash, ZATCA TLV QR or ETA Egypt e-Receipt v1.2 payload
+ * Builds an Egyptian Tax Authority (ETA) B2B e-Invoice v1.0 / v0.9 JSON document
+ * (`"I"` Invoice, `"C"` Credit Note, `"D"` Debit Note) and its deterministic SHA-256 digest.
+ */
+export function buildEtaB2bInvoicePayload(input: EtaB2bInvoiceBuildInput): {
+  payload: Record<string, unknown>;
+  etaUuid: string;
+  qrUrl: string;
+} {
+  const dateTimeIssued = input.dateTimeIssuedIso.replace(/\.\d{3}Z$/, "Z");
+  const documentType = input.documentType ?? "I";
+  const documentTypeVersion = input.documentTypeVersion ?? resolveEtaInvoiceVersion();
+  const currencySold = (input.currency || "EGP").toUpperCase();
+  const fxRate = input.exchangeRate && input.exchangeRate > 0 ? input.exchangeRate : 1;
+  const isForeign = currencySold !== "EGP";
+  const rinClean = input.issuerRin || "000000000";
+
+  let totalDiscountAmount = 0;
+  let totalSalesAmount = 0;
+
+  const invoiceLines = input.lines.map((line) => {
+    const qty = Number(line.quantity.toFixed(5));
+    const unitSold = Number(line.unitPrice.toFixed(5));
+    const unitEgp = isForeign ? Number((line.unitPrice * fxRate).toFixed(5)) : unitSold;
+    const discountEgp = Number(((line.discount ?? 0) * (isForeign ? fxRate : 1)).toFixed(5));
+    const salesTotal = Number((qty * unitEgp).toFixed(5));
+    const netTotal = Math.max(0, Number((salesTotal - discountEgp).toFixed(5)));
+    const taxEgp = Number((line.taxAmount * (isForeign ? fxRate : 1)).toFixed(5));
+    const lineTotalEgp = Number((netTotal + taxEgp).toFixed(5));
+
+    totalDiscountAmount += discountEgp;
+    totalSalesAmount += salesTotal;
+
+    const unitValue: Record<string, unknown> = {
+      currencySold,
+      amountEGP: unitEgp,
+      ...(isForeign
+        ? {
+            amountSold: unitSold,
+            currencyExchangeRate: Number(fxRate.toFixed(5)),
+          }
+        : {}),
+    };
+
+    const resolvedCodeType = line.itemType || "EGS";
+    const resolvedItemCode =
+      line.itemCode?.trim() ||
+      (resolvedCodeType === "GS1" ? line.internalCode : `EG-${rinClean}-${line.internalCode || "ITEM"}`);
+
+    return {
+      description: line.description || "Invoice Line",
+      itemType: resolvedCodeType,
+      itemCode: resolvedItemCode,
+      unitType: line.unitType || "EA",
+      quantity: qty,
+      internalCode: line.internalCode || "ITEM",
+      salesTotal,
+      total: lineTotalEgp,
+      valueDifference: 0,
+      totalTaxableFees: 0,
+      netTotal,
+      itemsDiscount: 0,
+      unitValue,
+      discount: {
+        rate: 0,
+        amount: discountEgp,
+      },
+      taxableItems:
+        line.taxRate > 0
+          ? [
+              {
+                taxType: "T1",
+                amount: taxEgp,
+                subType: "V009",
+                rate: Number(line.taxRate.toFixed(2)),
+              },
+            ]
+          : [],
+    };
+  });
+
+  const netAmountEgp = Number((input.subtotal * (isForeign ? fxRate : 1)).toFixed(5));
+  const taxTotalEgp = Number((input.taxTotal * (isForeign ? fxRate : 1)).toFixed(5));
+  const totalAmountEgp = Number((input.totalAmount * (isForeign ? fxRate : 1)).toFixed(5));
+
+  const payload: Record<string, unknown> = {
+    issuer: {
+      address: {
+        branchID: input.branchId || "0",
+        country: input.branchCountry || "EG",
+        governate: input.branchGovernorate || "Cairo",
+        regionCity: input.branchRegionCity || "Cairo",
+        street: input.branchStreet || "Main Street",
+        buildingNumber: input.branchBuildingNumber || "1",
+        ...(input.branchPostalCode ? { postalCode: input.branchPostalCode } : {}),
+      },
+      type: "B",
+      id: rinClean,
+      name: input.issuerName,
+    },
+    receiver: {
+      address: {
+        country: input.receiverType === "F" ? "US" : "EG",
+        governate: "Cairo",
+        regionCity: "Cairo",
+        street: input.receiverStreet || "Customer Address",
+        buildingNumber: "1",
+      },
+      type: input.receiverType,
+      id: input.receiverId || "",
+      name: input.receiverName || "B2B Customer",
+    },
+    documentType,
+    documentTypeVersion,
+    dateTimeIssued,
+    taxpayerActivityCode: input.activityCode || "4690",
+    internalID: input.internalId,
+    ...(input.references && input.references.length > 0 ? { references: input.references } : {}),
+    invoiceLines,
+    totalDiscountAmount: Number(totalDiscountAmount.toFixed(5)),
+    totalSalesAmount: Number(totalSalesAmount.toFixed(5)),
+    netAmount: netAmountEgp,
+    taxTotals:
+      taxTotalEgp > 0
+        ? [
+            {
+              taxType: "T1",
+              amount: taxTotalEgp,
+            },
+          ]
+        : [],
+    totalAmount: totalAmountEgp,
+    extraDiscountAmount: 0,
+    totalItemsDiscountAmount: 0,
+  };
+
+  const { canonicalSha256: etaUuid } = computeEtaDocumentCanonicalDigest(payload);
+  const qrUrl = buildEtaEgyptInvoiceShareUrl(etaUuid, dateTimeIssued);
+
+  return { payload, etaUuid, qrUrl };
+}
+
+/**
+ * Computes ICV sequence, chained SHA-256 hash, ZATCA TLV QR or ETA Egypt e-Receipt v1.2 / B2B e-Invoice v1.0 payload
  * & submission queue entry whenever company einvoicingMode !== 'none'.
  */
 export async function applyInvoiceEInvoiceMetadata(
@@ -426,46 +637,126 @@ export async function applyInvoiceEInvoiceMetadata(
       .from(customers)
       .where(and(eq(customers.id, inv.customerId), eq(customers.companyId, effectiveCompanyId)))
       .limit(1);
-    const [termRow] = inv.posTerminalId
-      ? await tx
-          .select()
-          .from(posTerminals)
-          .where(and(eq(posTerminals.id, inv.posTerminalId), eq(posTerminals.companyId, effectiveCompanyId)))
-          .limit(1)
-      : [undefined];
     const lines = await tx.select().from(salesInvoiceLines).where(eq(salesInvoiceLines.invoiceId, inv.id));
-    const tenders =
-      inv.sourceChannel === "pos"
-        ? await tx.select().from(posTenders).where(eq(posTenders.invoiceId, inv.id))
+    const lineProdIds = Array.from(
+      new Set(lines.map((l) => l.productId).filter((pid): pid is string => Boolean(pid)))
+    );
+    const prodRows =
+      lineProdIds.length > 0
+        ? await tx
+            .select()
+            .from(products)
+            .where(and(eq(products.companyId, effectiveCompanyId), inArray(products.id, lineProdIds)))
         : [];
-    const primaryPaymentMethod = mapPosPaymentMethodToEta(tenders[0]?.method);
+    const prodMap = new Map(prodRows.map((p) => [p.id, p]));
 
-    const { payload, etaUuid, qrUrl } = buildEtaEgyptReceiptPayload({
-      receiptNumber: inv.invoiceNumber,
-      dateTimeIssuedIso: timestampIso,
-      previousUuid: lastHashed[0]?.etaDocumentUuid ?? "",
-      currency: inv.currency || company.baseCurrency || "EGP",
-      sellerName,
-      sellerTaxNumber: taxNumber,
-      branchCode: branchRow?.code ?? "0",
-      branchAddress: branchRow?.address || branchRow?.location || company.address || "Main Branch",
-      posSerialNumber: termRow?.etaPosSerial || termRow?.code || "POS-01",
-      buyerName: custRow?.name || "Walk-in Customer",
-      buyerTaxNumber: custRow?.taxNumber || undefined,
-      paymentMethod: primaryPaymentMethod,
-      subtotal: num(inv.subtotal),
-      taxTotal: num(inv.taxTotal),
-      totalAmount: num(inv.totalAmount),
-      lines: lines.map((l) => ({
-        description: l.description || "Item",
-        itemCode: l.productId ?? l.id,
-        quantity: num(l.quantity),
-        unitPrice: num(l.unitPrice),
-        taxRate: num(l.taxRate),
-        taxAmount: num(l.taxAmount),
-        lineTotal: num(l.lineTotal),
-      })),
-    });
+    const effectiveEtaBranchId =
+      branchRow?.etaBranchId && branchRow.etaBranchId !== "0"
+        ? branchRow.etaBranchId
+        : (branchRow?.etaBranchId ?? branchRow?.code ?? "0");
+    const effectiveBranchStreet =
+      branchRow?.street || branchRow?.address || branchRow?.location || company.address || "Main Branch";
+
+    let built: { payload: Record<string, unknown>; etaUuid: string; qrUrl: string };
+    const isPosReceipt = inv.sourceChannel === "pos";
+
+    if (isPosReceipt) {
+      const [termRow] = inv.posTerminalId
+        ? await tx
+            .select()
+            .from(posTerminals)
+            .where(and(eq(posTerminals.id, inv.posTerminalId), eq(posTerminals.companyId, effectiveCompanyId)))
+            .limit(1)
+        : [undefined];
+      const tenders = await tx.select().from(posTenders).where(eq(posTenders.invoiceId, inv.id));
+      const primaryPaymentMethod = mapPosPaymentMethodToEta(tenders[0]?.method);
+
+      built = buildEtaEgyptReceiptPayload({
+        receiptNumber: inv.invoiceNumber,
+        dateTimeIssuedIso: timestampIso,
+        previousUuid: lastHashed[0]?.etaDocumentUuid ?? "",
+        currency: inv.currency || company.baseCurrency || "EGP",
+        sellerName,
+        sellerTaxNumber: taxNumber,
+        branchCode: effectiveEtaBranchId,
+        branchAddress: effectiveBranchStreet,
+        branchCountry: branchRow?.country || "EG",
+        branchGovernorate: branchRow?.governorate || "Cairo",
+        branchRegionCity: branchRow?.regionCity || "Cairo",
+        branchBuildingNumber: branchRow?.buildingNumber || "1",
+        branchPostalCode: branchRow?.postalCode || undefined,
+        posSerialNumber: termRow?.etaPosSerial || termRow?.code || "POS-01",
+        buyerName: custRow?.name || "Walk-in Customer",
+        buyerTaxNumber: custRow?.taxNumber || undefined,
+        buyerType: custRow?.isWalkIn ? "P" : (custRow?.etaReceiverType ?? (custRow?.taxNumber ? "B" : "P")),
+        paymentMethod: primaryPaymentMethod,
+        subtotal: num(inv.subtotal),
+        taxTotal: num(inv.taxTotal),
+        totalAmount: num(inv.totalAmount),
+        lines: lines.map((l) => {
+          const prod = l.productId ? prodMap.get(l.productId) : undefined;
+          const internalCode = prod?.sku || l.productId || l.id;
+          return {
+            description: l.description || prod?.name || "Item",
+            internalCode,
+            itemType: prod?.etaCodeType ?? "EGS",
+            itemCode: prod?.etaItemCode || internalCode,
+            unitType: prod?.etaUnitType || "EA",
+            quantity: num(l.quantity),
+            unitPrice: num(l.unitPrice),
+            taxRate: num(l.taxRate),
+            taxAmount: num(l.taxAmount),
+            lineTotal: num(l.lineTotal),
+          };
+        }),
+      });
+    } else {
+      const receiverType: "B" | "P" | "F" =
+        custRow?.etaReceiverType ?? (custRow?.taxNumber || custRow?.company ? "B" : "P");
+      built = buildEtaB2bInvoicePayload({
+        internalId: inv.invoiceNumber,
+        dateTimeIssuedIso: timestampIso,
+        documentType: "I",
+        documentTypeVersion: resolveEtaInvoiceVersion(),
+        currency: inv.currency || company.baseCurrency || "EGP",
+        exchangeRate: num(inv.fxRate) || 1,
+        issuerName: sellerName,
+        issuerRin: taxNumber,
+        branchId: effectiveEtaBranchId,
+        branchCountry: branchRow?.country || "EG",
+        branchGovernorate: branchRow?.governorate || "Cairo",
+        branchRegionCity: branchRow?.regionCity || "Cairo",
+        branchStreet: effectiveBranchStreet,
+        branchBuildingNumber: branchRow?.buildingNumber || "1",
+        branchPostalCode: branchRow?.postalCode || undefined,
+        receiverType,
+        receiverId: custRow?.taxNumber || "",
+        receiverName: custRow?.company || custRow?.name || "Customer",
+        receiverStreet: custRow?.billingAddress || "Cairo",
+        subtotal: num(inv.subtotal),
+        taxTotal: num(inv.taxTotal),
+        totalAmount: num(inv.totalAmount),
+        lines: lines.map((l) => {
+          const prod = l.productId ? prodMap.get(l.productId) : undefined;
+          const internalCode = prod?.sku || l.productId || l.id;
+          return {
+            description: l.description || prod?.name || "Item",
+            internalCode,
+            itemType: prod?.etaCodeType ?? "EGS",
+            itemCode: prod?.etaItemCode || `EG-${taxNumber}-${internalCode}`,
+            unitType: prod?.etaUnitType || "EA",
+            quantity: num(l.quantity),
+            unitPrice: num(l.unitPrice),
+            discount: num(l.discount),
+            taxRate: num(l.taxRate),
+            taxAmount: num(l.taxAmount),
+            lineTotal: num(l.lineTotal),
+          };
+        }),
+      });
+    }
+
+    const { payload, etaUuid, qrUrl } = built;
 
     await tx
       .update(salesInvoices)
@@ -487,7 +778,7 @@ export async function applyInvoiceEInvoiceMetadata(
         companyId: effectiveCompanyId,
         invoiceId: inv.id,
         provider: "eta_egypt",
-        documentType: inv.sourceChannel === "pos" ? "receipt" : "invoice",
+        documentType: isPosReceipt ? "receipt" : "invoice",
         documentUuid: etaUuid,
         status: "pending",
         requestPayloadJson: payload,
@@ -627,6 +918,9 @@ export async function applyPosReturnEInvoiceMetadata(
       line: posReturnLines,
       productName: products.name,
       productSku: products.sku,
+      etaCodeType: products.etaCodeType,
+      etaItemCode: products.etaItemCode,
+      etaUnitType: products.etaUnitType,
     })
     .from(posReturnLines)
     .leftJoin(products, eq(products.id, posReturnLines.productId))
@@ -634,6 +928,12 @@ export async function applyPosReturnEInvoiceMetadata(
 
   const sellerName = company.legalName || company.companyName || "ERP Company";
   const taxNumber = company.taxRegistrationNumber || "000000000000000";
+  const effectiveEtaBranchId =
+    branchRow?.etaBranchId && branchRow.etaBranchId !== "0"
+      ? branchRow.etaBranchId
+      : (branchRow?.etaBranchId ?? branchRow?.code ?? "0");
+  const effectiveBranchStreet =
+    branchRow?.street || branchRow?.address || branchRow?.location || company.address || "Main Branch";
 
   const { payload, etaUuid, qrUrl } = buildEtaEgyptReceiptPayload({
     receiptNumber: posRet.returnNumber,
@@ -644,24 +944,36 @@ export async function applyPosReturnEInvoiceMetadata(
     currency: origInv?.currency || company.baseCurrency || "EGP",
     sellerName,
     sellerTaxNumber: taxNumber,
-    branchCode: branchRow?.code ?? "0",
-    branchAddress: branchRow?.address || branchRow?.location || company.address || "Main Branch",
+    branchCode: effectiveEtaBranchId,
+    branchAddress: effectiveBranchStreet,
+    branchCountry: branchRow?.country || "EG",
+    branchGovernorate: branchRow?.governorate || "Cairo",
+    branchRegionCity: branchRow?.regionCity || "Cairo",
+    branchBuildingNumber: branchRow?.buildingNumber || "1",
+    branchPostalCode: branchRow?.postalCode || undefined,
     posSerialNumber: termRow?.etaPosSerial || termRow?.code || "POS-01",
     buyerName: custRow?.name || "Walk-in Customer",
     buyerTaxNumber: custRow?.taxNumber || undefined,
+    buyerType: custRow?.isWalkIn ? "P" : (custRow?.etaReceiverType ?? (custRow?.taxNumber ? "B" : "P")),
     paymentMethod: mapPosPaymentMethodToEta(posRet.refundMethod),
     subtotal: num(posRet.subtotal),
     taxTotal: num(posRet.taxAmount),
     totalAmount: num(posRet.totalAmount),
-    lines: retLines.map(({ line, productName, productSku }) => ({
-      description: productName || "Returned Item",
-      itemCode: productSku || line.productId,
-      quantity: num(line.quantity),
-      unitPrice: num(line.unitPrice),
-      taxRate: num(line.taxRate),
-      taxAmount: num(line.taxAmount),
-      lineTotal: num(line.lineTotal),
-    })),
+    lines: retLines.map(({ line, productName, productSku, etaCodeType, etaItemCode, etaUnitType }) => {
+      const internalCode = productSku || line.productId;
+      return {
+        description: productName || "Returned Item",
+        internalCode,
+        itemType: etaCodeType ?? "EGS",
+        itemCode: etaItemCode || internalCode,
+        unitType: etaUnitType || "EA",
+        quantity: num(line.quantity),
+        unitPrice: num(line.unitPrice),
+        taxRate: num(line.taxRate),
+        taxAmount: num(line.taxAmount),
+        lineTotal: num(line.lineTotal),
+      };
+    }),
   });
 
   await tx
@@ -695,6 +1007,164 @@ export async function applyPosReturnEInvoiceMetadata(
   };
 }
 
+/**
+ * Generates an ETA Egypt B2B Credit Note (`documentType: "C"`) when a back-office Sales Return
+ * is created while `einvoicingMode === "eta_egypt"`.
+ */
+export async function applySalesReturnEInvoiceMetadata(
+  tx: DbOrTx,
+  salesReturnId: string,
+  companyId?: string
+): Promise<{
+  etaDocumentUuid: string | null;
+  eInvoiceStatus: string;
+  eInvoicePayloadJson: Record<string, unknown> | null;
+}> {
+  const [ret] = await tx
+    .select()
+    .from(salesReturns)
+    .where(
+      companyId
+        ? and(eq(salesReturns.id, salesReturnId), eq(salesReturns.companyId, companyId))
+        : eq(salesReturns.id, salesReturnId)
+    )
+    .limit(1);
+  if (!ret) {
+    return {
+      etaDocumentUuid: null,
+      eInvoiceStatus: "not_applicable",
+      eInvoicePayloadJson: null,
+    };
+  }
+
+  const effectiveCompanyId = companyId || ret.companyId || DEFAULT_COMPANY_ID;
+  const company = await loadCompanyEinvoiceConfig(tx, effectiveCompanyId);
+  if (!company || company.einvoicingMode !== "eta_egypt") {
+    return {
+      etaDocumentUuid: null,
+      eInvoiceStatus: "not_applicable",
+      eInvoicePayloadJson: null,
+    };
+  }
+
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(882411, ${companyEinvoiceLockKey(effectiveCompanyId)})`
+  );
+
+  const [origInv] = ret.invoiceId
+    ? await tx
+        .select()
+        .from(salesInvoices)
+        .where(and(eq(salesInvoices.id, ret.invoiceId), eq(salesInvoices.companyId, effectiveCompanyId)))
+        .limit(1)
+    : [undefined];
+
+  const [branchRow] = await tx
+    .select()
+    .from(branches)
+    .where(and(eq(branches.id, ret.branchId), eq(branches.companyId, effectiveCompanyId)))
+    .limit(1);
+  const [custRow] = await tx
+    .select()
+    .from(customers)
+    .where(and(eq(customers.id, ret.customerId), eq(customers.companyId, effectiveCompanyId)))
+    .limit(1);
+  const retLines = await tx
+    .select({
+      line: salesReturnLines,
+      productName: products.name,
+      productSku: products.sku,
+      etaCodeType: products.etaCodeType,
+      etaItemCode: products.etaItemCode,
+      etaUnitType: products.etaUnitType,
+    })
+    .from(salesReturnLines)
+    .leftJoin(products, eq(products.id, salesReturnLines.productId))
+    .where(eq(salesReturnLines.returnId, ret.id));
+
+  const sellerName = company.legalName || company.companyName || "ERP Company";
+  const taxNumber = company.taxRegistrationNumber || "000000000000000";
+  const effectiveEtaBranchId =
+    branchRow?.etaBranchId && branchRow.etaBranchId !== "0"
+      ? branchRow.etaBranchId
+      : (branchRow?.etaBranchId ?? branchRow?.code ?? "0");
+  const effectiveBranchStreet =
+    branchRow?.street || branchRow?.address || branchRow?.location || company.address || "Main Branch";
+  const receiverType: "B" | "P" | "F" =
+    custRow?.etaReceiverType ?? (custRow?.taxNumber || custRow?.company ? "B" : "P");
+
+  const { payload, etaUuid } = buildEtaB2bInvoicePayload({
+    internalId: ret.creditNoteNumber || ret.returnNumber,
+    dateTimeIssuedIso: ret.returnDate.toISOString(),
+    documentType: "C",
+    documentTypeVersion: resolveEtaInvoiceVersion(),
+    references: origInv?.etaDocumentUuid ? [origInv.etaDocumentUuid] : undefined,
+    currency: origInv?.currency || company.baseCurrency || "EGP",
+    exchangeRate: origInv ? num(origInv.fxRate) || 1 : 1,
+    issuerName: sellerName,
+    issuerRin: taxNumber,
+    branchId: effectiveEtaBranchId,
+    branchCountry: branchRow?.country || "EG",
+    branchGovernorate: branchRow?.governorate || "Cairo",
+    branchRegionCity: branchRow?.regionCity || "Cairo",
+    branchStreet: effectiveBranchStreet,
+    branchBuildingNumber: branchRow?.buildingNumber || "1",
+    branchPostalCode: branchRow?.postalCode || undefined,
+    receiverType,
+    receiverId: custRow?.taxNumber || "",
+    receiverName: custRow?.company || custRow?.name || "Customer",
+    receiverStreet: custRow?.billingAddress || "Cairo",
+    subtotal: num(ret.subtotal),
+    taxTotal: num(ret.taxTotal),
+    totalAmount: num(ret.totalAmount),
+    lines: retLines.map(({ line, productName, productSku, etaCodeType, etaItemCode, etaUnitType }) => {
+      const internalCode = productSku || line.productId;
+      return {
+        description: productName || "Returned Item",
+        internalCode,
+        itemType: etaCodeType ?? "EGS",
+        itemCode: etaItemCode || `EG-${taxNumber}-${internalCode}`,
+        unitType: etaUnitType || "EA",
+        quantity: num(line.quantity),
+        unitPrice: num(line.unitPrice),
+        taxRate: num(line.taxRate),
+        taxAmount: num(line.taxAmount),
+        lineTotal: num(line.lineTotal),
+      };
+    }),
+  });
+
+  await tx
+    .update(salesReturns)
+    .set({
+      etaDocumentUuid: etaUuid,
+      eInvoiceStatus: "pending_submission",
+      eInvoicePayloadJson: payload,
+    })
+    .where(and(eq(salesReturns.id, ret.id), eq(salesReturns.companyId, effectiveCompanyId)));
+
+  await tx
+    .insert(einvoiceSubmissions)
+    .values({
+      companyId: effectiveCompanyId,
+      invoiceId: null,
+      posReturnId: null,
+      salesReturnId: ret.id,
+      provider: "eta_egypt",
+      documentType: "invoice",
+      documentUuid: etaUuid,
+      status: "pending",
+      requestPayloadJson: payload,
+    })
+    .onConflictDoNothing();
+
+  return {
+    etaDocumentUuid: etaUuid,
+    eInvoiceStatus: "pending_submission",
+    eInvoicePayloadJson: payload,
+  };
+}
+
 export const MAX_ETA_SUBMISSION_ATTEMPTS = 5;
 
 const RETRY_DELAY_SCHEDULE_MS = [
@@ -713,9 +1183,13 @@ export function computeNextEtaRetryDelayMs(attempts: number): number {
 
 function extractReceiptType(
   payload: Record<string, unknown> | null | undefined,
+  documentType: string,
   posReturnId: string | null,
   invoiceId: string | null
 ): EtaReceiptType | null {
+  if (documentType === "invoice") {
+    return null;
+  }
   const headerObj = payload?.header as Record<string, unknown> | undefined;
   if (headerObj?.receiptType === "S" || headerObj?.receiptType === "R") {
     return headerObj.receiptType;
@@ -729,10 +1203,47 @@ function extractReceiptType(
   return null;
 }
 
+function extractEtaDocumentTypeCode(
+  payload: Record<string, unknown> | null | undefined,
+  receiptType: EtaReceiptType | null,
+  salesReturnId: string | null
+): EtaDocumentTypeCode | null {
+  if (payload?.documentType === "I" || payload?.documentType === "C" || payload?.documentType === "D") {
+    return payload.documentType;
+  }
+  if (receiptType === "S" || receiptType === "R") {
+    return receiptType;
+  }
+  if (salesReturnId) return "C";
+  return null;
+}
+
+function extractSignatureStatus(
+  payload: Record<string, unknown> | null | undefined,
+  documentType: string
+): EtaSignatureStatus {
+  if (documentType !== "invoice") {
+    return "not_required";
+  }
+  const sigs = Array.isArray(payload?.signatures) ? payload.signatures : [];
+  const hasSig = sigs.some(
+    (s) =>
+      Boolean(s && typeof s === "object") &&
+      typeof (s as Record<string, unknown>).value === "string" &&
+      ((s as Record<string, unknown>).value as string).trim().length > 0
+  );
+  if (hasSig) return "signed";
+  if (payload?.documentTypeVersion === "0.9") return "unsigned_v0_9";
+  return "pending_signature";
+}
+
 function extractPayloadDocumentNumber(payload: Record<string, unknown> | null | undefined): string | null {
   const headerObj = payload?.header as Record<string, unknown> | undefined;
   if (typeof headerObj?.receiptNumber === "string" && headerObj.receiptNumber.trim()) {
     return headerObj.receiptNumber.trim();
+  }
+  if (typeof payload?.internalID === "string" && payload.internalID.trim()) {
+    return payload.internalID.trim();
   }
   return null;
 }
@@ -749,6 +1260,13 @@ function extractPayloadCurrency(payload: Record<string, unknown> | null | undefi
   if (typeof headerObj?.currency === "string" && headerObj.currency.trim()) {
     return headerObj.currency.trim();
   }
+  const lines = Array.isArray(payload?.invoiceLines) ? payload.invoiceLines : [];
+  const firstUnitVal = (lines[0] as Record<string, unknown> | undefined)?.unitValue as
+    | Record<string, unknown>
+    | undefined;
+  if (typeof firstUnitVal?.currencySold === "string" && firstUnitVal.currencySold.trim()) {
+    return firstUnitVal.currencySold.trim();
+  }
   return null;
 }
 
@@ -756,6 +1274,9 @@ function extractPayloadIssuedAt(payload: Record<string, unknown> | null | undefi
   const headerObj = payload?.header as Record<string, unknown> | undefined;
   if (typeof headerObj?.dateTimeIssued === "string" && headerObj.dateTimeIssued.trim()) {
     return headerObj.dateTimeIssued.trim();
+  }
+  if (typeof payload?.dateTimeIssued === "string" && payload.dateTimeIssued.trim()) {
+    return payload.dateTimeIssued.trim();
   }
   return null;
 }
@@ -771,6 +1292,11 @@ interface JoinedSubmissionRow {
   returnBranchId: string | null;
   returnTotalAmount: string | null;
   returnCreatedAt: Date | null;
+  salesReturnCreditNoteNumber: string | null;
+  salesReturnNumber: string | null;
+  salesReturnBranchId: string | null;
+  salesReturnTotalAmount: string | null;
+  salesReturnDate: Date | null;
   branchName: string | null;
 }
 
@@ -778,32 +1304,56 @@ function mapSubmissionRowToListItem(row: JoinedSubmissionRow): EtaSubmissionList
   const { sub } = row;
   const payload = sub.requestPayloadJson ?? {};
   const documentNumber =
-    row.invoiceNumber ?? row.returnNumber ?? extractPayloadDocumentNumber(payload);
-  const branchId = row.invoiceBranchId ?? row.returnBranchId ?? null;
-  const receiptType = extractReceiptType(payload, sub.posReturnId, sub.invoiceId);
+    row.invoiceNumber ??
+    row.returnNumber ??
+    row.salesReturnCreditNoteNumber ??
+    row.salesReturnNumber ??
+    extractPayloadDocumentNumber(payload);
+  const branchId = row.invoiceBranchId ?? row.returnBranchId ?? row.salesReturnBranchId ?? null;
+  const receiptType = extractReceiptType(payload, sub.documentType, sub.posReturnId, sub.invoiceId);
+  const etaDocumentTypeCode = extractEtaDocumentTypeCode(
+    payload,
+    receiptType,
+    sub.salesReturnId ?? null
+  );
+  const documentVersion =
+    typeof payload.documentTypeVersion === "string"
+      ? payload.documentTypeVersion
+      : typeof (payload.documentType as Record<string, unknown> | undefined)?.typeVersion === "string"
+        ? ((payload.documentType as Record<string, unknown>).typeVersion as string)
+        : null;
+  const signatureStatus = extractSignatureStatus(payload, sub.documentType);
   const totalAmount =
     row.invoiceTotalAmount !== null
       ? num(row.invoiceTotalAmount)
       : row.returnTotalAmount !== null
         ? num(row.returnTotalAmount)
-        : extractPayloadTotalAmount(payload);
+        : row.salesReturnTotalAmount !== null
+          ? num(row.salesReturnTotalAmount)
+          : extractPayloadTotalAmount(payload);
   const currency = row.invoiceCurrency ?? extractPayloadCurrency(payload) ?? "EGP";
   const issuedAt = row.invoiceDate
     ? row.invoiceDate.toISOString()
     : row.returnCreatedAt
       ? row.returnCreatedAt.toISOString()
-      : (extractPayloadIssuedAt(payload) ?? sub.createdAt.toISOString());
+      : row.salesReturnDate
+        ? row.salesReturnDate.toISOString()
+        : (extractPayloadIssuedAt(payload) ?? sub.createdAt.toISOString());
 
   return {
     id: sub.id,
     invoiceId: sub.invoiceId ?? null,
     posReturnId: sub.posReturnId ?? null,
+    salesReturnId: sub.salesReturnId ?? null,
     documentNumber,
     branchId,
     branchName: row.branchName ?? null,
     provider: sub.provider as EinvoiceProvider,
     documentType: sub.documentType as EinvoiceDocumentType,
     receiptType,
+    etaDocumentTypeCode,
+    documentVersion,
+    signatureStatus,
     documentUuid: sub.documentUuid,
     submissionUuid: sub.submissionUuid ?? null,
     status: sub.status as EinvoiceSubmissionStatus,
@@ -822,7 +1372,7 @@ function buildSubmissionBranchScopeSql(
   actor: RequestActor,
   requestedBranchId?: string
 ): SQL | null | "EMPTY" {
-  const effectiveBranchExpr = sql`coalesce(${salesInvoices.branchId}, ${posReturns.branchId})`;
+  const effectiveBranchExpr = sql`coalesce(${salesInvoices.branchId}, ${posReturns.branchId}, ${salesReturns.branchId})`;
   if (requestedBranchId) {
     assertBranchAccess(actor, requestedBranchId);
     return sql`${effectiveBranchExpr} = ${requestedBranchId}`;
@@ -836,7 +1386,8 @@ function buildSubmissionBranchScopeSql(
   return or(
     sql`${effectiveBranchExpr} IS NULL`,
     inArray(salesInvoices.branchId, actor.branchIds),
-    inArray(posReturns.branchId, actor.branchIds)
+    inArray(posReturns.branchId, actor.branchIds),
+    inArray(salesReturns.branchId, actor.branchIds)
   )!;
 }
 
@@ -847,6 +1398,8 @@ export async function getEinvoiceQueueSummary(
   const db = opts?.db ?? getDb();
   const companyId = actorCompanyId(actor);
   const etaConfigured = isEtaConfigured();
+  const signerConfigured = isEtaSignerConfigured();
+  const invoiceVersion = resolveEtaInvoiceVersion();
   const scopeCond = buildSubmissionBranchScopeSql(actor, opts?.branchId);
   if (scopeCond === "EMPTY") {
     return {
@@ -857,6 +1410,8 @@ export async function getEinvoiceQueueSummary(
       failed: 0,
       total: 0,
       etaConfigured,
+      signerConfigured,
+      invoiceVersion,
     };
   }
 
@@ -872,6 +1427,7 @@ export async function getEinvoiceQueueSummary(
     .from(einvoiceSubmissions)
     .leftJoin(salesInvoices, eq(salesInvoices.id, einvoiceSubmissions.invoiceId))
     .leftJoin(posReturns, eq(posReturns.id, einvoiceSubmissions.posReturnId))
+    .leftJoin(salesReturns, eq(salesReturns.id, einvoiceSubmissions.salesReturnId))
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .groupBy(einvoiceSubmissions.status);
 
@@ -883,6 +1439,8 @@ export async function getEinvoiceQueueSummary(
     failed: 0,
     total: 0,
     etaConfigured,
+    signerConfigured,
+    invoiceVersion,
   };
 
   for (const row of statusCounts) {
@@ -946,6 +1504,8 @@ export async function listEinvoiceSubmissions(
         ilike(einvoiceSubmissions.submissionUuid, pattern),
         ilike(salesInvoices.invoiceNumber, pattern),
         ilike(posReturns.returnNumber, pattern),
+        ilike(salesReturns.creditNoteNumber, pattern),
+        ilike(salesReturns.returnNumber, pattern),
         ilike(einvoiceSubmissions.lastError, pattern)
       )!
     );
@@ -958,6 +1518,7 @@ export async function listEinvoiceSubmissions(
     .from(einvoiceSubmissions)
     .leftJoin(salesInvoices, eq(salesInvoices.id, einvoiceSubmissions.invoiceId))
     .leftJoin(posReturns, eq(posReturns.id, einvoiceSubmissions.posReturnId))
+    .leftJoin(salesReturns, eq(salesReturns.id, einvoiceSubmissions.salesReturnId))
     .where(whereClause);
 
   const pageInfo = buildOffsetPageInfo(page, pageSize, total);
@@ -994,12 +1555,21 @@ export async function listEinvoiceSubmissions(
       returnBranchId: posReturns.branchId,
       returnTotalAmount: posReturns.totalAmount,
       returnCreatedAt: posReturns.createdAt,
+      salesReturnCreditNoteNumber: salesReturns.creditNoteNumber,
+      salesReturnNumber: salesReturns.returnNumber,
+      salesReturnBranchId: salesReturns.branchId,
+      salesReturnTotalAmount: salesReturns.totalAmount,
+      salesReturnDate: salesReturns.returnDate,
       branchName: branches.name,
     })
     .from(einvoiceSubmissions)
     .leftJoin(salesInvoices, eq(salesInvoices.id, einvoiceSubmissions.invoiceId))
     .leftJoin(posReturns, eq(posReturns.id, einvoiceSubmissions.posReturnId))
-    .leftJoin(branches, sql`${branches.id} = coalesce(${salesInvoices.branchId}, ${posReturns.branchId})`)
+    .leftJoin(salesReturns, eq(salesReturns.id, einvoiceSubmissions.salesReturnId))
+    .leftJoin(
+      branches,
+      sql`${branches.id} = coalesce(${salesInvoices.branchId}, ${posReturns.branchId}, ${salesReturns.branchId})`
+    )
     .where(whereClause)
     .orderBy(sortDir(sortCol), desc(einvoiceSubmissions.id))
     .limit(pageSize)
@@ -1039,12 +1609,21 @@ export async function getEinvoiceSubmissionDetail(
       returnBranchId: posReturns.branchId,
       returnTotalAmount: posReturns.totalAmount,
       returnCreatedAt: posReturns.createdAt,
+      salesReturnCreditNoteNumber: salesReturns.creditNoteNumber,
+      salesReturnNumber: salesReturns.returnNumber,
+      salesReturnBranchId: salesReturns.branchId,
+      salesReturnTotalAmount: salesReturns.totalAmount,
+      salesReturnDate: salesReturns.returnDate,
       branchName: branches.name,
     })
     .from(einvoiceSubmissions)
     .leftJoin(salesInvoices, eq(salesInvoices.id, einvoiceSubmissions.invoiceId))
     .leftJoin(posReturns, eq(posReturns.id, einvoiceSubmissions.posReturnId))
-    .leftJoin(branches, sql`${branches.id} = coalesce(${salesInvoices.branchId}, ${posReturns.branchId})`)
+    .leftJoin(salesReturns, eq(salesReturns.id, einvoiceSubmissions.salesReturnId))
+    .leftJoin(
+      branches,
+      sql`${branches.id} = coalesce(${salesInvoices.branchId}, ${posReturns.branchId}, ${salesReturns.branchId})`
+    )
     .where(and(eq(einvoiceSubmissions.id, submissionId), eq(einvoiceSubmissions.companyId, companyId)))
     .limit(1);
 
@@ -1053,7 +1632,8 @@ export async function getEinvoiceSubmissionDetail(
     throw new AppError(404, "E-Invoice submission not found", "NOT_FOUND");
   }
 
-  const branchId = row.invoiceBranchId ?? row.returnBranchId ?? null;
+  const branchId =
+    row.invoiceBranchId ?? row.returnBranchId ?? row.salesReturnBranchId ?? null;
   assertBranchAccess(actor, branchId);
 
   const base = mapSubmissionRowToListItem(row);
@@ -1114,13 +1694,15 @@ export async function retryEinvoiceSubmissions(
       id: einvoiceSubmissions.id,
       invoiceId: einvoiceSubmissions.invoiceId,
       posReturnId: einvoiceSubmissions.posReturnId,
+      salesReturnId: einvoiceSubmissions.salesReturnId,
       status: einvoiceSubmissions.status,
       attempts: einvoiceSubmissions.attempts,
-      branchId: sql<string | null>`coalesce(${salesInvoices.branchId}, ${posReturns.branchId})`,
+      branchId: sql<string | null>`coalesce(${salesInvoices.branchId}, ${posReturns.branchId}, ${salesReturns.branchId})`,
     })
     .from(einvoiceSubmissions)
     .leftJoin(salesInvoices, eq(salesInvoices.id, einvoiceSubmissions.invoiceId))
     .leftJoin(posReturns, eq(posReturns.id, einvoiceSubmissions.posReturnId))
+    .leftJoin(salesReturns, eq(salesReturns.id, einvoiceSubmissions.salesReturnId))
     .where(and(...conditions));
 
   if (input.submissionId && candidateRows.length === 0) {
@@ -1169,6 +1751,14 @@ export async function retryEinvoiceSubmissions(
               etaReceiptStatus: "pending_submission",
             })
             .where(and(eq(posReturns.id, row.posReturnId), eq(posReturns.companyId, companyId)));
+        }
+        if (row.salesReturnId) {
+          await tx
+            .update(salesReturns)
+            .set({
+              eInvoiceStatus: "pending_submission",
+            })
+            .where(and(eq(salesReturns.id, row.salesReturnId), eq(salesReturns.companyId, companyId)));
         }
       }
     });
@@ -1222,7 +1812,7 @@ function isDatabaseInstance(val: unknown): val is AppDatabase {
 }
 
 /**
- * Advisory-locked background worker for Egyptian Tax Authority (ETA e-Receipt v1.2).
+ * Advisory-locked background worker for Egyptian Tax Authority (ETA e-Receipt v1.2 & B2B e-Invoice v1.0).
  * Safely no-ops with `skipped: true, reason: "eta_not_configured"` when ETA credentials are absent.
  */
 export async function processPendingEtaSubmissions(
@@ -1352,7 +1942,8 @@ export async function processPendingEtaSubmissions(
     const updateLinkedDocStatus = async (
       sub: typeof einvoiceSubmissions.$inferSelect,
       etaReceiptStatus: string,
-      submissionUuid?: string | null
+      submissionUuid?: string | null,
+      etaDocumentUuid?: string | null
     ) => {
       if (sub.invoiceId) {
         await tx
@@ -1361,6 +1952,7 @@ export async function processPendingEtaSubmissions(
             etaReceiptStatus,
             eInvoiceStatus: etaReceiptStatus,
             ...(submissionUuid !== undefined ? { etaSubmissionUuid: submissionUuid } : {}),
+            ...(etaDocumentUuid ? { etaDocumentUuid } : {}),
             updatedAt: new Date(),
           })
           .where(eq(salesInvoices.id, sub.invoiceId));
@@ -1374,6 +1966,16 @@ export async function processPendingEtaSubmissions(
           })
           .where(eq(posReturns.id, sub.posReturnId));
       }
+      if (sub.salesReturnId) {
+        await tx
+          .update(salesReturns)
+          .set({
+            eInvoiceStatus: etaReceiptStatus,
+            ...(submissionUuid !== undefined ? { etaSubmissionUuid: submissionUuid } : {}),
+            ...(etaDocumentUuid ? { etaDocumentUuid } : {}),
+          })
+          .where(eq(salesReturns.id, sub.salesReturnId));
+      }
     };
 
     for (const { sub, invTerminalId, retTerminalId } of duePendingRows) {
@@ -1385,23 +1987,53 @@ export async function processPendingEtaSubmissions(
       const posOsVersion = terminal?.etaPosOsVersion || null;
 
       try {
-        const result = await submitEtaReceipts([sub.requestPayloadJson], {
-          posSerial,
-          posOsVersion,
-          fetchImpl: opts.fetchImpl,
-        });
+        let payloadToSend = sub.requestPayloadJson;
+        let result;
+
+        if (sub.documentType === "invoice") {
+          const signRes = await signEtaInvoiceIfNeeded(sub.requestPayloadJson, {
+            fetchImpl: opts.fetchImpl,
+          });
+          if (!signRes.signed && signRes.signatureStatus === "pending_signature") {
+            await tx
+              .update(einvoiceSubmissions)
+              .set({
+                status: "pending",
+                lastError: signRes.pendingReason ?? null,
+                updatedAt: new Date(),
+              })
+              .where(eq(einvoiceSubmissions.id, sub.id));
+            continue;
+          }
+          payloadToSend = signRes.document;
+          result = await submitEtaDocuments([payloadToSend], {
+            fetchImpl: opts.fetchImpl,
+          });
+        } else {
+          result = await submitEtaReceipts([payloadToSend], {
+            posSerial,
+            posOsVersion,
+            fetchImpl: opts.fetchImpl,
+          });
+        }
 
         const nextAttempts = sub.attempts + 1;
-        const isAccepted =
-          result.accepted.some((a) => a.uuid === sub.documentUuid) ||
-          (result.accepted.length > 0 && result.rejected.length === 0);
+        const internalId =
+          typeof payloadToSend?.internalID === "string" ? payloadToSend.internalID : null;
+        const matchedAccepted =
+          result.accepted.find(
+            (a) => a.uuid === sub.documentUuid || (internalId && a.receiptNumber === internalId)
+          ) ?? (result.accepted.length > 0 && result.rejected.length === 0 ? result.accepted[0] : undefined);
 
-        if (isAccepted) {
+        if (matchedAccepted) {
+          const finalDocUuid = matchedAccepted.uuid || sub.documentUuid;
           await tx
             .update(einvoiceSubmissions)
             .set({
               status: "accepted",
+              documentUuid: finalDocUuid,
               submissionUuid: result.submissionUuid ?? sub.submissionUuid,
+              requestPayloadJson: payloadToSend,
               responsePayloadJson: result.rawResponse,
               lastError: null,
               nextRetryAt: null,
@@ -1409,7 +2041,12 @@ export async function processPendingEtaSubmissions(
               updatedAt: new Date(),
             })
             .where(eq(einvoiceSubmissions.id, sub.id));
-          await updateLinkedDocStatus(sub, "accepted", result.submissionUuid ?? sub.submissionUuid);
+          await updateLinkedDocStatus(
+            sub,
+            "accepted",
+            result.submissionUuid ?? sub.submissionUuid,
+            finalDocUuid
+          );
           accepted++;
           processed++;
         } else if (result.rejected.length > 0) {
@@ -1419,6 +2056,7 @@ export async function processPendingEtaSubmissions(
             .set({
               status: "rejected",
               submissionUuid: result.submissionUuid ?? sub.submissionUuid,
+              requestPayloadJson: payloadToSend,
               responsePayloadJson: result.rawResponse,
               lastError: errMsg,
               nextRetryAt: null,
@@ -1436,6 +2074,7 @@ export async function processPendingEtaSubmissions(
             .set({
               status: "submitted",
               submissionUuid: result.submissionUuid ?? sub.submissionUuid,
+              requestPayloadJson: payloadToSend,
               responsePayloadJson: result.rawResponse,
               lastError: null,
               nextRetryAt: new Date(Date.now() + 30_000),
@@ -1448,7 +2087,7 @@ export async function processPendingEtaSubmissions(
         }
       } catch (err) {
         const nextAttempts = sub.attempts + 1;
-        const errMsg = err instanceof Error ? err.message : "ETA receipt submission error";
+        const errMsg = err instanceof Error ? err.message : "ETA submission error";
         if (nextAttempts >= MAX_ETA_SUBMISSION_ATTEMPTS) {
           await tx
             .update(einvoiceSubmissions)
@@ -1490,24 +2129,31 @@ export async function processPendingEtaSubmissions(
       const posOsVersion = terminal?.etaPosOsVersion || null;
 
       try {
-        const pollRes = await getEtaSubmissionStatus(sub.submissionUuid, {
-          posSerial,
-          posOsVersion,
-          fetchImpl: opts.fetchImpl,
-        });
+        const pollRes =
+          sub.documentType === "invoice"
+            ? await getEtaDocumentSubmissionStatus(sub.submissionUuid, {
+                fetchImpl: opts.fetchImpl,
+              })
+            : await getEtaSubmissionStatus(sub.submissionUuid, {
+                posSerial,
+                posOsVersion,
+                fetchImpl: opts.fetchImpl,
+              });
 
         if (pollRes.status === "Accepted" || pollRes.status === "Valid") {
+          const polledUuid = pollRes.accepted[0]?.uuid || sub.documentUuid;
           await tx
             .update(einvoiceSubmissions)
             .set({
               status: "accepted",
+              documentUuid: polledUuid,
               responsePayloadJson: pollRes.rawResponse,
               lastError: null,
               nextRetryAt: null,
               updatedAt: new Date(),
             })
             .where(eq(einvoiceSubmissions.id, sub.id));
-          await updateLinkedDocStatus(sub, "accepted", sub.submissionUuid);
+          await updateLinkedDocStatus(sub, "accepted", sub.submissionUuid, polledUuid);
           accepted++;
           processed++;
         } else if (pollRes.status === "Invalid" || pollRes.status === "Rejected") {

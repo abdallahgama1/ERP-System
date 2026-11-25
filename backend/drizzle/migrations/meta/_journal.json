@@ -78,6 +78,13 @@
       "when": 1795579843979,
       "tag": "0010_heavy_mariko_yashida",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795581967134,
+      "tag": "0011_volatile_celestials",
+      "breakpoints": true
     }
   ]
 }

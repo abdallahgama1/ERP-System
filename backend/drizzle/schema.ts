@@ -92,6 +92,13 @@ export const branches = pgTable(
     phone: text("phone").notNull().default(""),
     email: text("email").notNull().default(""),
     managerName: text("manager_name").notNull().default(""),
+    etaBranchId: text("eta_branch_id").notNull().default("0"),
+    country: text("country").notNull().default("EG"),
+    governorate: text("governorate").notNull().default(""),
+    regionCity: text("region_city").notNull().default(""),
+    street: text("street").notNull().default(""),
+    buildingNumber: text("building_number").notNull().default(""),
+    postalCode: text("postal_code").notNull().default(""),
     isDefault: boolean("is_default").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -749,6 +756,9 @@ export const products = pgTable(
       .default("FEFO"),
     trackLots: boolean("track_lots").notNull().default(false),
     trackSerials: boolean("track_serials").notNull().default(false),
+    etaCodeType: text("eta_code_type").$type<"EGS" | "GS1">().notNull().default("EGS"),
+    etaItemCode: text("eta_item_code").notNull().default(""),
+    etaUnitType: text("eta_unit_type").notNull().default("EA"),
     hasBom: boolean("has_bom").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -808,6 +818,7 @@ export const customers = pgTable(
     billingAddress: text("billing_address").notNull().default(""),
     shippingAddress: text("shipping_address").notNull().default(""),
     taxNumber: text("tax_number").notNull().default(""),
+    etaReceiverType: text("eta_receiver_type").$type<"B" | "P" | "F">().notNull().default("B"),
     currency: text("currency").notNull().default("USD"),
     paymentTermsDays: integer("payment_terms_days").notNull().default(30),
     creditLimit: numeric("credit_limit", { precision: 18, scale: 4 }),
@@ -1600,6 +1611,10 @@ export const salesReturns = pgTable(
     taxTotal: numeric("tax_total", { precision: 18, scale: 4 }).notNull().default("0"),
     totalAmount: numeric("total_amount", { precision: 18, scale: 4 }).notNull().default("0"),
     appliedAmount: numeric("applied_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+    etaDocumentUuid: text("eta_document_uuid"),
+    etaSubmissionUuid: text("eta_submission_uuid"),
+    eInvoiceStatus: text("e_invoice_status").notNull().default("not_applicable"),
+    eInvoicePayloadJson: jsonb("e_invoice_payload_json").$type<Record<string, unknown>>(),
     notes: text("notes").notNull().default(""),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -2262,6 +2277,7 @@ export const einvoiceSubmissions = pgTable(
       .references(() => companies.id, { onDelete: "restrict" }),
     invoiceId: uuid("invoice_id").references(() => salesInvoices.id, { onDelete: "cascade" }),
     posReturnId: uuid("pos_return_id").references(() => posReturns.id, { onDelete: "cascade" }),
+    salesReturnId: uuid("sales_return_id").references(() => salesReturns.id, { onDelete: "cascade" }),
     provider: text("provider").$type<"eta_egypt" | "zatca_phase2">().notNull(),
     documentType: text("document_type").$type<"receipt" | "invoice">().notNull().default("receipt"),
     documentUuid: text("document_uuid").notNull(),
@@ -2287,6 +2303,9 @@ export const einvoiceSubmissions = pgTable(
     uniqueIndex("einvoice_sub_pos_return_provider_uq")
       .on(t.posReturnId, t.provider)
       .where(sql`${t.posReturnId} IS NOT NULL`),
+    uniqueIndex("einvoice_sub_sales_return_provider_uq")
+      .on(t.salesReturnId, t.provider)
+      .where(sql`${t.salesReturnId} IS NOT NULL`),
   ]
 );
 

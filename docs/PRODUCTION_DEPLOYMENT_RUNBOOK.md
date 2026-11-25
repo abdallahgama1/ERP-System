@@ -168,10 +168,14 @@ All variable names below match `backend/src/config.ts`, `backend/.env.example`, 
 | `SENTRY_ENVIRONMENT` | Optional | `NODE_ENV` | Environment tag attached to Sentry events. |
 | `SENTRY_TRACES_SAMPLE_RATE` | Optional | `0` | Sentry performance trace sample rate (`0`–`1`). |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Optional | `""` / `587` / `false` | SMTP credentials for password reset & operational alerts. |
-| `ETA_CLIENT_ID` / `ETA_CLIENT_SECRET` | Optional | `""` | Egyptian Tax Authority e-Receipt v1.2 OAuth2 client credentials. |
+| `ETA_CLIENT_ID` / `ETA_CLIENT_SECRET` | Optional | `""` | Egyptian Tax Authority e-Receipt v1.2 & B2B e-Invoice v1.0 OAuth2 client credentials. |
 | `ETA_ID_BASE_URL` | Optional | `https://id.preprod.eta.gov.eg` | Use `https://id.eta.gov.eg` in Egypt ETA production. |
 | `ETA_TOKEN_URL` | Optional | `${ETA_ID_BASE_URL}/connect/token` | Override ETA OAuth2 token endpoint if needed. |
 | `ETA_API_BASE_URL` | Optional | `https://api.preprod.invoicing.eta.gov.eg` | Use `https://api.invoicing.eta.gov.eg` in Egypt ETA production. |
+| `ETA_INVOICE_VERSION` | Optional | `1.0` | ETA B2B e-Invoice document version (`1.0` requires CAdES-BES signature via `ETA_SIGNER_URL`; `0.9` submits unsigned in preprod). |
+| `ETA_SIGNER_URL` | Optional | `""` | HTTP endpoint of external PKCS#11 / USB hardware token CAdES-BES signing bridge (`POST { canonicalString, canonicalSha256, document } -> { signatureType: "I", value }`). |
+| `ETA_SIGNER_TOKEN` | Optional | `""` | Optional Bearer token sent to `ETA_SIGNER_URL` (automatically scrubbed from logs & Sentry). |
+| `ETA_SIGNER_TIMEOUT_MS` | Optional | `10000` | Request timeout in ms when calling `ETA_SIGNER_URL`. |
 
 ### Frontend Build-Time, Docker Compose & Ops Script Variables
 
@@ -309,13 +313,18 @@ bash ./scripts/deploy.sh \
 
 ## 9. ETA Egypt e-Receipt v1.2, Sentry & Prometheus Setup
 
-### ETA Egypt e-Receipt v1.2
+### ETA Egypt e-Receipt v1.2 & B2B e-Invoice v1.0
 1. Set `ETA_CLIENT_ID`, `ETA_CLIENT_SECRET`, `ETA_ID_BASE_URL=https://id.eta.gov.eg`, and `ETA_API_BASE_URL=https://api.invoicing.eta.gov.eg` in `.env` (use `preprod` URLs during ETA onboarding).
-2. In the ERP UI (**Settings**), configure:
-   - `einvoicingMode` = `eta_egypt`
-   - Legal Company Name & Egyptian RIN (`taxRegistrationNumber`)
-   - Branch codes/addresses & POS Terminal `etaPosSerial` + `etaPosOsVersion`
-3. Monitor submissions and trigger manual retries if needed in **Admin → E-Invoice Queue**.
+2. For **B2B e-Invoice v1.0** (`"I"` Sales Invoices and `"C"` Credit Notes submitted to `/api/v1/documentsubmissions`):
+   - In **Production** (`ETA_INVOICE_VERSION=1.0`), run a PKCS#11 / Egyptian USB token CAdES-BES signing bridge reachable from the backend and set `ETA_SIGNER_URL` (plus optional `ETA_SIGNER_TOKEN`). If `ETA_SIGNER_URL` is unset while `ETA_INVOICE_VERSION=1.0`, B2B e-Invoices remain safely queued in `pending` status without failing out.
+   - In **Pre-Production** without a hardware token, set `ETA_INVOICE_VERSION=0.9` to submit unsigned v0.9 B2B documents.
+3. In the ERP UI, configure:
+   - **Settings**: `einvoicingMode` = `eta_egypt`, Legal Company Name, and Egyptian RIN (`taxRegistrationNumber`)
+   - **Branches**: ETA Branch Code (`etaBranchId`, e.g., `0`), Governorate, City, Street, and Building Number
+   - **Products**: ETA Code Type (`EGS` or `GS1`), ETA Item Code (e.g., `EG-123456789-SKU1`), and ETA Unit Type (`EA`, `KGM`, `BX`, etc.)
+   - **Customers**: Tax Registration / National ID and ETA Receiver Type (`B` Business, `P` Person, `F` Foreigner)
+   - **POS Terminals**: `etaPosSerial` + `etaPosOsVersion` for POS e-Receipts (`"S"` / `"R"` via `/api/v1/receiptsubmissions`)
+4. Monitor both e-Receipts (`S`/`R`) and B2B e-Invoices (`I`/`C`) and trigger manual retries in **Admin → E-Invoice Queue**.
 
 ### Sentry Error Tracking
 1. Create separate Node (backend) and React (frontend) projects in Sentry.

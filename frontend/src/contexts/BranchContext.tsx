@@ -15,6 +15,13 @@ export interface ErpBranch {
   phone?: string;
   email?: string;
   managerName?: string;
+  etaBranchId?: string;
+  country?: string;
+  governorate?: string;
+  regionCity?: string;
+  street?: string;
+  buildingNumber?: string;
+  postalCode?: string;
   isDefault: boolean;
   isActive: boolean;
 }

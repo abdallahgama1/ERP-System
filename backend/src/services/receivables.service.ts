@@ -23,6 +23,7 @@ import {
 import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
+import { applySalesReturnEInvoiceMetadata } from "./einvoicing.service.ts";
 import { postMappedJournal, reverseJournalEntriesForSource } from "./gl.service.ts";
 import { buildBranchScopeCondition, groupByKey, listBranchScoped } from "./query-helpers.ts";
 import {
@@ -465,6 +466,8 @@ export async function createSalesReturn(
       });
     }
 
+    const etaMeta = await applySalesReturnEInvoiceMetadata(tx, ret.id, companyId);
+
     await writeAuditLog(tx, {
       companyId,
       userId: actor.id,
@@ -477,7 +480,12 @@ export async function createSalesReturn(
       entityLabel: `${ret.returnNumber} (${ret.creditNoteNumber})`,
       ipAddress,
     });
-    return ret;
+    return {
+      ...ret,
+      etaDocumentUuid: etaMeta.etaDocumentUuid,
+      eInvoiceStatus: etaMeta.eInvoiceStatus,
+      eInvoicePayloadJson: etaMeta.eInvoicePayloadJson,
+    };
   });
 }
 

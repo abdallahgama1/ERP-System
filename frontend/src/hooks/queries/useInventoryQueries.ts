@@ -25,6 +25,13 @@ export interface ApiBranchRow {
   branchType: "hq_warehouse" | "warehouse" | "retail";
   location: string;
   phone: string;
+  etaBranchId?: string;
+  country?: string;
+  governorate?: string;
+  regionCity?: string;
+  street?: string;
+  buildingNumber?: string;
+  postalCode?: string;
   isDefault: boolean;
   isActive: boolean;
 }
@@ -51,6 +58,9 @@ export interface ApiProductRow {
   requiresExpiry?: boolean;
   shelfLifeDays?: number | null;
   pickingStrategy?: "FEFO" | "FIFO" | "LIFO";
+  etaCodeType?: "EGS" | "GS1";
+  etaItemCode?: string;
+  etaUnitType?: string;
   hasBom?: boolean;
   totalQuantity: number;
 }
@@ -147,6 +157,13 @@ export function mapApiBranch(b: ApiBranchRow | ApiBranchFullRow): Branch {
     contact_number: b.phone || "",
     code: b.code,
     branchType: b.branchType,
+    etaBranchId: b.etaBranchId ?? "0",
+    country: b.country ?? "EG",
+    governorate: b.governorate ?? "",
+    regionCity: b.regionCity ?? "",
+    street: b.street ?? "",
+    buildingNumber: b.buildingNumber ?? "",
+    postalCode: b.postalCode ?? "",
     isDefault: b.isDefault,
     isActive: b.isActive,
   };
@@ -170,6 +187,9 @@ export function mapApiProduct(p: ApiProductRow): Product {
     requiresExpiry: p.requiresExpiry ?? false,
     shelfLifeDays: p.shelfLifeDays ?? null,
     pickingStrategy: p.pickingStrategy ?? "FEFO",
+    etaCodeType: p.etaCodeType ?? "EGS",
+    etaItemCode: p.etaItemCode ?? "",
+    etaUnitType: p.etaUnitType ?? "EA",
     hasBom: p.hasBom ?? false,
   };
 }

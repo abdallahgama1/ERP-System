@@ -101,6 +101,9 @@ const Products = () => {
     requiresExpiry: boolean;
     shelfLifeDays: number | null;
     pickingStrategy: "FEFO" | "FIFO" | "LIFO";
+    etaCodeType: "EGS" | "GS1";
+    etaItemCode: string;
+    etaUnitType: string;
   }>({
     product_name: "",
     product_sku: "",
@@ -114,6 +117,9 @@ const Products = () => {
     requiresExpiry: false,
     shelfLifeDays: null,
     pickingStrategy: "FEFO",
+    etaCodeType: "EGS",
+    etaItemCode: "",
+    etaUnitType: "EA",
   });
 
   const { data: productsPage } = useProductsPageQuery({
@@ -141,6 +147,9 @@ const Products = () => {
         requiresExpiry: p.requiresExpiry ?? false,
         shelfLifeDays: p.shelfLifeDays ?? null,
         pickingStrategy: p.pickingStrategy ?? "FEFO",
+        etaCodeType: p.etaCodeType ?? "EGS",
+        etaItemCode: p.etaItemCode ?? "",
+        etaUnitType: p.etaUnitType ?? "EA",
         hasBom: p.hasBom ?? false,
       })),
     [productsPage]
@@ -160,6 +169,9 @@ const Products = () => {
       requiresExpiry: false,
       shelfLifeDays: null,
       pickingStrategy: "FEFO",
+      etaCodeType: "EGS",
+      etaItemCode: "",
+      etaUnitType: "EA",
     });
     setEditingProduct(null);
   };
@@ -246,6 +258,9 @@ const Products = () => {
       requiresExpiry: product.requiresExpiry ?? false,
       shelfLifeDays: product.shelfLifeDays ?? null,
       pickingStrategy: product.pickingStrategy ?? "FEFO",
+      etaCodeType: product.etaCodeType ?? "EGS",
+      etaItemCode: product.etaItemCode ?? "",
+      etaUnitType: product.etaUnitType ?? "EA",
     });
     setIsAddDialogOpen(true);
   };
@@ -758,6 +773,68 @@ const Products = () => {
                   </div>
                 </div>
               )}
+
+              <div className="rounded-md border p-3 space-y-2 bg-muted/20">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {t("products.etaSection", "ETA Egypt Item Coding (Optional)")}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs" htmlFor="etaCodeType">
+                      {t("products.etaCodeType", "Code Type")}
+                    </Label>
+                    <Select
+                      value={formData.etaCodeType}
+                      onValueChange={(v) =>
+                        setFormData({ ...formData, etaCodeType: v as "EGS" | "GS1" })
+                      }
+                    >
+                      <SelectTrigger id="etaCodeType" className="h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="EGS">EGS</SelectItem>
+                        <SelectItem value="GS1">GS1</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs" htmlFor="etaUnitType">
+                      {t("products.etaUnitType", "ETA UOM")}
+                    </Label>
+                    <Select
+                      value={formData.etaUnitType}
+                      onValueChange={(v) => setFormData({ ...formData, etaUnitType: v })}
+                    >
+                      <SelectTrigger id="etaUnitType" className="h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="EA">EA (Each)</SelectItem>
+                        <SelectItem value="BX">BX (Box)</SelectItem>
+                        <SelectItem value="PK">PK (Pack)</SelectItem>
+                        <SelectItem value="KGM">KGM (Kg)</SelectItem>
+                        <SelectItem value="LTR">LTR (Liter)</SelectItem>
+                        <SelectItem value="MTR">MTR (Meter)</SelectItem>
+                        <SelectItem value="TNE">TNE (Tonne)</SelectItem>
+                        <SelectItem value="HUR">HUR (Hour)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs" htmlFor="etaItemCode">
+                      {t("products.etaItemCode", "ETA Item Code")}
+                    </Label>
+                    <Input
+                      id="etaItemCode"
+                      className="h-8"
+                      value={formData.etaItemCode}
+                      onChange={(e) => setFormData({ ...formData, etaItemCode: e.target.value })}
+                      placeholder="EG-..."
+                    />
+                  </div>
+                </div>
+              </div>
 
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => setIsAddDialogOpen(false)}>

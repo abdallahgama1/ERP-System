@@ -400,15 +400,38 @@ export default function EInvoiceQueue() {
                         )}
                       </TableCell>
                       <TableCell>
-                        {item.receiptType === "R" ? (
-                          <Badge variant="outline" className="border-amber-500/50 text-amber-700 dark:text-amber-300">
-                            {t("einvoicing.returnReceipt", "R · Return")}
-                          </Badge>
-                        ) : (
-                          <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300">
-                            {t("einvoicing.saleReceipt", "S · Sale")}
-                          </Badge>
-                        )}
+                        <div className="flex flex-col items-start gap-1">
+                          {item.etaDocumentTypeCode === "I" ? (
+                            <Badge variant="outline" className="border-blue-500/50 text-blue-700 dark:text-blue-300">
+                              {t("einvoicing.b2bInvoice", "I · Invoice")}
+                            </Badge>
+                          ) : item.etaDocumentTypeCode === "C" ? (
+                            <Badge variant="outline" className="border-purple-500/50 text-purple-700 dark:text-purple-300">
+                              {t("einvoicing.b2bCreditNote", "C · Credit Note")}
+                            </Badge>
+                          ) : item.etaDocumentTypeCode === "D" ? (
+                            <Badge variant="outline" className="border-indigo-500/50 text-indigo-700 dark:text-indigo-300">
+                              {t("einvoicing.b2bDebitNote", "D · Debit Note")}
+                            </Badge>
+                          ) : item.receiptType === "R" ? (
+                            <Badge variant="outline" className="border-amber-500/50 text-amber-700 dark:text-amber-300">
+                              {t("einvoicing.returnReceipt", "R · Return")}
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300">
+                              {t("einvoicing.saleReceipt", "S · Sale")}
+                            </Badge>
+                          )}
+                          {item.documentType === "invoice" && item.signatureStatus && (
+                            <span className="text-[11px] text-muted-foreground font-mono">
+                              {item.signatureStatus === "signed"
+                                ? "Signed CAdES-BES"
+                                : item.signatureStatus === "unsigned_v0_9"
+                                  ? "v0.9 Unsigned"
+                                  : "Awaiting Signer"}
+                            </span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell className="font-mono text-xs max-w-[180px] truncate" title={item.documentUuid}>
                         {item.documentUuid}
@@ -507,9 +530,17 @@ export default function EInvoiceQueue() {
                 </span>
               </div>
               <div>
-                <span className="text-muted-foreground">Receipt Type:</span>{" "}
+                <span className="text-muted-foreground">Document Type:</span>{" "}
                 <span className="font-mono font-medium">
-                  {selectedItem?.receiptType === "R" ? "R (Return)" : "S (Sale)"}
+                  {selectedItem?.etaDocumentTypeCode === "I"
+                    ? "I (B2B Invoice)"
+                    : selectedItem?.etaDocumentTypeCode === "C"
+                      ? "C (Credit Note)"
+                      : selectedItem?.etaDocumentTypeCode === "D"
+                        ? "D (Debit Note)"
+                        : selectedItem?.receiptType === "R"
+                          ? "R (POS Return)"
+                          : "S (POS Sale)"}
                 </span>
               </div>
               <div>

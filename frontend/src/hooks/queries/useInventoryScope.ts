@@ -65,6 +65,13 @@ export function useInventoryScope(options: InventoryScopeOptions = {}) {
       contact_number: b.phone || "",
       code: b.code,
       branchType: b.branchType,
+      etaBranchId: b.etaBranchId ?? "0",
+      country: b.country ?? "EG",
+      governorate: b.governorate ?? "",
+      regionCity: b.regionCity ?? "",
+      street: b.street ?? "",
+      buildingNumber: b.buildingNumber ?? "",
+      postalCode: b.postalCode ?? "",
       isDefault: b.isDefault,
       isActive: b.isActive,
     }));
@@ -91,6 +98,9 @@ export function useInventoryScope(options: InventoryScopeOptions = {}) {
         requiresExpiry: p.requiresExpiry ?? false,
         shelfLifeDays: p.shelfLifeDays ?? null,
         pickingStrategy: p.pickingStrategy ?? "FEFO",
+        etaCodeType: p.etaCodeType ?? "EGS",
+        etaItemCode: p.etaItemCode ?? "",
+        etaUnitType: p.etaUnitType ?? "EA",
         hasBom: p.hasBom ?? false,
       })),
     [productsQuery.data]
@@ -261,6 +271,9 @@ export function useInventoryScope(options: InventoryScopeOptions = {}) {
             requiresExpiry: data.requiresExpiry ?? false,
             shelfLifeDays: data.shelfLifeDays ?? null,
             pickingStrategy: data.pickingStrategy ?? "FEFO",
+            etaCodeType: data.etaCodeType ?? "EGS",
+            etaItemCode: data.etaItemCode ?? "",
+            etaUnitType: data.etaUnitType ?? "EA",
             initialStock,
           },
         });
@@ -277,6 +290,9 @@ export function useInventoryScope(options: InventoryScopeOptions = {}) {
             brand: res.product.brand,
             category: res.product.category,
             unit: res.product.unit,
+            etaCodeType: res.product.etaCodeType ?? "EGS",
+            etaItemCode: res.product.etaItemCode ?? "",
+            etaUnitType: res.product.etaUnitType ?? "EA",
           },
         };
       } catch (err) {
@@ -309,6 +325,9 @@ export function useInventoryScope(options: InventoryScopeOptions = {}) {
             requiresExpiry: data.requiresExpiry ?? false,
             shelfLifeDays: data.shelfLifeDays ?? null,
             pickingStrategy: data.pickingStrategy ?? "FEFO",
+            etaCodeType: data.etaCodeType ?? "EGS",
+            etaItemCode: data.etaItemCode ?? "",
+            etaUnitType: data.etaUnitType ?? "EA",
           },
         });
         await refreshInventory();
@@ -346,6 +365,13 @@ export function useInventoryScope(options: InventoryScopeOptions = {}) {
             phone: data.contact_number,
             branchType: data.branchType ?? "retail",
             code: data.code,
+            etaBranchId: data.etaBranchId ?? "0",
+            country: data.country ?? "EG",
+            governorate: data.governorate ?? "",
+            regionCity: data.regionCity ?? "",
+            street: data.street ?? "",
+            buildingNumber: data.buildingNumber ?? "",
+            postalCode: data.postalCode ?? "",
           },
         });
         await Promise.all([refreshInventory(), refreshBranches()]);
@@ -358,6 +384,13 @@ export function useInventoryScope(options: InventoryScopeOptions = {}) {
             contact_number: res.branch.phone,
             code: res.branch.code,
             branchType: res.branch.branchType,
+            etaBranchId: res.branch.etaBranchId ?? "0",
+            country: res.branch.country ?? "EG",
+            governorate: res.branch.governorate ?? "",
+            regionCity: res.branch.regionCity ?? "",
+            street: res.branch.street ?? "",
+            buildingNumber: res.branch.buildingNumber ?? "",
+            postalCode: res.branch.postalCode ?? "",
             isDefault: res.branch.isDefault,
             isActive: res.branch.isActive,
           },
@@ -382,6 +415,13 @@ export function useInventoryScope(options: InventoryScopeOptions = {}) {
             location: data.branch_location,
             phone: data.contact_number,
             branchType: data.branchType,
+            etaBranchId: data.etaBranchId ?? "0",
+            country: data.country ?? "EG",
+            governorate: data.governorate ?? "",
+            regionCity: data.regionCity ?? "",
+            street: data.street ?? "",
+            buildingNumber: data.buildingNumber ?? "",
+            postalCode: data.postalCode ?? "",
           },
         });
         await Promise.all([refreshInventory(), refreshBranches()]);
