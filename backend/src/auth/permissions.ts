@@ -344,20 +344,24 @@ export async function seedCompanyDefaults(
     .onConflictDoNothing();
 
   const coaRows = await tx
-    .select({ id: chartOfAccounts.id, code: chartOfAccounts.code })
+    .select({
+      id: chartOfAccounts.id,
+      code: chartOfAccounts.code,
+      accountType: chartOfAccounts.accountType,
+    })
     .from(chartOfAccounts)
     .where(eq(chartOfAccounts.companyId, companyId));
-  const coaByCode = new Map(coaRows.map((a) => [a.code, a.id]));
+  const coaByCode = new Map(coaRows.map((a) => [a.code, a]));
 
   const mappingRows: Array<typeof glAccountMappings.$inferInsert> = [];
   for (const def of DEFAULT_COA) {
     if (!def.mappingKey) continue;
-    const accountId = coaByCode.get(def.code);
-    if (!accountId) continue;
+    const acct = coaByCode.get(def.code);
+    if (!acct || acct.accountType !== def.accountType) continue;
     mappingRows.push({
       companyId,
       mappingKey: def.mappingKey,
-      accountId,
+      accountId: acct.id,
     });
   }
   if (mappingRows.length > 0) {

@@ -7,6 +7,7 @@ import {
   createFiscalYearSchema,
   createJournalEntrySchema,
   createTaxCodeSchema,
+  reopenFiscalYearSchema,
   runFxRevaluationSchema,
   updateAccountSchema,
   updateCostCenterSchema,
@@ -16,12 +17,13 @@ import {
 } from "@erp/shared";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
-import { assertBranchAccess, requireAuth, requirePermission } from "../middleware/auth.ts";
+import { assertBranchAccess, requireAuth, requirePermission, requireRole } from "../middleware/auth.ts";
 import {
   getAccountLedger,
   getBalanceSheet,
   getCashFlowStatement,
   getProfitAndLoss,
+  getSubledgerReconciliation,
   getTrialBalance,
   getVatReturnSummary,
 } from "../services/accounting-reports.service.ts";
@@ -39,10 +41,12 @@ import {
   createAccount,
   createFiscalYear,
   createManualJournal,
+  getAccountingSetupHealth,
   listAccounts,
   listFiscalYearsWithPeriods,
   listGlMappings,
   listJournalEntries,
+  reopenFiscalYear,
   reverseSingleJournalEntry,
   setFiscalPeriodLock,
   updateAccount,
@@ -129,6 +133,10 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     return { mapping };
   });
 
+  app.get("/api/accounting/setup-health", { preHandler: requireRole("admin") }, async (req) => {
+    return getAccountingSetupHealth(getDb(), req.authUser!);
+  });
+
   // ---------------- Journal Entries ----------------
   app.get("/api/accounting/journal-entries", { preHandler: requirePermission("accounting", "view") }, async (req) => {
     const query = req.query as {
@@ -209,6 +217,18 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
+  app.post(
+    "/api/accounting/fiscal-years/:id/reopen",
+    { preHandler: requireRole("admin") },
+    async (req) => {
+      const id = (req.params as { id: string }).id;
+      const data = parseOrThrow(reopenFiscalYearSchema, req.body ?? {}, "Invalid fiscal year reopen payload");
+      const result = await reopenFiscalYear(getDb(), req.authUser!, id, data, req.ip);
+      eventBroadcaster.broadcast("accounting_updated", { fiscalYearId: id }, actorCompanyId(req.authUser!));
+      return result;
+    }
+  );
+
   // ---------------- Period-End FX Revaluation ----------------
   app.get(
     "/api/accounting/fx-revaluation/preview",
@@ -269,6 +289,12 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     const q = req.query as { fromDate?: string; toDate?: string; branchId?: string };
     if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
     return getVatReturnSummary(getDb(), req.authUser!, q);
+  });
+
+  app.get("/api/accounting/reports/reconciliation", { preHandler: requireRole("admin") }, async (req) => {
+    const q = req.query as { asOfDate?: string; branchId?: string };
+    if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
+    return getSubledgerReconciliation(getDb(), req.authUser!, q);
   });
 
   app.get("/api/accounting/reports/ledger/:accountId", { preHandler: requirePermission("accounting", "view") }, async (req) => {

@@ -1,5 +1,21 @@
-import { buildOffsetPageInfo, roundCurrency, type AccountTypeShared, type GlMappingKey, type NormalBalanceShared, type OffsetPageInfo, type YearEndCloseResultDto, type closeFiscalYearSchema, type createAccountSchema, type createFiscalYearSchema, type createJournalEntrySchema } from "@erp/shared";
-import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
+import {
+  buildOffsetPageInfo,
+  roundCurrency,
+  type AccountTypeShared,
+  type AccountingMappingIssueDto,
+  type AccountingSetupHealthDto,
+  type GlMappingKey,
+  type NormalBalanceShared,
+  type OffsetPageInfo,
+  type YearEndCloseResultDto,
+  type YearEndReopenResultDto,
+  type closeFiscalYearSchema,
+  type createAccountSchema,
+  type createFiscalYearSchema,
+  type createJournalEntrySchema,
+  type reopenFiscalYearSchema,
+} from "@erp/shared";
+import { and, asc, desc, eq, gt, gte, ilike, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import {
   DEFAULT_COMPANY_ID,
@@ -90,15 +106,16 @@ export async function ensureAccountingDefaults(
     .select()
     .from(chartOfAccounts)
     .where(eq(chartOfAccounts.companyId, effectiveCompanyId));
-  const byCode = new Map(coaRows.map((a) => [a.code, a.id]));
+  const byCode = new Map(coaRows.map((a) => [a.code, a]));
 
   for (const def of DEFAULT_COA) {
     if (!def.mappingKey) continue;
-    const accountId = byCode.get(def.code);
-    if (!accountId) continue;
+    const acct = byCode.get(def.code);
+    // Never silently bind a mapping to an existing custom account of the wrong accountType
+    if (!acct || acct.accountType !== def.accountType) continue;
     await tx
       .insert(glAccountMappings)
-      .values({ companyId: effectiveCompanyId, mappingKey: def.mappingKey, accountId })
+      .values({ companyId: effectiveCompanyId, mappingKey: def.mappingKey, accountId: acct.id })
       .onConflictDoNothing();
   }
 
@@ -545,7 +562,8 @@ export async function reverseSingleJournalEntry(
   entryId: string,
   actorId: string,
   reason: string,
-  companyId?: string
+  companyId?: string,
+  options?: { entryDate?: Date }
 ) {
   const whereCond = companyId
     ? and(eq(journalEntries.id, entryId), eq(journalEntries.companyId, companyId))
@@ -559,7 +577,7 @@ export async function reverseSingleJournalEntry(
   const lines = await tx.select().from(journalLines).where(eq(journalLines.entryId, entryId));
   const rev = await postJournalEntry(tx, {
     companyId: je.companyId,
-    entryDate: new Date(),
+    entryDate: options?.entryDate ?? new Date(),
     branchId: je.branchId,
     sourceType: "reversal",
     sourceId: je.id,
@@ -725,6 +743,14 @@ export async function updateGlMapping(
       .where(and(eq(chartOfAccounts.id, accountId), eq(chartOfAccounts.companyId, companyId)))
       .limit(1);
     if (!acct) throw new AppError(404, "Referenced account not found", "NOT_FOUND");
+    const expectedDef = DEFAULT_COA.find((d) => d.mappingKey === mappingKey);
+    if (expectedDef && acct.accountType !== expectedDef.accountType) {
+      throw new AppError(
+        400,
+        `Mapping '${mappingKey}' requires an account of type '${expectedDef.accountType}', but account '${acct.code} ${acct.name}' has type '${acct.accountType}'`,
+        "INVALID_MAPPING_ACCOUNT_TYPE"
+      );
+    }
 
     await tx
       .insert(glAccountMappings)
@@ -1199,6 +1225,257 @@ export async function closeFiscalYear(
       totalExpensesClosed,
       netIncomeTransferred,
       periodsClosed: closedPeriods.length,
+    };
+  });
+}
+
+/**
+ * Evaluates GL mapping setup health, detecting missing, inactive, or account_type-mismatched
+ * control account bindings (e.g., when a custom Chart of Accounts already uses 3100, 5600, or 5610
+ * for a different account type).
+ */
+export async function getAccountingSetupHealth(
+  db: AppDatabase,
+  actorOrCompanyId?: RequestActor | string
+): Promise<AccountingSetupHealthDto> {
+  const companyId = resolveCompanyId(actorOrCompanyId);
+  await ensureAccountingDefaults(db, companyId);
+
+  const [coaRows, mappingRows] = await Promise.all([
+    db.select().from(chartOfAccounts).where(eq(chartOfAccounts.companyId, companyId)),
+    db.select().from(glAccountMappings).where(eq(glAccountMappings.companyId, companyId)),
+  ]);
+
+  const coaById = new Map(coaRows.map((a) => [a.id, a]));
+  const coaByCode = new Map(coaRows.map((a) => [a.code, a]));
+  const mappingByKey = new Map(mappingRows.map((m) => [m.mappingKey, m.accountId]));
+
+  const requiredDefs = DEFAULT_COA.filter(
+    (d): d is DefaultAccountDef & { mappingKey: GlMappingKey } => Boolean(d.mappingKey)
+  );
+  const issues: AccountingMappingIssueDto[] = [];
+
+  for (const def of requiredDefs) {
+    const boundAccountId = mappingByKey.get(def.mappingKey) ?? null;
+    const boundAcct = boundAccountId ? (coaById.get(boundAccountId) ?? null) : null;
+    const collidingAcct = coaByCode.get(def.code) ?? null;
+
+    if (!boundAcct) {
+      const hasTypeCollision = Boolean(collidingAcct && collidingAcct.accountType !== def.accountType);
+      issues.push({
+        mappingKey: def.mappingKey,
+        expectedCode: def.code,
+        expectedName: def.name,
+        expectedAccountType: def.accountType,
+        status: "missing",
+        boundAccountId: null,
+        boundAccountCode: null,
+        boundAccountName: null,
+        boundAccountType: null,
+        collidingAccountCode: hasTypeCollision ? collidingAcct!.code : null,
+        collidingAccountName: hasTypeCollision ? collidingAcct!.name : null,
+        collidingAccountType: hasTypeCollision ? collidingAcct!.accountType : null,
+        instructions: hasTypeCollision
+          ? `Account code '${def.code}' is already used by '${collidingAcct!.name}' (type '${collidingAcct!.accountType}'), so '${def.mappingKey}' (requires '${def.accountType}') was not auto-bound. Create a dedicated '${def.accountType}' account (e.g., '${def.name}') and bind '${def.mappingKey}' via PUT /api/accounting/mappings.`
+          : `GL mapping '${def.mappingKey}' is missing. Create or choose an active '${def.accountType}' account (default '${def.code} ${def.name}') and bind it via PUT /api/accounting/mappings.`,
+      });
+      continue;
+    }
+
+    if (boundAcct.accountType !== def.accountType) {
+      issues.push({
+        mappingKey: def.mappingKey,
+        expectedCode: def.code,
+        expectedName: def.name,
+        expectedAccountType: def.accountType,
+        status: "type_mismatch",
+        boundAccountId: boundAcct.id,
+        boundAccountCode: boundAcct.code,
+        boundAccountName: boundAcct.name,
+        boundAccountType: boundAcct.accountType,
+        collidingAccountCode: collidingAcct?.code ?? null,
+        collidingAccountName: collidingAcct?.name ?? null,
+        collidingAccountType: collidingAcct?.accountType ?? null,
+        instructions: `GL mapping '${def.mappingKey}' is bound to '${boundAcct.code} ${boundAcct.name}' (type '${boundAcct.accountType}'), but requires '${def.accountType}'. Rebind '${def.mappingKey}' to an active '${def.accountType}' account via PUT /api/accounting/mappings.`,
+      });
+      continue;
+    }
+
+    if (!boundAcct.isActive) {
+      issues.push({
+        mappingKey: def.mappingKey,
+        expectedCode: def.code,
+        expectedName: def.name,
+        expectedAccountType: def.accountType,
+        status: "inactive",
+        boundAccountId: boundAcct.id,
+        boundAccountCode: boundAcct.code,
+        boundAccountName: boundAcct.name,
+        boundAccountType: boundAcct.accountType,
+        collidingAccountCode: null,
+        collidingAccountName: null,
+        collidingAccountType: null,
+        instructions: `GL mapping '${def.mappingKey}' points to inactive account '${boundAcct.code} ${boundAcct.name}'. Reactivate it or rebind '${def.mappingKey}' via PUT /api/accounting/mappings.`,
+      });
+    }
+  }
+
+  return {
+    healthy: issues.length === 0,
+    totalMappings: requiredDefs.length,
+    validMappings: requiredDefs.length - issues.length,
+    issues,
+  };
+}
+
+/**
+ * Controlled admin action to reopen a closed fiscal year:
+ * - Verifies no later fiscal year is already closed
+ * - Reopens the fiscal year & its periods
+ * - Reverses any posted year_end_close JE dated at fy.endDate (preserving immutability)
+ * - Records an audit log entry inside the hash chain
+ */
+export async function reopenFiscalYear(
+  db: AppDatabase,
+  actor: RequestActor,
+  fiscalYearId: string,
+  data: z.infer<typeof reopenFiscalYearSchema>,
+  ipAddress?: string
+): Promise<YearEndReopenResultDto> {
+  const companyId = actorCompanyId(actor);
+
+  return db.transaction(async (tx) => {
+    const [fy] = await tx
+      .select()
+      .from(fiscalYears)
+      .where(and(eq(fiscalYears.id, fiscalYearId), eq(fiscalYears.companyId, companyId)))
+      .limit(1);
+    if (!fy) throw new AppError(404, "Fiscal year not found", "NOT_FOUND");
+    if (fy.status !== "closed") {
+      throw new AppError(409, `Fiscal year '${fy.name}' is not closed`, "NOT_CLOSED");
+    }
+
+    const [laterClosed] = await tx
+      .select({ id: fiscalYears.id, name: fiscalYears.name })
+      .from(fiscalYears)
+      .where(
+        and(
+          eq(fiscalYears.companyId, companyId),
+          eq(fiscalYears.status, "closed"),
+          gt(fiscalYears.startDate, fy.endDate)
+        )
+      )
+      .limit(1);
+    if (laterClosed) {
+      throw new AppError(
+        409,
+        `Cannot reopen '${fy.name}' while later fiscal year '${laterClosed.name}' is closed. Reopen '${laterClosed.name}' first.`,
+        "LATER_FISCAL_YEAR_CLOSED"
+      );
+    }
+
+    await tx
+      .update(fiscalYears)
+      .set({ status: "open" })
+      .where(eq(fiscalYears.id, fy.id));
+
+    const reopenedPeriods = await tx
+      .update(fiscalPeriods)
+      .set({ status: "open", lockedBy: null, lockedAt: null })
+      .where(and(eq(fiscalPeriods.fiscalYearId, fy.id), eq(fiscalPeriods.companyId, companyId)))
+      .returning({ id: fiscalPeriods.id });
+
+    const closingEntries = await tx
+      .select({
+        id: journalEntries.id,
+        entryNumber: journalEntries.entryNumber,
+        branchId: journalEntries.branchId,
+      })
+      .from(journalEntries)
+      .where(
+        and(
+          eq(journalEntries.companyId, companyId),
+          eq(journalEntries.sourceType, "year_end_close"),
+          eq(journalEntries.sourceId, fy.id),
+          eq(journalEntries.status, "posted"),
+          isNull(journalEntries.reversedEntryId)
+        )
+      );
+
+    let reversedClosingEntryId: string | null = null;
+    let reversalEntryId: string | null = null;
+    let reversalEntryNumber: string | null = null;
+
+    for (const closingJe of closingEntries) {
+      const origLines = await tx
+        .select()
+        .from(journalLines)
+        .where(eq(journalLines.entryId, closingJe.id));
+
+      if (origLines.length === 0) continue;
+
+      const rev = await postJournalEntry(tx, {
+        companyId,
+        entryDate: fy.endDate,
+        branchId: closingJe.branchId,
+        sourceType: "year_end_close_reversal",
+        sourceId: closingJe.id,
+        referenceNumber: closingJe.entryNumber,
+        memo: `Reversal of ${closingJe.entryNumber}: Reopen ${fy.name}: ${data.reason}`,
+        createdBy: actor.id,
+        lines: origLines.map((l) => ({
+          accountId: l.accountId,
+          branchId: l.branchId,
+          debit: num(l.creditTx),
+          credit: num(l.debitTx),
+          currency: l.currency,
+          fxRate: num(l.fxRate),
+          costCenterId: l.costCenterId,
+          description: l.description ? `Reversal: ${l.description}` : "Year-end close reversal",
+        })),
+      });
+
+      // Keep the original closing entry status='posted' so Original + Reversal net to 0
+      // in trial balance, balance sheet, and subsequent year-end close calculations.
+      await tx
+        .update(journalEntries)
+        .set({ reversedEntryId: rev.id })
+        .where(eq(journalEntries.id, closingJe.id));
+
+      reversedClosingEntryId = closingJe.id;
+      reversalEntryId = rev.id;
+      reversalEntryNumber = rev.entryNumber;
+    }
+
+    await writeAuditLog(tx, {
+      companyId,
+      userId: actor.id,
+      userName: actor.name,
+      userRole: actor.role,
+      action: "fiscal_year.reopened",
+      entityType: "accounting",
+      entityId: fy.id,
+      entityLabel: fy.name,
+      before: { status: "closed" },
+      after: {
+        status: "open",
+        reversedClosingEntryId,
+        reversalEntryId,
+        reversalEntryNumber,
+        periodsReopened: reopenedPeriods.length,
+      },
+      details: { reason: data.reason },
+      ipAddress,
+    });
+
+    return {
+      fiscalYearId: fy.id,
+      fiscalYearName: fy.name,
+      status: "open",
+      reversedClosingEntryId,
+      reversalEntryId,
+      reversalEntryNumber,
+      periodsReopened: reopenedPeriods.length,
     };
   });
 }
