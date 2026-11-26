@@ -362,6 +362,14 @@ export const closeFiscalYearSchema = z.object({
   memo: z.string().trim().max(300).optional().default(""),
 });
 
+export const reopenFiscalYearSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(5, "A reason of at least 5 characters is required to reopen a closed fiscal year")
+    .max(500),
+});
+
 export interface YearEndCloseResultDto {
   fiscalYearId: string;
   fiscalYearName: string;
@@ -372,6 +380,80 @@ export interface YearEndCloseResultDto {
   totalExpensesClosed: number;
   netIncomeTransferred: number;
   periodsClosed: number;
+}
+
+export interface YearEndReopenResultDto {
+  fiscalYearId: string;
+  fiscalYearName: string;
+  status: "open";
+  reversedClosingEntryId: string | null;
+  reversalEntryId: string | null;
+  reversalEntryNumber: string | null;
+  periodsReopened: number;
+}
+
+export type ReconciliationControlKey =
+  | "accounts_receivable"
+  | "accounts_payable"
+  | "inventory_asset"
+  | "output_vat"
+  | "input_vat"
+  | "fixed_assets_cost"
+  | "accumulated_depreciation"
+  | "treasury";
+
+export interface SubledgerReconciliationItemDto {
+  key: ReconciliationControlKey;
+  label: string;
+  glAccountCode: string;
+  glAccountName: string;
+  subledgerBalance: number;
+  glBalance: number;
+  variance: number;
+  isReconciled: boolean;
+  details?: string;
+}
+
+export interface TreasuryReconciliationItemDto {
+  treasuryAccountId: string;
+  code: string;
+  name: string;
+  glAccountCode: string;
+  glAccountName: string;
+  glBalance: number;
+  reconciledStatementBalance: number;
+  unreconciledGlDelta: number;
+  isValidAssetAccount: boolean;
+}
+
+export interface SubledgerReconciliationReportDto {
+  asOfDate: string | null;
+  items: SubledgerReconciliationItemDto[];
+  treasuryAccounts: TreasuryReconciliationItemDto[];
+  allReconciled: boolean;
+}
+
+export interface AccountingMappingIssueDto {
+  mappingKey: string;
+  expectedCode: string;
+  expectedName: string;
+  expectedAccountType: "asset" | "liability" | "equity" | "revenue" | "expense";
+  status: "missing" | "type_mismatch" | "inactive";
+  boundAccountId: string | null;
+  boundAccountCode: string | null;
+  boundAccountName: string | null;
+  boundAccountType: string | null;
+  collidingAccountCode: string | null;
+  collidingAccountName: string | null;
+  collidingAccountType: string | null;
+  instructions: string;
+}
+
+export interface AccountingSetupHealthDto {
+  healthy: boolean;
+  totalMappings: number;
+  validMappings: number;
+  issues: AccountingMappingIssueDto[];
 }
 
 // ---------------- Period-End FX Revaluation ----------------

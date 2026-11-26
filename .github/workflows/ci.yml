@@ -60,6 +60,9 @@ jobs:
       - name: Run Vitest unit & integration suite
         run: npm test
 
+      - name: Run sample year ledger & subledger-to-GL reconciliation check
+        run: npm run demo:ledger
+
       - name: Run PostgreSQL backup/restore & migration 0007 upgrade verification
         env:
           RESTORE_TEST_ADMIN_URL: postgresql://erp:erp_ci_password@127.0.0.1:5432/postgres

@@ -4,18 +4,30 @@ import {
   type CashFlowLineDto,
   type CashFlowStatementDto,
   type CursorPageInfo,
+  type SubledgerReconciliationItemDto,
+  type SubledgerReconciliationReportDto,
+  type TreasuryReconciliationItemDto,
   type VatReturnRateBucketDto,
   type VatReturnReportDto,
 } from "@erp/shared";
 import { and, asc, eq, gte, inArray, lt, lte, ne, sql, type SQL } from "drizzle-orm";
 import {
+  bankStatementLines,
+  branchProducts,
   chartOfAccounts,
   expenseClaimLines,
   expenseClaims,
+  fixedAssets,
   journalEntries,
   journalLines,
+  paymentMadeAllocations,
+  paymentsMade,
+  posReturnLines,
+  posReturns,
   purchaseReturnLines,
   purchaseReturns,
+  receivedPaymentAllocations,
+  receivedPayments,
   salesInvoiceLines,
   salesInvoices,
   salesReturnLines,
@@ -51,6 +63,7 @@ function buildEntryConditions(actor: RequestActor, filter: ReportFilter): SQL[] 
   ];
   if (filter.excludeClosingEntries) {
     conds.push(ne(journalEntries.sourceType, "year_end_close"));
+    conds.push(ne(journalEntries.sourceType, "year_end_close_reversal"));
   }
   if (filter.branchId) {
     conds.push(eq(journalEntries.branchId, filter.branchId));
@@ -524,6 +537,11 @@ export async function getVatReturnSummary(
   if (fromDt) sretConds.push(gte(salesReturns.returnDate, fromDt));
   if (toDt) sretConds.push(lte(salesReturns.returnDate, toDt));
 
+  const posRetConds: SQL[] = [eq(posReturns.companyId, companyId)];
+  if (filter.branchId) posRetConds.push(eq(posReturns.branchId, filter.branchId));
+  if (fromDt) posRetConds.push(gte(posReturns.createdAt, fromDt));
+  if (toDt) posRetConds.push(lte(posReturns.createdAt, toDt));
+
   const billConds: SQL[] = [
     eq(vendorBills.companyId, companyId),
     ne(vendorBills.status, "Cancelled"),
@@ -548,7 +566,7 @@ export async function getVatReturnSummary(
   if (fromDt) expConds.push(gte(expenseClaims.claimDate, fromDt));
   if (toDt) expConds.push(lte(expenseClaims.claimDate, toDt));
 
-  const [invRows, sretRows, billRows, pretRows, expRows, tb] = await Promise.all([
+  const [invRows, sretRows, posRetRows, billRows, pretRows, expRows, tb] = await Promise.all([
     db
       .select({
         docId: salesInvoices.id,
@@ -570,6 +588,16 @@ export async function getVatReturnSummary(
       .from(salesReturnLines)
       .innerJoin(salesReturns, eq(salesReturns.id, salesReturnLines.returnId))
       .where(and(...sretConds)),
+    db
+      .select({
+        docId: posReturns.id,
+        taxRate: posReturnLines.taxRate,
+        taxAmount: posReturnLines.taxAmount,
+        lineTotal: posReturnLines.lineTotal,
+      })
+      .from(posReturnLines)
+      .innerJoin(posReturns, eq(posReturns.id, posReturnLines.posReturnId))
+      .where(and(...posRetConds)),
     db
       .select({
         docId: vendorBills.id,
@@ -632,6 +660,11 @@ export async function getVatReturnSummary(
     addBucket(outputMap, num(r.taxRate), taxable, vat, r.docId);
   }
   for (const r of sretRows) {
+    const vat = num(r.taxAmount);
+    const taxable = num(r.lineTotal) - vat;
+    addBucket(outputMap, num(r.taxRate), -taxable, -vat, r.docId);
+  }
+  for (const r of posRetRows) {
     const vat = num(r.taxAmount);
     const taxable = num(r.lineTotal) - vat;
     addBucket(outputMap, num(r.taxRate), -taxable, -vat, r.docId);
@@ -764,4 +797,337 @@ export async function getAccountLedger(
   });
 
   return { entries, items: entries, pageInfo };
+}
+
+/**
+ * Full Subledger-to-GL Control Account Reconciliation Report:
+ * Verifies AR, AP, Inventory, Output VAT, Input VAT, Fixed Assets Cost,
+ * Accumulated Depreciation, and Treasury subledgers against their bound GL control accounts.
+ */
+export async function getSubledgerReconciliation(
+  db: AppDatabase,
+  actor: RequestActor,
+  filter: { asOfDate?: string; branchId?: string } = {}
+): Promise<SubledgerReconciliationReportDto> {
+  const companyId = actorCompanyId(actor);
+  await ensureAccountingDefaults(db, companyId);
+  const glMap = await getGlAccountMap(db, companyId);
+
+  const [
+    tb,
+    vat,
+    invRows,
+    sretRows,
+    rpRows,
+    rpAllocRows,
+    billRows,
+    pretRows,
+    pmRows,
+    pmAllocRows,
+    bpRows,
+    faRows,
+    treasuryRows,
+    stmtRows,
+    coaRows,
+  ] = await Promise.all([
+    getTrialBalance(db, actor, { asOfDate: filter.asOfDate, branchId: filter.branchId }),
+    getVatReturnSummary(db, actor, { toDate: filter.asOfDate, branchId: filter.branchId }),
+    db
+      .select({
+        totalAmount: salesInvoices.totalAmount,
+        paidAmount: salesInvoices.paidAmount,
+        creditAppliedAmount: salesInvoices.creditAppliedAmount,
+        retainerAppliedAmount: salesInvoices.retainerAppliedAmount,
+        fxRate: salesInvoices.fxRate,
+      })
+      .from(salesInvoices)
+      .where(
+        and(
+          eq(salesInvoices.companyId, companyId),
+          ne(salesInvoices.status, "Draft"),
+          ne(salesInvoices.status, "Cancelled"),
+          ...(filter.branchId ? [eq(salesInvoices.branchId, filter.branchId)] : [])
+        )
+      ),
+    db
+      .select({
+        totalAmount: salesReturns.totalAmount,
+        appliedAmount: salesReturns.appliedAmount,
+      })
+      .from(salesReturns)
+      .where(
+        and(
+          eq(salesReturns.companyId, companyId),
+          ne(salesReturns.status, "Voided"),
+          ...(filter.branchId ? [eq(salesReturns.branchId, filter.branchId)] : [])
+        )
+      ),
+    db
+      .select({
+        id: receivedPayments.id,
+        amount: receivedPayments.amount,
+        fxRate: receivedPayments.fxRate,
+      })
+      .from(receivedPayments)
+      .where(and(eq(receivedPayments.companyId, companyId), ne(receivedPayments.status, "Voided"))),
+    db
+      .select({
+        paymentId: receivedPaymentAllocations.paymentId,
+        allocated: sql<string>`coalesce(sum(${receivedPaymentAllocations.amount}), 0)`,
+      })
+      .from(receivedPaymentAllocations)
+      .groupBy(receivedPaymentAllocations.paymentId),
+    db
+      .select({
+        totalAmount: vendorBills.totalAmount,
+        paidAmount: vendorBills.paidAmount,
+        fxRate: vendorBills.fxRate,
+      })
+      .from(vendorBills)
+      .where(
+        and(
+          eq(vendorBills.companyId, companyId),
+          ne(vendorBills.status, "Cancelled"),
+          ...(filter.branchId ? [eq(vendorBills.branchId, filter.branchId)] : [])
+        )
+      ),
+    db
+      .select({
+        totalAmount: purchaseReturns.totalAmount,
+        billId: purchaseReturns.billId,
+      })
+      .from(purchaseReturns)
+      .where(
+        and(
+          eq(purchaseReturns.companyId, companyId),
+          ne(purchaseReturns.status, "Voided"),
+          ...(filter.branchId ? [eq(purchaseReturns.branchId, filter.branchId)] : [])
+        )
+      ),
+    db
+      .select({
+        id: paymentsMade.id,
+        amount: paymentsMade.amount,
+        fxRate: paymentsMade.fxRate,
+      })
+      .from(paymentsMade)
+      .where(and(eq(paymentsMade.companyId, companyId), ne(paymentsMade.status, "Voided"))),
+    db
+      .select({
+        paymentId: paymentMadeAllocations.paymentId,
+        allocated: sql<string>`coalesce(sum(${paymentMadeAllocations.amount}), 0)`,
+      })
+      .from(paymentMadeAllocations)
+      .groupBy(paymentMadeAllocations.paymentId),
+    db
+      .select({
+        qtyOnHand: branchProducts.qtyOnHand,
+        avgCost: branchProducts.avgCost,
+      })
+      .from(branchProducts)
+      .where(
+        and(
+          eq(branchProducts.companyId, companyId),
+          ...(filter.branchId ? [eq(branchProducts.branchId, filter.branchId)] : [])
+        )
+      ),
+    db
+      .select({
+        acquisitionCost: fixedAssets.acquisitionCost,
+        accumulatedDepreciation: fixedAssets.accumulatedDepreciation,
+        status: fixedAssets.status,
+      })
+      .from(fixedAssets)
+      .where(
+        and(
+          eq(fixedAssets.companyId, companyId),
+          ne(fixedAssets.status, "disposed"),
+          ...(filter.branchId ? [eq(fixedAssets.branchId, filter.branchId)] : [])
+        )
+      ),
+    db
+      .select()
+      .from(treasuryAccounts)
+      .where(eq(treasuryAccounts.companyId, companyId))
+      .orderBy(asc(treasuryAccounts.code)),
+    db
+      .select({
+        treasuryAccountId: bankStatementLines.treasuryAccountId,
+        reconciledSum: sql<string>`coalesce(sum(case when ${bankStatementLines.status} = 'reconciled' then ${bankStatementLines.amount} else 0 end), 0)`,
+      })
+      .from(bankStatementLines)
+      .where(eq(bankStatementLines.companyId, companyId))
+      .groupBy(bankStatementLines.treasuryAccountId),
+    db
+      .select()
+      .from(chartOfAccounts)
+      .where(eq(chartOfAccounts.companyId, companyId)),
+  ]);
+
+  const tbById = new Map(tb.rows.map((r) => [r.accountId, r]));
+  const coaById = new Map(coaRows.map((a) => [a.id, a]));
+  const glNetDebit = (accountId: string | undefined) => {
+    if (!accountId) return 0;
+    const row = tbById.get(accountId);
+    return row ? roundCurrency(row.debit - row.credit, 4) : 0;
+  };
+  const glNetCredit = (accountId: string | undefined) => {
+    if (!accountId) return 0;
+    const row = tbById.get(accountId);
+    return row ? roundCurrency(row.credit - row.debit, 4) : 0;
+  };
+  const glMeta = (accountId: string | undefined, fallbackCode: string, fallbackName: string) => {
+    const a = accountId ? coaById.get(accountId) : undefined;
+    return {
+      code: a?.code ?? fallbackCode,
+      name: a?.name ?? fallbackName,
+    };
+  };
+
+  // 1. AR Subledger vs GL 1100
+  const rpAllocByPay = new Map(rpAllocRows.map((r) => [r.paymentId, num(r.allocated)]));
+  const openInvBase = invRows.reduce((sum, inv) => {
+    const open = Math.max(
+      0,
+      num(inv.totalAmount) - num(inv.paidAmount) - num(inv.creditAppliedAmount) - num(inv.retainerAppliedAmount)
+    );
+    return roundCurrency(sum + open * (num(inv.fxRate) || 1), 4);
+  }, 0);
+  const unappliedCreditNotes = sretRows.reduce(
+    (sum, r) => roundCurrency(sum + Math.max(0, num(r.totalAmount) - num(r.appliedAmount)), 4),
+    0
+  );
+  const unallocatedCustomerPayments = rpRows.reduce((sum, rp) => {
+    const unalloc = Math.max(0, num(rp.amount) - (rpAllocByPay.get(rp.id) ?? 0));
+    return roundCurrency(sum + unalloc * (num(rp.fxRate) || 1), 4);
+  }, 0);
+  const arSubledger = roundCurrency(openInvBase - unappliedCreditNotes - unallocatedCustomerPayments, 4);
+  const arGl = glNetDebit(glMap.accounts_receivable);
+  const arMeta = glMeta(glMap.accounts_receivable, "1100", "Accounts Receivable");
+
+  // 2. AP Subledger vs GL 2000
+  const pmAllocByPay = new Map(pmAllocRows.map((r) => [r.paymentId, num(r.allocated)]));
+  const openBillsBase = billRows.reduce((sum, b) => {
+    const open = Math.max(0, num(b.totalAmount) - num(b.paidAmount));
+    return roundCurrency(sum + open * (num(b.fxRate) || 1), 4);
+  }, 0);
+  const billedPurchaseReturns = pretRows.reduce(
+    (sum, r) => (r.billId ? roundCurrency(sum + num(r.totalAmount), 4) : sum),
+    0
+  );
+  const unallocatedVendorPayments = pmRows.reduce((sum, pm) => {
+    const unalloc = Math.max(0, num(pm.amount) - (pmAllocByPay.get(pm.id) ?? 0));
+    return roundCurrency(sum + unalloc * (num(pm.fxRate) || 1), 4);
+  }, 0);
+  const apSubledger = roundCurrency(openBillsBase - billedPurchaseReturns - unallocatedVendorPayments, 4);
+  const apGl = glNetCredit(glMap.accounts_payable);
+  const apMeta = glMeta(glMap.accounts_payable, "2000", "Accounts Payable");
+
+  // 3. Inventory Valuation vs GL 1200
+  const invSubledger = bpRows.reduce(
+    (sum, bp) => roundCurrency(sum + num(bp.qtyOnHand) * num(bp.avgCost), 4),
+    0
+  );
+  const invGl = glNetDebit(glMap.inventory_asset);
+  const invMeta = glMeta(glMap.inventory_asset, "1200", "Inventory Asset");
+
+  // 4. Output VAT vs GL 2300
+  const outVatMeta = glMeta(glMap.output_vat, "2300", "Output VAT Payable");
+
+  // 5. Input VAT vs GL 1300
+  const inVatMeta = glMeta(glMap.input_vat, "1300", "Input VAT Recoverable");
+
+  // 6. Fixed Assets Cost vs GL 1500 & Accum Dep vs GL 1510
+  const faCostSubledger = faRows.reduce((sum, a) => roundCurrency(sum + num(a.acquisitionCost), 4), 0);
+  const faCostGl = glNetDebit(glMap.fixed_assets_cost);
+  const faCostMeta = glMeta(glMap.fixed_assets_cost, "1500", "Fixed Assets — Cost");
+
+  const faAccumSubledger = faRows.reduce(
+    (sum, a) => roundCurrency(sum + num(a.accumulatedDepreciation), 4),
+    0
+  );
+  const faAccumGl = glNetCredit(glMap.accumulated_depreciation);
+  const faAccumMeta = glMeta(glMap.accumulated_depreciation, "1510", "Accumulated Depreciation");
+
+  // 7. Treasury Accounts vs Bound GL Accounts
+  const stmtByTreasury = new Map(stmtRows.map((s) => [s.treasuryAccountId, roundCurrency(num(s.reconciledSum), 4)]));
+  const treasuryItems: TreasuryReconciliationItemDto[] = treasuryRows.map((ta) => {
+    const coa = coaById.get(ta.glAccountId);
+    const glBal = glNetDebit(ta.glAccountId);
+    const reconBal = stmtByTreasury.get(ta.id) ?? 0;
+    return {
+      treasuryAccountId: ta.id,
+      code: ta.code,
+      name: ta.name,
+      glAccountCode: coa?.code ?? "MISSING",
+      glAccountName: coa?.name ?? "Unlinked GL Account",
+      glBalance: glBal,
+      reconciledStatementBalance: reconBal,
+      unreconciledGlDelta: roundCurrency(glBal - reconBal, 4),
+      isValidAssetAccount: Boolean(coa && coa.accountType === "asset" && coa.isActive),
+    };
+  });
+  const totalTreasuryGl = roundCurrency(
+    treasuryItems.reduce((sum, t) => sum + t.glBalance, 0),
+    4
+  );
+  const allTreasuryValid = treasuryItems.every((t) => t.isValidAssetAccount);
+
+  const makeItem = (
+    key: SubledgerReconciliationItemDto["key"],
+    label: string,
+    meta: { code: string; name: string },
+    subledgerBalance: number,
+    glBalance: number,
+    details?: string
+  ): SubledgerReconciliationItemDto => {
+    const variance = roundCurrency(subledgerBalance - glBalance, 4);
+    return {
+      key,
+      label,
+      glAccountCode: meta.code,
+      glAccountName: meta.name,
+      subledgerBalance,
+      glBalance,
+      variance,
+      isReconciled: Math.abs(variance) <= 0.02,
+      ...(details ? { details } : {}),
+    };
+  };
+
+  const items: SubledgerReconciliationItemDto[] = [
+    makeItem("accounts_receivable", "Accounts Receivable vs Customer Balances", arMeta, arSubledger, arGl),
+    makeItem("accounts_payable", "Accounts Payable vs Vendor Balances", apMeta, apSubledger, apGl),
+    makeItem("inventory_asset", "Inventory Valuation vs Inventory Control", invMeta, invSubledger, invGl),
+    makeItem("output_vat", "Output VAT Subledger vs Output VAT Payable", outVatMeta, vat.totalOutputVat, vat.glOutputVatBalance),
+    makeItem("input_vat", "Input VAT Subledger vs Input VAT Recoverable", inVatMeta, vat.totalInputVat, vat.glInputVatBalance),
+    makeItem("fixed_assets_cost", "Fixed Assets Register Cost vs Asset Control", faCostMeta, faCostSubledger, faCostGl),
+    makeItem(
+      "accumulated_depreciation",
+      "Fixed Assets Accumulated Depreciation vs Contra-Asset Control",
+      faAccumMeta,
+      faAccumSubledger,
+      faAccumGl
+    ),
+    {
+      key: "treasury",
+      label: "Treasury Accounts vs Bound GL Accounts",
+      glAccountCode: treasuryItems.map((t) => t.glAccountCode).join(", ") || "1030+",
+      glAccountName: `${treasuryItems.length} treasury account(s)`,
+      subledgerBalance: totalTreasuryGl,
+      glBalance: totalTreasuryGl,
+      variance: 0,
+      isReconciled: allTreasuryValid,
+      details: allTreasuryValid
+        ? "All treasury accounts are linked 1-to-1 to active Asset GL accounts."
+        : "One or more treasury accounts are linked to a missing, inactive, or non-asset GL account.",
+    },
+  ];
+
+  return {
+    asOfDate: filter.asOfDate ?? null,
+    items,
+    treasuryAccounts: treasuryItems,
+    allReconciled: items.every((i) => i.isReconciled),
+  };
 }
