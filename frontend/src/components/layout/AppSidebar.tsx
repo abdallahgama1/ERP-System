@@ -29,6 +29,7 @@ import {
   Tag,
   Ruler,
   Shield,
+  ShieldCheck,
   Bell,
   HelpCircle,
   History,
@@ -45,6 +46,7 @@ import {
   MonitorSmartphone
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import type { AppRole } from "@erp/shared";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePermissions, type PermissionModule } from "@/contexts/PermissionsContext";
 import {
@@ -104,12 +106,20 @@ const manufacturingItems = [
   { titleKey: "nav.manufacturing.workOrders", url: "/manufacturing/work-orders", icon: Factory },
 ];
 
-const accountingItems: Array<{ titleKey: string; url: string; icon: typeof BookOpen; module?: PermissionModule }> = [
+const accountingItems: Array<{
+  titleKey: string;
+  url: string;
+  icon: typeof BookOpen;
+  module?: PermissionModule;
+  roles?: AppRole[];
+}> = [
   { titleKey: "nav.accounting.accounts", url: "/accounting/accounts", icon: BookOpen, module: "accounting" },
   { titleKey: "nav.accounting.costCenters", url: "/accounting/cost-centers", icon: Target, module: "accounting" },
   { titleKey: "nav.accounting.journalEntries", url: "/accounting/journal-entries", icon: FileText, module: "accounting" },
   { titleKey: "nav.accounting.fiscalPeriods", url: "/accounting/periods", icon: CalendarClock, module: "accounting" },
   { titleKey: "nav.accounting.financialStatements", url: "/accounting/statements", icon: Scale, module: "accounting" },
+  { titleKey: "nav.accounting.reconciliation", url: "/accounting/reconciliation", icon: ClipboardCheck, module: "accounting", roles: ["admin"] },
+  { titleKey: "nav.accounting.setupHealth", url: "/accounting/setup-health", icon: ShieldCheck, module: "accounting", roles: ["admin"] },
   { titleKey: "nav.accounting.fixedAssets", url: "/accounting/fixed-assets", icon: Building2, module: "fixed_assets" },
   { titleKey: "nav.treasury.accounts", url: "/treasury/accounts", icon: Landmark, module: "treasury" },
   { titleKey: "nav.expenses", url: "/expenses", icon: Receipt, module: "expenses" },
@@ -148,7 +158,7 @@ export function AppSidebar() {
   const { t } = useTranslation();
   const { state } = useSidebar();
   const { logout } = useAuth();
-  const { can } = usePermissions();
+  const { role, can } = usePermissions();
   const location = useLocation();
   const navigate = useNavigate();
   const currentPath = location.pathname;
@@ -192,7 +202,9 @@ export function AppSidebar() {
   const isSalesActive = salesItems.some(item => currentPath.startsWith(item.url));
   const isPurchasesActive = purchasesItems.some(item => currentPath.startsWith(item.url));
   const isInventoryOpsActive = inventoryOpsItems.some(item => currentPath.startsWith(item.url));
-  const visibleAccountingItems = accountingItems.filter((item) => !item.module || can(item.module, "view"));
+  const visibleAccountingItems = accountingItems.filter(
+    (item) => (!item.module || can(item.module, "view")) && (!item.roles || item.roles.includes(role))
+  );
   const isAccountingActive = visibleAccountingItems.some(item => currentPath.startsWith(item.url));
   const isReportsActive = reportsItems.some(item => currentPath.startsWith(item.url));
   const isTaxonomyActive = taxonomyItems.some(item => currentPath.startsWith(item.url));

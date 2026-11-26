@@ -129,6 +129,8 @@
       "journalEntries": "Journal Entries",
       "fiscalPeriods": "Fiscal Periods",
       "financialStatements": "Financial Statements",
+      "reconciliation": "Subledger Reconciliation",
+      "setupHealth": "Setup Health",
       "fixedAssets": "Fixed Assets"
     },
     "treasury": {
@@ -1283,10 +1285,87 @@
       "unlocked": "Period unlocked",
       "yearCreated": "Fiscal year created",
       "requiredFields": "All fiscal year fields are required",
+      "closeYear": "Close Fiscal Year",
+      "reopen": {
+        "button": "Reopen Fiscal Year",
+        "dialogTitle": "Reopen Fiscal Year",
+        "dialogDesc": "This controlled admin action reverses the year-end close while preserving the immutable ledger and audit trail.",
+        "whatWillHappen": "Confirming will execute the following:",
+        "consequenceReversal": "Posts a reversing journal entry dated at the fiscal year end ({{endDate}}).",
+        "consequencePeriods": "Unlocks all monthly periods in this fiscal year so adjusting entries can be posted (they will re-lock when re-closed).",
+        "consequenceAudit": "Writes a permanent audit-log entry with your reason inside the tamper-evident hash chain.",
+        "reasonLabel": "Reason for Reopening",
+        "reasonPlaceholder": "e.g. Post auditor year-end depreciation or accrual adjustment",
+        "reasonRequired": "A reason (at least 3 characters) is required to reopen a closed fiscal year.",
+        "confirm": "Confirm Reopen",
+        "success": "Fiscal year reopened",
+        "periodsUnlocked": "periods unlocked"
+      },
       "statuses": {
         "open": "Open",
         "locked": "Locked",
         "closed": "Closed"
+      }
+    },
+    "setupHealth": {
+      "title": "Accounting Setup Health",
+      "description": "Verify required GL control account mappings, detect Chart of Accounts code/type collisions, and remap affected posting keys safely.",
+      "overallStatus": "Overall Status",
+      "healthy": "Healthy",
+      "attentionRequired": "Action Required",
+      "validMappings": "Valid Mappings",
+      "issuesFound": "Issues Detected",
+      "allHealthyTitle": "All required GL mappings are properly configured",
+      "allHealthyDesc": "Every automated posting key is bound to an active Chart of Accounts entry with the expected account type.",
+      "issuesTableTitle": "Mapping Issues & Collisions",
+      "issuesTableDesc": "Resolve each issue by remapping the posting key to an active account of the expected type.",
+      "columns": {
+        "mappingKey": "Mapping Key",
+        "expected": "Expected",
+        "currentOrColliding": "Bound / Colliding Account",
+        "instructions": "Instructions"
+      },
+      "statuses": {
+        "missing": "Missing",
+        "type_mismatch": "Type Mismatch",
+        "inactive": "Inactive Account"
+      },
+      "collidingPrefix": "Colliding",
+      "remap": "Remap",
+      "remapDialogTitle": "Remap GL Posting Key",
+      "remapDialogDesc": "Select an active account matching the required account type. Changes take effect immediately for future postings.",
+      "requiredType": "Required Account Type",
+      "noEligibleAccounts": "No active accounts of the required type were found. Create one in Chart of Accounts first.",
+      "selectAccountRequired": "Please select a target GL account.",
+      "confirmRemap": "Save Mapping",
+      "remapSuccess": "GL mapping updated"
+    },
+    "reconciliation": {
+      "title": "Subledger-to-GL Reconciliation",
+      "description": "Compare operational subledgers (AR, AP, Inventory, VAT, Fixed Assets, and Treasury) against their General Ledger control accounts.",
+      "asOfDate": "As of Date",
+      "overallStatus": "Reconciliation Status",
+      "allPassed": "All Reconciled",
+      "discrepancyDetected": "Discrepancy Detected",
+      "controlsPassing": "Controls Passing",
+      "asOfLabel": "Cutoff / As Of",
+      "liveAllDates": "Live (All Dates)",
+      "controlAccountsTitle": "Control Account Checks",
+      "controlAccountsDesc": "Subledger balance compared against posted General Ledger balance (tolerance 0.01).",
+      "treasuryBreakdownTitle": "Treasury Accounts Breakdown",
+      "treasuryBreakdownDesc": "Posted GL balance vs reconciled bank statement balance for each active treasury account.",
+      "pass": "Pass",
+      "fail": "Fail",
+      "columns": {
+        "control": "Control Account",
+        "glAccount": "GL Account",
+        "subledger": "Subledger",
+        "glBalance": "GL Balance",
+        "difference": "Difference",
+        "details": "Details",
+        "treasuryAccount": "Treasury Account",
+        "reconciledStatement": "Reconciled Statement",
+        "unreconciledDelta": "Unreconciled Delta"
       }
     },
     "statements": {

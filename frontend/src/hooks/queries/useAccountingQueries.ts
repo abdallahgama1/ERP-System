@@ -1,6 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AccountTypeShared,
+  AccountingSetupHealthDto,
   CashFlowStatementDto,
   CostCenterDto,
   FiscalPeriodStatusShared,
@@ -10,8 +11,10 @@ import type {
   JournalEntryStatusShared,
   NormalBalanceShared,
   OffsetPageInfo,
+  SubledgerReconciliationReportDto,
   VatReturnReportDto,
   YearEndCloseResultDto,
+  YearEndReopenResultDto,
   createCostCenterSchema,
   runFxRevaluationSchema,
   updateCostCenterSchema,
@@ -346,6 +349,35 @@ export function useFiscalYearsQuery(enabled = true) {
   });
 }
 
+export function useAccountingSetupHealthQuery(enabled = true) {
+  const { user } = useAuth();
+  const { role } = usePermissions();
+  return useQuery({
+    queryKey: erpQueryKeys.accounting.setupHealth(),
+    queryFn: () => apiRequest<AccountingSetupHealthDto>("/api/accounting/setup-health"),
+    enabled: Boolean(user) && enabled && role === "admin",
+  });
+}
+
+export function useSubledgerReconciliationQuery(
+  filters?: { asOfDate?: string; branchId?: string },
+  enabled = true
+) {
+  const { user } = useAuth();
+  const { role } = usePermissions();
+  const params: Record<string, string> = {};
+  if (filters?.asOfDate) params.asOfDate = filters.asOfDate;
+  if (filters?.branchId && filters.branchId !== "all") params.branchId = filters.branchId;
+  return useQuery({
+    queryKey: erpQueryKeys.accounting.reconciliation(params),
+    queryFn: () =>
+      apiRequest<SubledgerReconciliationReportDto>(
+        `/api/accounting/reports/reconciliation${toQueryString(params)}`
+      ),
+    enabled: Boolean(user) && enabled && role === "admin",
+  });
+}
+
 export function useTrialBalanceQuery(filters?: ReportFilterParams, enabled = true) {
   const { user } = useAuth();
   const { can } = usePermissions();
@@ -591,6 +623,18 @@ export function useAccountingMutations() {
     onSuccess: invalidateAccounting,
   });
 
+  const reopenFiscalYear = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiRequest<YearEndReopenResultDto>(`/api/accounting/fiscal-years/${id}/reopen`, {
+        method: "POST",
+        body: { reason },
+      }),
+    onSuccess: () => {
+      invalidateAccounting();
+      void queryClient.invalidateQueries({ queryKey: erpQueryKeys.auditLogs });
+    },
+  });
+
   const runFxRevaluation = useMutation({
     mutationFn: (payload: z.input<typeof runFxRevaluationSchema>) =>
       apiRequest<FxRevaluationResultDto>("/api/accounting/fx-revaluation", {
@@ -666,6 +710,7 @@ export function useAccountingMutations() {
     createFiscalYear,
     togglePeriodLock,
     closeFiscalYear,
+    reopenFiscalYear,
     runFxRevaluation,
     createTaxCode,
     updateTaxCode,

@@ -105,6 +105,9 @@ export const erpQueryKeys = {
     fiscalYears: () => ["accounting", "fiscalYears"] as const,
     taxCodes: () => ["accounting", "taxCodes"] as const,
     currencies: () => ["accounting", "currencies"] as const,
+    setupHealth: () => ["accounting", "setupHealth"] as const,
+    reconciliation: (params?: Record<string, string>) =>
+      ["accounting", "reconciliation", params ?? {}] as const,
     statement: (kind: string, params?: Record<string, string>) =>
       ["accounting", "statement", kind, params ?? {}] as const,
   },

@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { CalendarClock, Lock, Unlock, Plus, RefreshCw, CheckCircle2 } from "lucide-react";
+import { CalendarClock, Lock, Unlock, Plus, RefreshCw, CheckCircle2, RotateCcw, AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   Dialog,
@@ -30,12 +31,13 @@ import {
 export default function FiscalPeriods() {
   const { t } = useTranslation();
   const { toast } = useToast();
-  const { can } = usePermissions();
+  const { role, can } = usePermissions();
   const { settings } = useSettings();
-  const ccy = settings.currency || "USD";
+  const ccy = settings.currency || "EGP";
+  const isAdmin = role === "admin";
 
   const { data: fiscalYears = [], isLoading } = useFiscalYearsQuery();
-  const { createFiscalYear, togglePeriodLock, closeFiscalYear, runFxRevaluation } =
+  const { createFiscalYear, togglePeriodLock, closeFiscalYear, reopenFiscalYear, runFxRevaluation } =
     useAccountingMutations();
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -47,6 +49,11 @@ export default function FiscalPeriods() {
   // Year-End Closing Wizard
   const [closeTarget, setCloseTarget] = useState<FiscalYearDto | null>(null);
   const [closeMemo, setCloseMemo] = useState("");
+
+  // Controlled Admin Reopen Fiscal Year Dialog
+  const [reopenTarget, setReopenTarget] = useState<FiscalYearDto | null>(null);
+  const [reopenReason, setReopenReason] = useState("");
+  const [reopenError, setReopenError] = useState<string | null>(null);
 
   // Period-End FX Revaluation Wizard
   const [fxOpen, setFxOpen] = useState(false);
@@ -112,6 +119,43 @@ export default function FiscalPeriods() {
     } catch (err) {
       toast({
         title: err instanceof Error ? err.message : t("common.error"),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleReopenYear = async () => {
+    if (!reopenTarget) return;
+    const trimmed = reopenReason.trim();
+    if (trimmed.length < 3) {
+      setReopenError(
+        t(
+          "accounting.periods.reopen.reasonRequired",
+          "A reason (at least 3 characters) is required to reopen a closed fiscal year."
+        )
+      );
+      return;
+    }
+    setReopenError(null);
+    try {
+      const res = await reopenFiscalYear.mutateAsync({
+        id: reopenTarget.id,
+        reason: trimmed,
+      });
+      toast({
+        title: t("accounting.periods.reopen.success", "Fiscal year reopened"),
+        description: res.reversalEntryNumber
+          ? `${res.fiscalYearName} — ${res.reversalEntryNumber} (${res.periodsReopened} ${t("accounting.periods.reopen.periodsUnlocked", "periods unlocked")})`
+          : `${res.fiscalYearName} (${res.periodsReopened} ${t("accounting.periods.reopen.periodsUnlocked", "periods unlocked")})`,
+      });
+      setReopenTarget(null);
+      setReopenReason("");
+      setReopenError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t("common.error");
+      setReopenError(message);
+      toast({
+        title: message,
         variant: "destructive",
       });
     }
@@ -189,7 +233,9 @@ export default function FiscalPeriods() {
                     </CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Badge variant={fy.status === "open" ? "default" : "secondary"}>{fy.status}</Badge>
+                    <Badge variant={fy.status === "open" ? "default" : "secondary"}>
+                      {t(`accounting.periods.statuses.${fy.status}`, fy.status)}
+                    </Badge>
                     {canApprove && fy.status === "open" && (
                       <Button
                         size="sm"
@@ -200,7 +246,22 @@ export default function FiscalPeriods() {
                         }}
                       >
                         <CheckCircle2 className="h-4 w-4 me-1.5" />
-                        Close Fiscal Year
+                        {t("accounting.periods.closeYear", "Close Fiscal Year")}
+                      </Button>
+                    )}
+                    {isAdmin && fy.status === "closed" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setReopenTarget(fy);
+                          setReopenReason("");
+                          setReopenError(null);
+                        }}
+                        data-testid={`reopen-fy-btn-${fy.id}`}
+                      >
+                        <RotateCcw className="h-4 w-4 me-1.5" />
+                        {t("accounting.periods.reopen.button", "Reopen Fiscal Year")}
                       </Button>
                     )}
                   </div>
@@ -333,6 +394,117 @@ export default function FiscalPeriods() {
               disabled={closeFiscalYear.isPending}
             >
               Execute Year-End Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Admin-Only Controlled Reopen Fiscal Year Dialog */}
+      <Dialog
+        open={Boolean(reopenTarget)}
+        onOpenChange={(o) => {
+          if (!o) {
+            setReopenTarget(null);
+            setReopenError(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-amber-600" />
+              {t("accounting.periods.reopen.dialogTitle", "Reopen Fiscal Year")} — {reopenTarget?.name}
+            </DialogTitle>
+            <DialogDescription>
+              {t(
+                "accounting.periods.reopen.dialogDesc",
+                "This controlled admin action reverses the year-end close while preserving the immutable ledger and audit trail."
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {reopenTarget && (
+            <div className="space-y-4 py-2">
+              <div
+                className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm space-y-2"
+                data-testid="reopen-consequences-box"
+              >
+                <p className="font-medium">
+                  {t("accounting.periods.reopen.whatWillHappen", "Confirming will execute the following:")}
+                </p>
+                <ul className="list-disc ps-5 space-y-1 text-xs text-muted-foreground">
+                  <li>
+                    {t(
+                      "accounting.periods.reopen.consequenceReversal",
+                      "Posts a reversing journal entry dated at the fiscal year end ({{endDate}}).",
+                      { endDate: new Date(reopenTarget.endDate).toISOString().slice(0, 10) }
+                    )}
+                  </li>
+                  <li>
+                    {t(
+                      "accounting.periods.reopen.consequencePeriods",
+                      "Unlocks all monthly periods in this fiscal year so adjusting entries can be posted (they will re-lock when re-closed)."
+                    )}
+                  </li>
+                  <li>
+                    {t(
+                      "accounting.periods.reopen.consequenceAudit",
+                      "Writes a permanent audit-log entry with your reason inside the tamper-evident hash chain."
+                    )}
+                  </li>
+                </ul>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="reopen-reason">
+                  {t("accounting.periods.reopen.reasonLabel", "Reason for Reopening")} *
+                </Label>
+                <Textarea
+                  id="reopen-reason"
+                  rows={3}
+                  value={reopenReason}
+                  onChange={(e) => {
+                    setReopenReason(e.target.value);
+                    if (reopenError) setReopenError(null);
+                  }}
+                  placeholder={t(
+                    "accounting.periods.reopen.reasonPlaceholder",
+                    "e.g. Post auditor year-end depreciation or accrual adjustment"
+                  )}
+                  data-testid="reopen-reason-input"
+                />
+              </div>
+
+              {reopenError && (
+                <div
+                  className="rounded-md border border-destructive bg-destructive/10 p-3 text-sm text-destructive"
+                  role="alert"
+                  data-testid="reopen-error-alert"
+                >
+                  {reopenError}
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setReopenTarget(null);
+                setReopenError(null);
+              }}
+            >
+              {t("common.cancel", "Cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleReopenYear()}
+              disabled={reopenFiscalYear.isPending || reopenReason.trim().length < 3}
+              data-testid="reopen-confirm-btn"
+            >
+              <RotateCcw className="h-4 w-4 me-1.5" />
+              {t("accounting.periods.reopen.confirm", "Confirm Reopen")}
             </Button>
           </DialogFooter>
         </DialogContent>

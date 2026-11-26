@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import {
   BookOpen,
   Building2,
+  CalendarClock,
+  ClipboardCheck,
   ClipboardList,
   Factory,
   FileCheck,
@@ -17,13 +19,14 @@ import {
   Search,
   Settings,
   Shield,
+  ShieldCheck,
   ShoppingCart,
   Store,
   Target,
   Truck,
   Users,
 } from "lucide-react";
-import type { GlobalSearchResultItemDto, PermissionModule, SearchEntityType } from "@erp/shared";
+import type { AppRole, GlobalSearchResultItemDto, PermissionModule, SearchEntityType } from "@erp/shared";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useGlobalSearchQuery } from "@/hooks/queries/useSearchQuery";
 import { Button } from "@/components/ui/button";
@@ -52,6 +55,7 @@ interface QuickNavItem {
   route: string;
   keywords: string;
   module?: PermissionModule;
+  roles?: AppRole[];
   icon: typeof LayoutDashboard;
 }
 
@@ -72,6 +76,9 @@ const QUICK_NAV_ITEMS: readonly QuickNavItem[] = [
   { id: "accounts", labelKey: "nav.accounting.accounts", fallbackLabel: "Chart of Accounts", route: "/accounting/accounts", keywords: "coa gl", module: "accounting", icon: BookOpen },
   { id: "cost-centers", labelKey: "nav.accounting.costCenters", fallbackLabel: "Cost Centers", route: "/accounting/cost-centers", keywords: "cost center department dimension", module: "accounting", icon: Target },
   { id: "journals", labelKey: "nav.accounting.journalEntries", fallbackLabel: "Journal Entries", route: "/accounting/journal-entries", keywords: "je ledger", module: "accounting", icon: BookOpen },
+  { id: "fiscal-periods", labelKey: "nav.accounting.fiscalPeriods", fallbackLabel: "Fiscal Periods", route: "/accounting/periods", keywords: "fiscal year close reopen period lock fx revaluation", module: "accounting", icon: CalendarClock },
+  { id: "accounting-reconciliation", labelKey: "nav.accounting.reconciliation", fallbackLabel: "Subledger Reconciliation", route: "/accounting/reconciliation", keywords: "reconcile subledger gl control ar ap inventory vat treasury", module: "accounting", roles: ["admin"], icon: ClipboardCheck },
+  { id: "accounting-setup-health", labelKey: "nav.accounting.setupHealth", fallbackLabel: "Accounting Setup Health", route: "/accounting/setup-health", keywords: "coa mapping health collision remap gl", module: "accounting", roles: ["admin"], icon: ShieldCheck },
   { id: "fixed-assets", labelKey: "nav.accounting.fixedAssets", fallbackLabel: "Fixed Assets", route: "/accounting/fixed-assets", keywords: "depreciation capex asset disposal", module: "fixed_assets", icon: Building2 },
   { id: "treasury", labelKey: "nav.treasury.accounts", fallbackLabel: "Treasury & Bank", route: "/treasury/accounts", keywords: "bank cashbox transfer reconciliation statement", module: "treasury", icon: Landmark },
   { id: "expenses", labelKey: "nav.expenses", fallbackLabel: "Operating Expenses", route: "/expenses", keywords: "petty cash reimbursement expense claim", module: "expenses", icon: Receipt },
@@ -97,7 +104,7 @@ const ENTITY_ICON: Record<SearchEntityType, typeof Package> = {
 export function CommandPalette({ open: controlledOpen, onOpenChange, showTrigger = true }: CommandPaletteProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { can } = usePermissions();
+  const { role, can } = usePermissions();
 
   const [internalOpen, setInternalOpen] = useState(false);
   const isControlled = controlledOpen !== undefined;
@@ -148,11 +155,13 @@ export function CommandPalette({ open: controlledOpen, onOpenChange, showTrigger
 
   const permittedNavItems = useMemo(
     () =>
-      QUICK_NAV_ITEMS.filter((item) => (!item.module ? true : can(item.module, "view"))).map((item) => ({
+      QUICK_NAV_ITEMS.filter(
+        (item) => (!item.module ? true : can(item.module, "view")) && (!item.roles || item.roles.includes(role))
+      ).map((item) => ({
         ...item,
         label: t(item.labelKey, item.fallbackLabel),
       })),
-    [can, t]
+    [can, role, t]
   );
 
   const filteredNavItems = useMemo(() => {
