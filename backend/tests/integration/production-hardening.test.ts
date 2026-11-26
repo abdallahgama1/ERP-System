@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -538,5 +539,163 @@ describeWithDb("Production hardening integration suite", () => {
       setS3ClientOverrideForTests(null);
       setStorageConfigOverrideForTests(null);
     }
+  });
+
+  it("7. enforces temporary lockouts on /api/auth/forgot-password and /api/auth/mfa/recovery-codes", async () => {
+    process.env.AUTH_LOCKOUT_MAX_ATTEMPTS = "3";
+    process.env.AUTH_LOCKOUT_WINDOW_MS = "60000";
+    process.env.AUTH_LOCKOUT_DURATION_MS = "60000";
+
+    const forgotEmail = "forgot-lockout@test.local";
+    for (let i = 0; i < 3; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/auth/forgot-password",
+        payload: { email: forgotEmail },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    const lockedForgot = await app.inject({
+      method: "POST",
+      url: "/api/auth/forgot-password",
+      payload: { email: forgotEmail },
+    });
+    expect(lockedForgot.statusCode).toBe(429);
+    expect(lockedForgot.json().code).toBe("ACCOUNT_LOCKED");
+
+    // Enroll a fresh MFA user and trigger lockout on /api/auth/mfa/recovery-codes
+    const recEmail = "mfa-rec-lockout@test.local";
+    const recPassword = "RecPassword123!";
+    const signup = await app.inject({
+      method: "POST",
+      url: "/api/auth/signup",
+      payload: { name: "MFA Rec User", email: recEmail, password: recPassword },
+    });
+    expect(signup.statusCode).toBe(201);
+    const recCookie = extractCookie(signup);
+
+    const enrollRes = await app.inject({
+      method: "POST",
+      url: "/api/auth/mfa/enroll",
+      headers: { cookie: recCookie },
+    });
+    expect(enrollRes.statusCode).toBe(200);
+    const secretBase32 = new URL(enrollRes.json().otpauthUrl as string).searchParams.get("secret")!;
+    const { generateTotp } = await import("../../src/services/mfa.service.ts");
+    const verifyRes = await app.inject({
+      method: "POST",
+      url: "/api/auth/mfa/verify",
+      headers: { cookie: recCookie },
+      payload: { code: generateTotp(secretBase32) },
+    });
+    expect(verifyRes.statusCode).toBe(200);
+
+    for (let i = 0; i < 3; i++) {
+      const badRec = await app.inject({
+        method: "POST",
+        url: "/api/auth/mfa/recovery-codes",
+        headers: { cookie: recCookie },
+        payload: { password: "WrongPassword!" },
+      });
+      expect(badRec.statusCode).toBe(401);
+    }
+    const lockedRec = await app.inject({
+      method: "POST",
+      url: "/api/auth/mfa/recovery-codes",
+      headers: { cookie: recCookie },
+      payload: { password: recPassword },
+    });
+    expect(lockedRec.statusCode).toBe(429);
+    expect(lockedRec.json().code).toBe("ACCOUNT_LOCKED");
+  });
+
+  it("8. runs scripts/rotate-mfa-key.mjs as a child process (--dry-run and live rotation) and preserves TOTP login", async () => {
+    const { userMfa } = await import("../../drizzle/schema.ts");
+    // Isolate from MFA rows left by earlier tests that used different ephemeral keys
+    await db.delete(userMfa);
+
+    const keyV1 = crypto.randomBytes(32).toString("hex");
+    const keyV2 = crypto.randomBytes(32).toString("hex");
+    process.env.MFA_ENCRYPTION_KEY = keyV1;
+    process.env.MFA_ENCRYPTION_KEY_VERSION = "1";
+    delete process.env.MFA_ENCRYPTION_PREVIOUS_KEYS;
+
+    const cliEmail = "mfa-cli-rotate@test.local";
+    const cliPassword = "CliPassword123!";
+    const signup = await app.inject({
+      method: "POST",
+      url: "/api/auth/signup",
+      payload: { name: "MFA CLI User", email: cliEmail, password: cliPassword },
+    });
+    expect(signup.statusCode).toBe(201);
+    const cliCookie = extractCookie(signup);
+    const cliUserId = signup.json().user.id as string;
+
+    const enrollRes = await app.inject({
+      method: "POST",
+      url: "/api/auth/mfa/enroll",
+      headers: { cookie: cliCookie },
+    });
+    const secretBase32 = new URL(enrollRes.json().otpauthUrl as string).searchParams.get("secret")!;
+    const { generateTotp } = await import("../../src/services/mfa.service.ts");
+    const verifyRes = await app.inject({
+      method: "POST",
+      url: "/api/auth/mfa/verify",
+      headers: { cookie: cliCookie },
+      payload: { code: generateTotp(secretBase32) },
+    });
+    expect(verifyRes.statusCode).toBe(200);
+
+    const repoRoot = path.resolve(__dirname, "../../..");
+    const rotateScript = path.resolve(repoRoot, "scripts/rotate-mfa-key.mjs");
+    const childEnv = {
+      ...process.env,
+      DATABASE_URL: testDbUrl,
+      MFA_ENCRYPTION_KEY: keyV2,
+      MFA_ENCRYPTION_KEY_VERSION: "2",
+      MFA_ENCRYPTION_PREVIOUS_KEYS: `1:${keyV1}`,
+    };
+
+    // Dry-run CLI execution leaves key_version at 1
+    const dryOut = execFileSync(process.execPath, [rotateScript, "--dry-run"], {
+      cwd: repoRoot,
+      env: childEnv,
+      encoding: "utf8",
+    });
+    expect(dryOut).toMatch(/dryRun.*true|targetVersion.*2/i);
+
+    const [afterDry] = await db.select().from(userMfa).where(eq(userMfa.userId, cliUserId)).limit(1);
+    expect(afterDry?.keyVersion).toBe(1);
+
+    // Live CLI execution rotates key_version to 2
+    const liveOut = execFileSync(process.execPath, [rotateScript], {
+      cwd: repoRoot,
+      env: childEnv,
+      encoding: "utf8",
+    });
+    expect(liveOut).toMatch(/targetVersion.*2/i);
+
+    const [afterLive] = await db.select().from(userMfa).where(eq(userMfa.userId, cliUserId)).limit(1);
+    expect(afterLive?.keyVersion).toBe(2);
+
+    // Verify login works using ONLY keyV2 (v1 removed)
+    process.env.MFA_ENCRYPTION_KEY = keyV2;
+    process.env.MFA_ENCRYPTION_KEY_VERSION = "2";
+    delete process.env.MFA_ENCRYPTION_PREVIOUS_KEYS;
+
+    const step1 = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: cliEmail, password: cliPassword },
+    });
+    expect(step1.statusCode).toBe(200);
+    expect(step1.json().mfaRequired).toBe(true);
+
+    const step2 = await app.inject({
+      method: "POST",
+      url: "/api/auth/mfa/verify-login",
+      payload: { mfaChallengeToken: step1.json().mfaChallengeToken, code: generateTotp(secretBase32) },
+    });
+    expect(step2.statusCode).toBe(200);
   });
 });
