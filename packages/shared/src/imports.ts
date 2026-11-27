@@ -32,6 +32,7 @@ export type StandardImportKind = (typeof STANDARD_IMPORT_KINDS)[number];
 export const csvImportRequestSchema = z.object({
   csv: z.string().min(1, "CSV content is required"),
   dryRun: z.boolean().optional().default(true),
+  updateExisting: z.boolean().optional().default(false),
 });
 
 export const openingBalancesImportSchema = z.object({
@@ -64,6 +65,7 @@ export interface ImportRowPreviewDto {
 export interface CsvImportResultDto {
   kind: StandardImportKind;
   dryRun: boolean;
+  updateExisting?: boolean;
   valid: boolean;
   totalRows: number;
   createdCount: number;
@@ -73,6 +75,47 @@ export interface CsvImportResultDto {
   warnings: CsvParseError[];
   preview: ImportRowPreviewDto[];
   setupHealth?: AccountingSetupHealthDto;
+}
+
+export interface OpeningReversalBlockerDto {
+  category:
+    | "opening_ar"
+    | "opening_ap"
+    | "opening_stock"
+    | "opening_fixed_asset"
+    | "opening_treasury"
+    | "non_opening_journal";
+  reference: string;
+  reason: string;
+}
+
+export interface CutoverReadinessCheckDto {
+  passed: boolean;
+  summary: string;
+}
+
+export interface CutoverReadinessDto {
+  ready: boolean;
+  status: "PASS" | "FAIL";
+  checkedAt: string;
+  checks: {
+    reconciliation: CutoverReadinessCheckDto & {
+      totalControls: number;
+      passedControls: number;
+      failingKeys: string[];
+    };
+    setupHealth: CutoverReadinessCheckDto & {
+      totalMappings: number;
+      validMappings: number;
+      issueCount: number;
+    };
+    auditChain: CutoverReadinessCheckDto & {
+      totalChainedRows: number;
+      firstBrokenId: string | null;
+    };
+  };
+  reconciliation: SubledgerReconciliationReportDto;
+  setupHealth: AccountingSetupHealthDto;
 }
 
 export interface OpeningBalancesImportResultDto {

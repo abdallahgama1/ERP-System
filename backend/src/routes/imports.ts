@@ -15,6 +15,7 @@ import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
 import { requireRole } from "../middleware/auth.ts";
 import {
+  getCutoverReadiness,
   getOpeningCutoverStatus,
   importOpeningBalances,
   importStandardDataset,
@@ -22,9 +23,16 @@ import {
 } from "../services/csv-import.service.ts";
 import { actorCompanyId, parseOrThrow } from "../services/stock-locks.ts";
 
-const IMPORT_BODY_LIMIT = 6 * 1024 * 1024; // 6 MiB JSON envelope for up to 5 MiB CSV
+const IMPORT_BODY_LIMIT = 10 * 1024 * 1024; // 10 MiB JSON envelope for large CSV payloads
 
 export async function importRoutes(app: FastifyInstance) {
+  app.get(
+    "/api/imports/cutover-readiness",
+    { preHandler: requireRole("admin") },
+    async (req) => {
+      return getCutoverReadiness(getDb(), req.authUser!);
+    }
+  );
   app.get(
     "/api/imports/templates/:kind",
     { preHandler: requireRole("admin") },

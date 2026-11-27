@@ -120,7 +120,7 @@ describeWithDb("Go-Live Cutover CSV Imports, Reconciliation, Exclusions & Contro
       method: "POST",
       url: "/api/imports/chart_of_accounts",
       headers: adminHeaders,
-      payload: { csv: badCoaCsv, dryRun: true },
+      payload: { csv: badCoaCsv, dryRun: true, updateExisting: true },
     });
     expect(dryRes.statusCode).toBe(200);
     const dryBody = dryRes.json();

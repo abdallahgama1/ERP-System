@@ -112,7 +112,16 @@ export const env = {
   SENTRY_DSN: (process.env.SENTRY_DSN ?? "").trim(),
   SENTRY_ENVIRONMENT: (process.env.SENTRY_ENVIRONMENT ?? "").trim() || nodeEnv,
   SENTRY_TRACES_SAMPLE_RATE: parseRateEnv(process.env.SENTRY_TRACES_SAMPLE_RATE, 0),
+  CSV_IMPORT_MAX_ROWS: parseIntEnv(process.env.CSV_IMPORT_MAX_ROWS, 10_000),
+  CSV_IMPORT_MAX_BYTES: parseIntEnv(process.env.CSV_IMPORT_MAX_BYTES, 5 * 1024 * 1024),
 };
+
+export function getCsvImportLimits(): { maxRows: number; maxBytes: number } {
+  return {
+    maxRows: parseIntEnv(process.env.CSV_IMPORT_MAX_ROWS, env.CSV_IMPORT_MAX_ROWS),
+    maxBytes: parseIntEnv(process.env.CSV_IMPORT_MAX_BYTES, env.CSV_IMPORT_MAX_BYTES),
+  };
+}
 
 export interface AuthHardeningConfig {
   loginRateLimitMax: number;

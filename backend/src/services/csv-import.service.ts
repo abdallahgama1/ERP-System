@@ -1,6 +1,4 @@
 import {
-  CSV_MAX_BYTES,
-  CSV_MAX_ROWS,
   normalizeArabicDigits,
   parseCsvText,
   parseIsoDateString,
@@ -14,45 +12,57 @@ import {
   type AccountingSetupHealthDto,
   type CsvImportResultDto,
   type CsvParseError,
+  type CutoverReadinessDto,
   type GlMappingKey,
   type ImportRowPreviewDto,
   type NormalBalanceShared,
   type OpeningBalancesImportResultDto,
   type OpeningCutoverStatusDto,
+  type OpeningReversalBlockerDto,
   type ReverseOpeningBalancesResultDto,
   type StandardImportKind,
   type csvImportRequestSchema,
   type openingBalancesImportSchema,
   type reverseOpeningBalancesSchema,
 } from "@erp/shared";
-import { and, eq, gte, inArray, isNull, lte, ne, notInArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
+  bankStatementLines,
+  bankStatements,
   branchProducts,
   branches,
   chartOfAccounts,
   companies,
+  creditNoteApplications,
   customers,
+  expenseClaims,
   fixedAssetDepreciationEntries,
   fixedAssets,
   glAccountMappings,
   journalEntries,
   journalLines,
   paymentMadeAllocations,
+  posReturns,
   products,
+  purchaseReturns,
   receivedPaymentAllocations,
+  retainerApplications,
   salesInvoiceLines,
   salesInvoices,
+  salesReturns,
   stockMovements,
   taxonomyItems,
   treasuryAccounts,
+  treasuryTransfers,
   vendorBillLines,
   vendorBills,
   vendors,
   fiscalPeriods,
 } from "../../drizzle/schema.ts";
 import type { DbOrTx } from "../auth/permissions.ts";
-import { AppError, nextDocNumber, num, toNumeric, writeAuditLog } from "../db/helpers.ts";
+import { getCsvImportLimits } from "../config.ts";
+import { AppError, nextDocNumber, num, toNumeric, verifyAuditLogChain, writeAuditLog } from "../db/helpers.ts";
 import type { AppDatabase } from "../db/index.ts";
 import { getSubledgerReconciliation } from "./accounting-reports.service.ts";
 import {
@@ -82,8 +92,9 @@ function defaultNormalBalance(accountType: AccountTypeShared): NormalBalanceShar
 }
 
 function safeParseCsv(rawCsv: string, label: string) {
+  const { maxBytes, maxRows } = getCsvImportLimits();
   try {
-    return parseCsvText(rawCsv, { maxBytes: CSV_MAX_BYTES, maxRows: CSV_MAX_ROWS });
+    return parseCsvText(rawCsv, { maxBytes, maxRows });
   } catch (err) {
     const msg = err instanceof Error ? err.message : `Invalid ${label} CSV`;
     if (msg.startsWith("CSV_FILE_TOO_LARGE")) {
@@ -94,6 +105,18 @@ function safeParseCsv(rawCsv: string, label: string) {
     }
     throw new AppError(400, msg, "CSV_PARSE_ERROR");
   }
+}
+
+function hasAnyHeader(headers: Set<string>, ...names: string[]): boolean {
+  return names.some((n) => headers.has(n));
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
 }
 
 async function getCompanyBaseCurrency(db: DbOrTx, companyId: string): Promise<string> {
@@ -343,12 +366,15 @@ export async function importStandardDataset(
 ): Promise<CsvImportResultDto> {
   const companyId = actorCompanyId(actor);
   const dryRun = input.dryRun ?? true;
+  const updateExisting = input.updateExisting ?? false;
   const parsed = safeParseCsv(input.csv, kind);
+  const headerSet = new Set(parsed.headers);
 
   if (parsed.headers.length === 0 || parsed.rows.length === 0) {
     return {
       kind,
       dryRun,
+      updateExisting,
       valid: false,
       totalRows: 0,
       createdCount: 0,
@@ -362,13 +388,13 @@ export async function importStandardDataset(
 
   switch (kind) {
     case "chart_of_accounts":
-      return importChartOfAccounts(db, actor, companyId, parsed.rows, dryRun, ipAddress);
+      return importChartOfAccounts(db, actor, companyId, parsed.rows, headerSet, dryRun, updateExisting, ipAddress);
     case "customers":
-      return importCustomers(db, actor, companyId, parsed.rows, dryRun, ipAddress);
+      return importCustomers(db, actor, companyId, parsed.rows, headerSet, dryRun, updateExisting, ipAddress);
     case "vendors":
-      return importVendors(db, actor, companyId, parsed.rows, dryRun, ipAddress);
+      return importVendors(db, actor, companyId, parsed.rows, headerSet, dryRun, updateExisting, ipAddress);
     case "products":
-      return importProducts(db, actor, companyId, parsed.rows, dryRun, ipAddress);
+      return importProducts(db, actor, companyId, parsed.rows, headerSet, dryRun, updateExisting, ipAddress);
     case "opening_stock":
       return importOpeningStock(db, actor, companyId, parsed.rows, dryRun, ipAddress);
     case "opening_fixed_assets":
@@ -383,7 +409,9 @@ async function importChartOfAccounts(
   actor: RequestActor,
   companyId: string,
   rows: Array<{ rowNumber: number; values: Record<string, string> }>,
+  headerSet: Set<string>,
   dryRun: boolean,
+  updateExisting: boolean,
   ipAddress?: string
 ): Promise<CsvImportResultDto> {
   await ensureAccountingDefaults(db, companyId);
@@ -396,6 +424,12 @@ async function importChartOfAccounts(
   const reservedByCode = new Map(
     DEFAULT_COA.filter((d) => Boolean(d.mappingKey)).map((d) => [d.code, d])
   );
+
+  const hasNameCol = hasAnyHeader(headerSet, "name", "account_name");
+  const hasTypeCol = hasAnyHeader(headerSet, "account_type", "type");
+  const hasNormalCol = hasAnyHeader(headerSet, "normal_balance");
+  const hasDescCol = hasAnyHeader(headerSet, "description");
+  const hasActiveCol = hasAnyHeader(headerSet, "is_active");
 
   const errors: CsvParseError[] = [];
   const warnings: CsvParseError[] = [];
@@ -416,11 +450,22 @@ async function importChartOfAccounts(
 
   for (const r of rows) {
     const code = normalizeArabicDigits(r.values.code || r.values.account_code || "").trim();
-    const name = (r.values.name || r.values.account_name || "").trim();
-    const rawType = (r.values.account_type || r.values.type || "").trim().toLowerCase();
-    const rawNormal = (r.values.normal_balance || "").trim().toLowerCase();
-    const description = (r.values.description || "").trim();
-    const parsedActive = parseLocalizedBoolean(r.values.is_active, true);
+    const existing = code ? existingByCode.get(code) : undefined;
+    const isUpdate = Boolean(existing && updateExisting);
+
+    const name = hasNameCol
+      ? (r.values.name || r.values.account_name || "").trim()
+      : (existing?.name ?? "");
+    const rawType = hasTypeCol
+      ? (r.values.account_type || r.values.type || "").trim().toLowerCase()
+      : (existing?.accountType ?? "");
+    const rawNormal = hasNormalCol ? (r.values.normal_balance || "").trim().toLowerCase() : "";
+    const description = hasDescCol
+      ? (r.values.description || "").trim()
+      : (existing?.description ?? "");
+    const parsedActive = hasActiveCol
+      ? parseLocalizedBoolean(r.values.is_active, existing?.isActive ?? true)
+      : (existing?.isActive ?? true);
 
     let rowHasError = false;
     if (!code) {
@@ -433,12 +478,22 @@ async function importChartOfAccounts(
       seenCodes.add(code);
     }
 
-    if (!name) {
+    if (existing && !updateExisting) {
+      errors.push({
+        row: r.rowNumber,
+        column: "code",
+        message: `Account '${code}' already exists. Enable 'Update existing' mode to update listed columns.`,
+        value: code,
+      });
+      rowHasError = true;
+    }
+
+    if (!name && (!isUpdate || hasNameCol)) {
       errors.push({ row: r.rowNumber, column: "name", message: "Account name is required" });
       rowHasError = true;
     }
 
-    if (!VALID_ACCOUNT_TYPES.has(rawType as AccountTypeShared)) {
+    if ((!isUpdate || (hasTypeCol && rawType !== "")) && !VALID_ACCOUNT_TYPES.has(rawType as AccountTypeShared)) {
       errors.push({
         row: r.rowNumber,
         column: "account_type",
@@ -448,10 +503,12 @@ async function importChartOfAccounts(
       rowHasError = true;
     }
 
-    const accountType = rawType as AccountTypeShared;
-    let normalBalance = VALID_ACCOUNT_TYPES.has(accountType)
-      ? defaultNormalBalance(accountType)
-      : ("debit" as NormalBalanceShared);
+    const accountType = (VALID_ACCOUNT_TYPES.has(rawType as AccountTypeShared)
+      ? rawType
+      : existing?.accountType ?? "asset") as AccountTypeShared;
+    let normalBalance = existing
+      ? (existing.normalBalance as NormalBalanceShared)
+      : defaultNormalBalance(accountType);
     if (rawNormal) {
       if (!VALID_NORMAL_BALANCES.has(rawNormal as NormalBalanceShared)) {
         errors.push({
@@ -461,7 +518,7 @@ async function importChartOfAccounts(
           value: rawNormal,
         });
         rowHasError = true;
-      } else {
+      } else if (!existing) {
         normalBalance = rawNormal as NormalBalanceShared;
       }
     }
@@ -476,13 +533,12 @@ async function importChartOfAccounts(
       rowHasError = true;
     }
 
-    const existing = code ? existingByCode.get(code) : undefined;
-    if (existing && VALID_ACCOUNT_TYPES.has(accountType) && existing.accountType !== accountType) {
+    if (existing && hasTypeCol && rawType !== "" && VALID_ACCOUNT_TYPES.has(rawType as AccountTypeShared) && existing.accountType !== rawType) {
       errors.push({
         row: r.rowNumber,
         column: "account_type",
-        message: `Account '${code}' already exists with type '${existing.accountType}' and cannot be reclassified to '${accountType}' via CSV import`,
-        value: accountType,
+        message: `Account '${code}' already exists with type '${existing.accountType}' and cannot be reclassified to '${rawType}' via CSV import`,
+        value: rawType,
       });
       rowHasError = true;
     }
@@ -536,6 +592,7 @@ async function importChartOfAccounts(
     return {
       kind: "chart_of_accounts",
       dryRun,
+      updateExisting,
       valid: errors.length === 0,
       totalRows: rows.length,
       createdCount,
@@ -549,19 +606,20 @@ async function importChartOfAccounts(
   }
 
   await db.transaction(async (tx) => {
+    const toInsert: Array<typeof chartOfAccounts.$inferInsert> = [];
     for (const v of validRows) {
       const existing = existingByCode.get(v.code);
       if (existing) {
-        await tx
-          .update(chartOfAccounts)
-          .set({
-            name: v.name,
-            description: v.description || existing.description,
-            isActive: v.isActive,
-          })
-          .where(eq(chartOfAccounts.id, existing.id));
+        // Update ONLY columns present in the uploaded CSV (never touch accountType, normalBalance, or balances)
+        const patch: Partial<typeof chartOfAccounts.$inferInsert> = {};
+        if (hasNameCol) patch.name = v.name;
+        if (hasDescCol) patch.description = v.description;
+        if (hasActiveCol) patch.isActive = v.isActive;
+        if (Object.keys(patch).length > 0) {
+          await tx.update(chartOfAccounts).set(patch).where(eq(chartOfAccounts.id, existing.id));
+        }
       } else {
-        await tx.insert(chartOfAccounts).values({
+        toInsert.push({
           companyId,
           code: v.code,
           name: v.name,
@@ -574,6 +632,10 @@ async function importChartOfAccounts(
       }
     }
 
+    for (const chunk of chunkArray(toInsert, 500)) {
+      await tx.insert(chartOfAccounts).values(chunk);
+    }
+
     await writeAuditLog(tx, {
       companyId,
       userId: actor.id,
@@ -583,7 +645,7 @@ async function importChartOfAccounts(
       entityType: "accounting",
       entityId: companyId,
       entityLabel: `COA CSV Import (${createdCount} created, ${updatedCount} updated)`,
-      details: { totalRows: rows.length, createdCount, updatedCount, warningsCount: warnings.length },
+      details: { totalRows: rows.length, createdCount, updatedCount, updateExisting, warningsCount: warnings.length },
       ipAddress,
     });
   });
@@ -593,6 +655,7 @@ async function importChartOfAccounts(
   return {
     kind: "chart_of_accounts",
     dryRun: false,
+    updateExisting,
     valid: true,
     totalRows: rows.length,
     createdCount,
@@ -610,7 +673,9 @@ async function importCustomers(
   actor: RequestActor,
   companyId: string,
   rows: Array<{ rowNumber: number; values: Record<string, string> }>,
+  headerSet: Set<string>,
   dryRun: boolean,
+  updateExisting: boolean,
   ipAddress?: string
 ): Promise<CsvImportResultDto> {
   const [baseCurrency, existing] = await Promise.all([
@@ -622,6 +687,19 @@ async function importCustomers(
   const errors: CsvParseError[] = [];
   const warnings: CsvParseError[] = [];
   const preview: ImportRowPreviewDto[] = [];
+
+  const hasNameCol = hasAnyHeader(headerSet, "name", "display_name");
+  const hasRecTypeCol = hasAnyHeader(headerSet, "eta_receiver_type", "receiver_type");
+  const hasTaxCol = hasAnyHeader(headerSet, "tax_number", "tax_registration_number", "national_id");
+  const hasEmailCol = hasAnyHeader(headerSet, "email");
+  const hasPhoneCol = hasAnyHeader(headerSet, "phone");
+  const hasCompanyCol = hasAnyHeader(headerSet, "company", "company_name");
+  const hasBillingCol = hasAnyHeader(headerSet, "billing_address", "address");
+  const hasShippingCol = hasAnyHeader(headerSet, "shipping_address");
+  const hasCurrencyCol = hasAnyHeader(headerSet, "currency");
+  const hasTermsCol = hasAnyHeader(headerSet, "payment_terms_days");
+  const hasCreditLimitCol = hasAnyHeader(headerSet, "credit_limit");
+  const hasNotesCol = hasAnyHeader(headerSet, "notes");
 
   interface ValidCustomerRow {
     rowNumber: number;
@@ -644,18 +722,33 @@ async function importCustomers(
 
   for (const r of rows) {
     const code = normalizeArabicDigits(r.values.code || r.values.customer_code || "").trim();
-    const name = (r.values.name || r.values.display_name || "").trim();
-    const rawRecType = (r.values.eta_receiver_type || r.values.receiver_type || "B").trim().toUpperCase();
-    const rawTax = r.values.tax_number || r.values.tax_registration_number || r.values.national_id || "";
-    const email = (r.values.email || "").trim();
-    const phone = normalizeArabicDigits(r.values.phone || "").trim();
-    const companyName = (r.values.company || r.values.company_name || "").trim();
-    const billingAddress = (r.values.billing_address || r.values.address || "").trim();
-    const shippingAddress = (r.values.shipping_address || billingAddress).trim();
-    const currency = (r.values.currency || baseCurrency).trim().toUpperCase();
-    const rawTerms = r.values.payment_terms_days;
-    const rawCreditLimit = r.values.credit_limit;
-    const notes = (r.values.notes || "").trim();
+    const existingRow = code ? existingByCode.get(code.toLowerCase()) : undefined;
+    const isUpdate = Boolean(existingRow && updateExisting);
+
+    const name = hasNameCol
+      ? (r.values.name || r.values.display_name || "").trim()
+      : (existingRow?.name ?? "");
+    const rawRecType = hasRecTypeCol
+      ? (r.values.eta_receiver_type || r.values.receiver_type || (existingRow?.etaReceiverType ?? "B")).trim().toUpperCase()
+      : (existingRow?.etaReceiverType ?? "B");
+    const rawTax = hasTaxCol
+      ? (r.values.tax_number || r.values.tax_registration_number || r.values.national_id || "")
+      : (existingRow?.taxNumber ?? "");
+    const email = hasEmailCol ? (r.values.email || "").trim() : (existingRow?.email ?? "");
+    const phone = hasPhoneCol ? normalizeArabicDigits(r.values.phone || "").trim() : (existingRow?.phone ?? "");
+    const companyName = hasCompanyCol ? (r.values.company || r.values.company_name || "").trim() : (existingRow?.company ?? "");
+    const billingAddress = hasBillingCol ? (r.values.billing_address || r.values.address || "").trim() : (existingRow?.billingAddress ?? "");
+    const shippingAddress = hasShippingCol
+      ? (r.values.shipping_address || "").trim()
+      : isUpdate
+        ? (existingRow?.shippingAddress ?? "")
+        : billingAddress;
+    const currency = hasCurrencyCol
+      ? (r.values.currency || existingRow?.currency || baseCurrency).trim().toUpperCase()
+      : (existingRow?.currency ?? baseCurrency);
+    const rawTerms = hasTermsCol ? r.values.payment_terms_days : undefined;
+    const rawCreditLimit = hasCreditLimitCol ? r.values.credit_limit : undefined;
+    const notes = hasNotesCol ? (r.values.notes || "").trim() : (existingRow?.notes ?? "");
 
     let rowHasError = false;
     if (!code) {
@@ -668,7 +761,17 @@ async function importCustomers(
       seenCodes.add(code.toLowerCase());
     }
 
-    if (!name) {
+    if (existingRow && !updateExisting) {
+      errors.push({
+        row: r.rowNumber,
+        column: "code",
+        message: `Customer '${code}' already exists. Enable 'Update existing' mode to update listed columns.`,
+        value: code,
+      });
+      rowHasError = true;
+    }
+
+    if (!name && (!isUpdate || hasNameCol)) {
       errors.push({ row: r.rowNumber, column: "name", message: "Customer name is required" });
       rowHasError = true;
     }
@@ -684,7 +787,10 @@ async function importCustomers(
     }
 
     const etaReceiverType = (["B", "P", "F"].includes(rawRecType) ? rawRecType : "B") as "B" | "P" | "F";
-    const taxCheck = validateEtaTaxId(etaReceiverType, rawTax);
+    const taxCheck =
+      !isUpdate || hasRecTypeCol || hasTaxCol
+        ? validateEtaTaxId(etaReceiverType, rawTax)
+        : { ok: true as const, normalized: existingRow?.taxNumber ?? "" };
     if (!taxCheck.ok) {
       errors.push({
         row: r.rowNumber,
@@ -695,8 +801,8 @@ async function importCustomers(
       rowHasError = true;
     }
 
-    let paymentTermsDays = 30;
-    if (rawTerms && rawTerms.trim() !== "") {
+    let paymentTermsDays = existingRow?.paymentTermsDays ?? 30;
+    if (hasTermsCol && rawTerms && rawTerms.trim() !== "") {
       const parsedTerms = parseLocalizedNumber(rawTerms);
       if (parsedTerms === null || parsedTerms < 0 || !Number.isInteger(parsedTerms)) {
         errors.push({
@@ -711,19 +817,23 @@ async function importCustomers(
       }
     }
 
-    let creditLimit: number | null = null;
-    if (rawCreditLimit && rawCreditLimit.trim() !== "") {
-      const parsedLimit = parseLocalizedNumber(rawCreditLimit);
-      if (parsedLimit === null || parsedLimit < 0) {
-        errors.push({
-          row: r.rowNumber,
-          column: "credit_limit",
-          message: "credit_limit must be a non-negative number",
-          value: rawCreditLimit,
-        });
-        rowHasError = true;
+    let creditLimit: number | null = existingRow?.creditLimit ? num(existingRow.creditLimit) : null;
+    if (hasCreditLimitCol) {
+      if (rawCreditLimit && rawCreditLimit.trim() !== "") {
+        const parsedLimit = parseLocalizedNumber(rawCreditLimit);
+        if (parsedLimit === null || parsedLimit < 0) {
+          errors.push({
+            row: r.rowNumber,
+            column: "credit_limit",
+            message: "credit_limit must be a non-negative number",
+            value: rawCreditLimit,
+          });
+          rowHasError = true;
+        } else {
+          creditLimit = roundCurrency(parsedLimit, 4);
+        }
       } else {
-        creditLimit = roundCurrency(parsedLimit, 4);
+        creditLimit = null;
       }
     }
 
@@ -733,7 +843,6 @@ async function importCustomers(
     }
 
     if (!rowHasError) {
-      const existingRow = existingByCode.get(code.toLowerCase());
       validRows.push({
         rowNumber: r.rowNumber,
         code,
@@ -766,6 +875,7 @@ async function importCustomers(
     return {
       kind: "customers",
       dryRun,
+      updateExisting,
       valid: errors.length === 0,
       totalRows: rows.length,
       createdCount,
@@ -778,29 +888,26 @@ async function importCustomers(
   }
 
   await db.transaction(async (tx) => {
+    const toInsert: Array<typeof customers.$inferInsert> = [];
     for (const v of validRows) {
       const existingRow = existingByCode.get(v.code.toLowerCase());
       if (existingRow) {
-        await tx
-          .update(customers)
-          .set({
-            name: v.name,
-            etaReceiverType: v.etaReceiverType,
-            taxNumber: v.taxNumber,
-            email: v.email,
-            phone: v.phone,
-            company: v.company,
-            billingAddress: v.billingAddress,
-            shippingAddress: v.shippingAddress,
-            currency: v.currency,
-            paymentTermsDays: v.paymentTermsDays,
-            creditLimit: v.creditLimit !== null ? toNumeric(v.creditLimit) : null,
-            notes: v.notes,
-            updatedAt: new Date(),
-          })
-          .where(eq(customers.id, existingRow.id));
+        const patch: Partial<typeof customers.$inferInsert> = { updatedAt: new Date() };
+        if (hasNameCol) patch.name = v.name;
+        if (hasRecTypeCol) patch.etaReceiverType = v.etaReceiverType;
+        if (hasTaxCol) patch.taxNumber = v.taxNumber;
+        if (hasEmailCol) patch.email = v.email;
+        if (hasPhoneCol) patch.phone = v.phone;
+        if (hasCompanyCol) patch.company = v.company;
+        if (hasBillingCol) patch.billingAddress = v.billingAddress;
+        if (hasShippingCol) patch.shippingAddress = v.shippingAddress;
+        if (hasCurrencyCol) patch.currency = v.currency;
+        if (hasTermsCol) patch.paymentTermsDays = v.paymentTermsDays;
+        if (hasCreditLimitCol) patch.creditLimit = v.creditLimit !== null ? toNumeric(v.creditLimit) : null;
+        if (hasNotesCol) patch.notes = v.notes;
+        await tx.update(customers).set(patch).where(eq(customers.id, existingRow.id));
       } else {
-        await tx.insert(customers).values({
+        toInsert.push({
           companyId,
           code: v.code,
           name: v.name,
@@ -819,6 +926,10 @@ async function importCustomers(
       }
     }
 
+    for (const chunk of chunkArray(toInsert, 500)) {
+      await tx.insert(customers).values(chunk);
+    }
+
     await writeAuditLog(tx, {
       companyId,
       userId: actor.id,
@@ -828,7 +939,7 @@ async function importCustomers(
       entityType: "sales",
       entityId: companyId,
       entityLabel: `Customers CSV Import (${createdCount} created, ${updatedCount} updated)`,
-      details: { totalRows: rows.length, createdCount, updatedCount },
+      details: { totalRows: rows.length, createdCount, updatedCount, updateExisting },
       ipAddress,
     });
   });
@@ -836,6 +947,7 @@ async function importCustomers(
   return {
     kind: "customers",
     dryRun: false,
+    updateExisting,
     valid: true,
     totalRows: rows.length,
     createdCount,
@@ -852,7 +964,9 @@ async function importVendors(
   actor: RequestActor,
   companyId: string,
   rows: Array<{ rowNumber: number; values: Record<string, string> }>,
+  headerSet: Set<string>,
   dryRun: boolean,
+  updateExisting: boolean,
   ipAddress?: string
 ): Promise<CsvImportResultDto> {
   const [baseCurrency, existing] = await Promise.all([
@@ -864,6 +978,16 @@ async function importVendors(
   const errors: CsvParseError[] = [];
   const warnings: CsvParseError[] = [];
   const preview: ImportRowPreviewDto[] = [];
+
+  const hasNameCol = hasAnyHeader(headerSet, "name", "display_name");
+  const hasTaxCol = hasAnyHeader(headerSet, "tax_number", "tax_registration_number", "national_id");
+  const hasEmailCol = hasAnyHeader(headerSet, "email");
+  const hasPhoneCol = hasAnyHeader(headerSet, "phone");
+  const hasCompanyCol = hasAnyHeader(headerSet, "company", "company_name");
+  const hasAddressCol = hasAnyHeader(headerSet, "address");
+  const hasCurrencyCol = hasAnyHeader(headerSet, "currency");
+  const hasTermsCol = hasAnyHeader(headerSet, "payment_terms_days");
+  const hasNotesCol = hasAnyHeader(headerSet, "notes");
 
   interface ValidVendorRow {
     rowNumber: number;
@@ -883,15 +1007,22 @@ async function importVendors(
 
   for (const r of rows) {
     const code = normalizeArabicDigits(r.values.code || r.values.vendor_code || "").trim();
-    const name = (r.values.name || r.values.display_name || "").trim();
-    const rawTax = r.values.tax_number || r.values.tax_registration_number || r.values.national_id || "";
-    const email = (r.values.email || "").trim();
-    const phone = normalizeArabicDigits(r.values.phone || "").trim();
-    const companyName = (r.values.company || r.values.company_name || "").trim();
-    const address = (r.values.address || "").trim();
-    const currency = (r.values.currency || baseCurrency).trim().toUpperCase();
-    const rawTerms = r.values.payment_terms_days;
-    const notes = (r.values.notes || "").trim();
+    const existingRow = code ? existingByCode.get(code.toLowerCase()) : undefined;
+    const isUpdate = Boolean(existingRow && updateExisting);
+
+    const name = hasNameCol ? (r.values.name || r.values.display_name || "").trim() : (existingRow?.name ?? "");
+    const rawTax = hasTaxCol
+      ? (r.values.tax_number || r.values.tax_registration_number || r.values.national_id || "")
+      : (existingRow?.taxNumber ?? "");
+    const email = hasEmailCol ? (r.values.email || "").trim() : (existingRow?.email ?? "");
+    const phone = hasPhoneCol ? normalizeArabicDigits(r.values.phone || "").trim() : (existingRow?.phone ?? "");
+    const companyName = hasCompanyCol ? (r.values.company || r.values.company_name || "").trim() : (existingRow?.company ?? "");
+    const address = hasAddressCol ? (r.values.address || "").trim() : (existingRow?.address ?? "");
+    const currency = hasCurrencyCol
+      ? (r.values.currency || existingRow?.currency || baseCurrency).trim().toUpperCase()
+      : (existingRow?.currency ?? baseCurrency);
+    const rawTerms = hasTermsCol ? r.values.payment_terms_days : undefined;
+    const notes = hasNotesCol ? (r.values.notes || "").trim() : (existingRow?.notes ?? "");
 
     let rowHasError = false;
     if (!code) {
@@ -904,19 +1035,32 @@ async function importVendors(
       seenCodes.add(code.toLowerCase());
     }
 
-    if (!name) {
+    if (existingRow && !updateExisting) {
+      errors.push({
+        row: r.rowNumber,
+        column: "code",
+        message: `Vendor '${code}' already exists. Enable 'Update existing' mode to update listed columns.`,
+        value: code,
+      });
+      rowHasError = true;
+    }
+
+    if (!name && (!isUpdate || hasNameCol)) {
       errors.push({ row: r.rowNumber, column: "name", message: "Vendor name is required" });
       rowHasError = true;
     }
 
-    const taxCheck = validateVendorTaxId(rawTax);
+    const taxCheck =
+      !isUpdate || hasTaxCol
+        ? validateVendorTaxId(rawTax)
+        : { ok: true as const, normalized: existingRow?.taxNumber ?? "" };
     if (!taxCheck.ok) {
       errors.push({ row: r.rowNumber, column: "tax_number", message: taxCheck.message, value: rawTax });
       rowHasError = true;
     }
 
-    let paymentTermsDays = 30;
-    if (rawTerms && rawTerms.trim() !== "") {
+    let paymentTermsDays = existingRow?.paymentTermsDays ?? 30;
+    if (hasTermsCol && rawTerms && rawTerms.trim() !== "") {
       const parsedTerms = parseLocalizedNumber(rawTerms);
       if (parsedTerms === null || parsedTerms < 0 || !Number.isInteger(parsedTerms)) {
         errors.push({
@@ -937,7 +1081,6 @@ async function importVendors(
     }
 
     if (!rowHasError) {
-      const existingRow = existingByCode.get(code.toLowerCase());
       validRows.push({
         rowNumber: r.rowNumber,
         code,
@@ -967,6 +1110,7 @@ async function importVendors(
     return {
       kind: "vendors",
       dryRun,
+      updateExisting,
       valid: errors.length === 0,
       totalRows: rows.length,
       createdCount,
@@ -979,26 +1123,23 @@ async function importVendors(
   }
 
   await db.transaction(async (tx) => {
+    const toInsert: Array<typeof vendors.$inferInsert> = [];
     for (const v of validRows) {
       const existingRow = existingByCode.get(v.code.toLowerCase());
       if (existingRow) {
-        await tx
-          .update(vendors)
-          .set({
-            name: v.name,
-            taxNumber: v.taxNumber,
-            email: v.email,
-            phone: v.phone,
-            company: v.company,
-            address: v.address,
-            currency: v.currency,
-            paymentTermsDays: v.paymentTermsDays,
-            notes: v.notes,
-            updatedAt: new Date(),
-          })
-          .where(eq(vendors.id, existingRow.id));
+        const patch: Partial<typeof vendors.$inferInsert> = { updatedAt: new Date() };
+        if (hasNameCol) patch.name = v.name;
+        if (hasTaxCol) patch.taxNumber = v.taxNumber;
+        if (hasEmailCol) patch.email = v.email;
+        if (hasPhoneCol) patch.phone = v.phone;
+        if (hasCompanyCol) patch.company = v.company;
+        if (hasAddressCol) patch.address = v.address;
+        if (hasCurrencyCol) patch.currency = v.currency;
+        if (hasTermsCol) patch.paymentTermsDays = v.paymentTermsDays;
+        if (hasNotesCol) patch.notes = v.notes;
+        await tx.update(vendors).set(patch).where(eq(vendors.id, existingRow.id));
       } else {
-        await tx.insert(vendors).values({
+        toInsert.push({
           companyId,
           code: v.code,
           name: v.name,
@@ -1014,6 +1155,10 @@ async function importVendors(
       }
     }
 
+    for (const chunk of chunkArray(toInsert, 500)) {
+      await tx.insert(vendors).values(chunk);
+    }
+
     await writeAuditLog(tx, {
       companyId,
       userId: actor.id,
@@ -1023,7 +1168,7 @@ async function importVendors(
       entityType: "purchases",
       entityId: companyId,
       entityLabel: `Vendors CSV Import (${createdCount} created, ${updatedCount} updated)`,
-      details: { totalRows: rows.length, createdCount, updatedCount },
+      details: { totalRows: rows.length, createdCount, updatedCount, updateExisting },
       ipAddress,
     });
   });
@@ -1031,6 +1176,7 @@ async function importVendors(
   return {
     kind: "vendors",
     dryRun: false,
+    updateExisting,
     valid: true,
     totalRows: rows.length,
     createdCount,
@@ -1047,7 +1193,9 @@ async function importProducts(
   actor: RequestActor,
   companyId: string,
   rows: Array<{ rowNumber: number; values: Record<string, string> }>,
+  headerSet: Set<string>,
   dryRun: boolean,
+  updateExisting: boolean,
   ipAddress?: string
 ): Promise<CsvImportResultDto> {
   const existing = await db.select().from(products).where(eq(products.companyId, companyId));
@@ -1057,6 +1205,20 @@ async function importProducts(
   const errors: CsvParseError[] = [];
   const warnings: CsvParseError[] = [];
   const preview: ImportRowPreviewDto[] = [];
+
+  const hasNameCol = hasAnyHeader(headerSet, "name", "product_name");
+  const hasNameArCol = hasAnyHeader(headerSet, "name_ar");
+  const hasBarcodeCol = hasAnyHeader(headerSet, "barcode");
+  const hasCategoryCol = hasAnyHeader(headerSet, "category");
+  const hasBrandCol = hasAnyHeader(headerSet, "brand");
+  const hasUnitCol = hasAnyHeader(headerSet, "unit", "uom");
+  const hasCostCol = hasAnyHeader(headerSet, "cost_price", "cost");
+  const hasSellingCol = hasAnyHeader(headerSet, "selling_price", "price");
+  const hasMinStockCol = hasAnyHeader(headerSet, "min_stock_level");
+  const hasItemTypeCol = hasAnyHeader(headerSet, "item_type");
+  const hasEtaCodeTypeCol = hasAnyHeader(headerSet, "eta_code_type");
+  const hasEtaItemCodeCol = hasAnyHeader(headerSet, "eta_item_code");
+  const hasEtaUnitTypeCol = hasAnyHeader(headerSet, "eta_unit_type");
 
   interface ValidProductRow {
     rowNumber: number;
@@ -1080,19 +1242,32 @@ async function importProducts(
 
   for (const r of rows) {
     const sku = normalizeArabicDigits(r.values.sku || r.values.product_sku || "").trim();
-    const name = (r.values.name || r.values.product_name || "").trim();
-    const nameAr = (r.values.name_ar || "").trim();
-    const barcode = normalizeArabicDigits(r.values.barcode || "").trim() || null;
-    const category = (r.values.category || "").trim();
-    const brand = (r.values.brand || "").trim();
-    const unit = (r.values.unit || r.values.uom || "pcs").trim();
-    const rawCost = r.values.cost_price ?? r.values.cost;
-    const rawSelling = r.values.selling_price ?? r.values.price;
-    const rawMinStock = r.values.min_stock_level ?? "0";
-    const itemType = (r.values.item_type || "stock").trim().toLowerCase();
-    const etaCodeType = (r.values.eta_code_type || "EGS").trim().toUpperCase();
-    const etaItemCode = normalizeArabicDigits(r.values.eta_item_code || "").trim();
-    const etaUnitType = (r.values.eta_unit_type || "EA").trim().toUpperCase();
+    const existingRow = sku ? existingBySku.get(sku.toLowerCase()) : undefined;
+    const isUpdate = Boolean(existingRow && updateExisting);
+
+    const name = hasNameCol ? (r.values.name || r.values.product_name || "").trim() : (existingRow?.name ?? "");
+    const nameAr = hasNameArCol ? (r.values.name_ar || "").trim() : (existingRow?.nameAr ?? "");
+    const barcode = hasBarcodeCol
+      ? (normalizeArabicDigits(r.values.barcode || "").trim() || null)
+      : (existingRow?.barcode ?? null);
+    const category = hasCategoryCol ? (r.values.category || "").trim() : (existingRow?.category ?? "");
+    const brand = hasBrandCol ? (r.values.brand || "").trim() : (existingRow?.brand ?? "");
+    const unit = hasUnitCol ? (r.values.unit || r.values.uom || "pcs").trim() : (existingRow?.unit ?? "pcs");
+    const rawCost = hasCostCol ? (r.values.cost_price ?? r.values.cost) : undefined;
+    const rawSelling = hasSellingCol ? (r.values.selling_price ?? r.values.price) : undefined;
+    const rawMinStock = hasMinStockCol ? (r.values.min_stock_level ?? "0") : undefined;
+    const itemType = hasItemTypeCol
+      ? (r.values.item_type || "stock").trim().toLowerCase()
+      : (existingRow?.itemType ?? "stock");
+    const etaCodeType = hasEtaCodeTypeCol
+      ? (r.values.eta_code_type || "EGS").trim().toUpperCase()
+      : (existingRow?.etaCodeType ?? "EGS");
+    const etaItemCode = hasEtaItemCodeCol
+      ? normalizeArabicDigits(r.values.eta_item_code || "").trim()
+      : (existingRow?.etaItemCode ?? "");
+    const etaUnitType = hasEtaUnitTypeCol
+      ? (r.values.eta_unit_type || "EA").trim().toUpperCase()
+      : (existingRow?.etaUnitType ?? "EA");
 
     let rowHasError = false;
     if (!sku) {
@@ -1105,7 +1280,17 @@ async function importProducts(
       seenSkus.add(sku.toLowerCase());
     }
 
-    if (!name) {
+    if (existingRow && !updateExisting) {
+      errors.push({
+        row: r.rowNumber,
+        column: "sku",
+        message: `Product SKU '${sku}' already exists. Enable 'Update existing' mode to update listed columns.`,
+        value: sku,
+      });
+      rowHasError = true;
+    }
+
+    if (!name && (!isUpdate || hasNameCol)) {
       errors.push({ row: r.rowNumber, column: "name", message: "Product name is required" });
       rowHasError = true;
     }
@@ -1119,19 +1304,28 @@ async function importProducts(
       }
     }
 
-    const costPrice = parseLocalizedNumber(rawCost ?? "0");
+    const costPrice =
+      hasCostCol || !isUpdate
+        ? parseLocalizedNumber(rawCost ?? "0")
+        : num(existingRow?.costPrice);
     if (costPrice === null || costPrice < 0) {
       errors.push({ row: r.rowNumber, column: "cost_price", message: "cost_price must be a non-negative number", value: rawCost });
       rowHasError = true;
     }
 
-    const sellingPrice = parseLocalizedNumber(rawSelling ?? "0");
+    const sellingPrice =
+      hasSellingCol || !isUpdate
+        ? parseLocalizedNumber(rawSelling ?? "0")
+        : num(existingRow?.sellingPrice);
     if (sellingPrice === null || sellingPrice < 0) {
       errors.push({ row: r.rowNumber, column: "selling_price", message: "selling_price must be a non-negative number", value: rawSelling });
       rowHasError = true;
     }
 
-    const minStockLevel = parseLocalizedNumber(rawMinStock || "0");
+    const minStockLevel =
+      hasMinStockCol || !isUpdate
+        ? parseLocalizedNumber(rawMinStock || "0")
+        : num(existingRow?.minStockLevel);
     if (minStockLevel === null || minStockLevel < 0) {
       errors.push({ row: r.rowNumber, column: "min_stock_level", message: "min_stock_level must be a non-negative number", value: rawMinStock });
       rowHasError = true;
@@ -1148,7 +1342,6 @@ async function importProducts(
     }
 
     if (!rowHasError) {
-      const existingRow = existingBySku.get(sku.toLowerCase());
       validRows.push({
         rowNumber: r.rowNumber,
         sku,
@@ -1167,11 +1360,13 @@ async function importProducts(
         etaUnitType,
         exists: Boolean(existingRow),
       });
-      preview.push({
-        row: r.rowNumber,
-        action: existingRow ? "update" : "create",
-        summary: `${sku} — ${name}${barcode ? ` [Barcode: ${barcode}]` : ""} (${unit})`,
-      });
+      if (preview.length < 50) {
+        preview.push({
+          row: r.rowNumber,
+          action: existingRow ? "update" : "create",
+          summary: `${sku} — ${name}${barcode ? ` [Barcode: ${barcode}]` : ""} (${unit})`,
+        });
+      }
     }
   }
 
@@ -1182,6 +1377,7 @@ async function importProducts(
     return {
       kind: "products",
       dryRun,
+      updateExisting,
       valid: errors.length === 0,
       totalRows: rows.length,
       createdCount,
@@ -1189,50 +1385,48 @@ async function importProducts(
       skippedCount: 0,
       errors,
       warnings,
-      preview: preview.slice(0, 50),
+      preview,
     };
   }
 
   await db.transaction(async (tx) => {
-    // Auto-seed referenced brands, categories, and units in taxonomy_items idempotently
-    const brandsToEnsure = new Set(validRows.map((v) => v.brand).filter(Boolean));
-    const catsToEnsure = new Set(validRows.map((v) => v.category).filter(Boolean));
-    const unitsToEnsure = new Set(validRows.map((v) => v.unit).filter(Boolean));
+    // Auto-seed referenced brands, categories, and units in taxonomy_items idempotently in batch
+    const taxonomyToEnsure: Array<typeof taxonomyItems.$inferInsert> = [];
+    for (const b of new Set(validRows.map((v) => v.brand).filter(Boolean))) {
+      taxonomyToEnsure.push({ companyId, kind: "brand", name: b });
+    }
+    for (const c of new Set(validRows.map((v) => v.category).filter(Boolean))) {
+      taxonomyToEnsure.push({ companyId, kind: "category", name: c });
+    }
+    for (const u of new Set(validRows.map((v) => v.unit).filter(Boolean))) {
+      taxonomyToEnsure.push({ companyId, kind: "unit", name: u });
+    }
+    for (const chunk of chunkArray(taxonomyToEnsure, 500)) {
+      await tx.insert(taxonomyItems).values(chunk).onConflictDoNothing();
+    }
 
-    for (const b of brandsToEnsure) {
-      await tx.insert(taxonomyItems).values({ companyId, kind: "brand", name: b }).onConflictDoNothing();
-    }
-    for (const c of catsToEnsure) {
-      await tx.insert(taxonomyItems).values({ companyId, kind: "category", name: c }).onConflictDoNothing();
-    }
-    for (const u of unitsToEnsure) {
-      await tx.insert(taxonomyItems).values({ companyId, kind: "unit", name: u }).onConflictDoNothing();
-    }
-
+    const toInsert: Array<typeof products.$inferInsert> = [];
     for (const v of validRows) {
       const existingRow = existingBySku.get(v.sku.toLowerCase());
       if (existingRow) {
-        await tx
-          .update(products)
-          .set({
-            name: v.name,
-            nameAr: v.nameAr || existingRow.nameAr,
-            barcode: v.barcode ?? existingRow.barcode,
-            category: v.category,
-            brand: v.brand,
-            unit: v.unit,
-            costPrice: toNumeric(v.costPrice),
-            sellingPrice: toNumeric(v.sellingPrice),
-            minStockLevel: toNumeric(v.minStockLevel),
-            itemType: v.itemType,
-            etaCodeType: v.etaCodeType,
-            etaItemCode: v.etaItemCode,
-            etaUnitType: v.etaUnitType,
-            updatedAt: new Date(),
-          })
-          .where(eq(products.id, existingRow.id));
+        // Update ONLY columns present in CSV headers; never touch branch_products qty/avgCost
+        const patch: Partial<typeof products.$inferInsert> = { updatedAt: new Date() };
+        if (hasNameCol) patch.name = v.name;
+        if (hasNameArCol) patch.nameAr = v.nameAr;
+        if (hasBarcodeCol) patch.barcode = v.barcode;
+        if (hasCategoryCol) patch.category = v.category;
+        if (hasBrandCol) patch.brand = v.brand;
+        if (hasUnitCol) patch.unit = v.unit;
+        if (hasCostCol) patch.costPrice = toNumeric(v.costPrice);
+        if (hasSellingCol) patch.sellingPrice = toNumeric(v.sellingPrice);
+        if (hasMinStockCol) patch.minStockLevel = toNumeric(v.minStockLevel);
+        if (hasItemTypeCol) patch.itemType = v.itemType;
+        if (hasEtaCodeTypeCol) patch.etaCodeType = v.etaCodeType;
+        if (hasEtaItemCodeCol) patch.etaItemCode = v.etaItemCode;
+        if (hasEtaUnitTypeCol) patch.etaUnitType = v.etaUnitType;
+        await tx.update(products).set(patch).where(eq(products.id, existingRow.id));
       } else {
-        await tx.insert(products).values({
+        toInsert.push({
           companyId,
           sku: v.sku,
           name: v.name,
@@ -1252,6 +1446,11 @@ async function importProducts(
       }
     }
 
+    // Batch-insert new products in 500-row chunks so 10,000+ rows commit rapidly
+    for (const chunk of chunkArray(toInsert, 500)) {
+      await tx.insert(products).values(chunk);
+    }
+
     await writeAuditLog(tx, {
       companyId,
       userId: actor.id,
@@ -1261,7 +1460,7 @@ async function importProducts(
       entityType: "inventory",
       entityId: companyId,
       entityLabel: `Products CSV Import (${createdCount} created, ${updatedCount} updated)`,
-      details: { totalRows: rows.length, createdCount, updatedCount },
+      details: { totalRows: rows.length, createdCount, updatedCount, updateExisting },
       ipAddress,
     });
   });
@@ -1269,6 +1468,7 @@ async function importProducts(
   return {
     kind: "products",
     dryRun: false,
+    updateExisting,
     valid: true,
     totalRows: rows.length,
     createdCount,
@@ -1276,7 +1476,7 @@ async function importProducts(
     skippedCount: 0,
     errors: [],
     warnings,
-    preview: preview.slice(0, 50),
+    preview,
   };
 }
 
@@ -2674,67 +2874,435 @@ export async function reverseOpeningBalances(
     if (!guard.activeOpeningJe) {
       throw new AppError(404, "No active opening balance journal entry found to reverse", "NOT_FOUND");
     }
-    if (guard.hasNonOpeningJournals) {
+
+    // Collect EVERY blocking item across all 6 categories so the admin sees the complete list.
+    const blockers: OpeningReversalBlockerDto[] = [];
+
+    // Category 1: Non-opening journal entries (especially in or after the cutover period)
+    const [cutoverPeriod] = await tx
+      .select({ startDate: fiscalPeriods.startDate, name: fiscalPeriods.name })
+      .from(fiscalPeriods)
+      .where(
+        and(
+          eq(fiscalPeriods.companyId, companyId),
+          lte(fiscalPeriods.startDate, guard.activeOpeningJe.entryDate),
+          gte(fiscalPeriods.endDate, guard.activeOpeningJe.entryDate)
+        )
+      )
+      .limit(1);
+    const periodStart = cutoverPeriod?.startDate ?? guard.activeOpeningJe.entryDate;
+
+    const nonOpeningJes = await tx
+      .select({
+        id: journalEntries.id,
+        entryNumber: journalEntries.entryNumber,
+        sourceType: journalEntries.sourceType,
+        entryDate: journalEntries.entryDate,
+      })
+      .from(journalEntries)
+      .where(
+        and(
+          eq(journalEntries.companyId, companyId),
+          eq(journalEntries.status, "posted"),
+          notInArray(journalEntries.sourceType, ["opening_balance", "opening_balance_reversal"])
+        )
+      );
+    for (const je of nonOpeningJes) {
+      const inOrAfterCutover = je.entryDate >= periodStart;
+      blockers.push({
+        category: "non_opening_journal",
+        reference: je.entryNumber,
+        reason: inOrAfterCutover
+          ? `Non-opening journal ${je.entryNumber} (${je.sourceType}) dated ${je.entryDate.toISOString().slice(0, 10)} exists in or after cutover period`
+          : `Non-opening journal ${je.entryNumber} (${je.sourceType}) dated ${je.entryDate.toISOString().slice(0, 10)} exists`,
+      });
+    }
+
+    // Category 2: Opening AR invoices with payments, applications, credit notes, retainers, or returns
+    const openingArRows = await tx
+      .select({
+        id: salesInvoices.id,
+        invoiceNumber: salesInvoices.invoiceNumber,
+        paidAmount: salesInvoices.paidAmount,
+        creditAppliedAmount: salesInvoices.creditAppliedAmount,
+        retainerAppliedAmount: salesInvoices.retainerAppliedAmount,
+      })
+      .from(salesInvoices)
+      .where(and(eq(salesInvoices.companyId, companyId), eq(salesInvoices.source, "opening_balance")));
+
+    const openingArIds = openingArRows.map((r) => r.id);
+    const arNumById = new Map(openingArRows.map((r) => [r.id, r.invoiceNumber]));
+    if (openingArIds.length > 0) {
+      for (const inv of openingArRows) {
+        if (num(inv.paidAmount) > 0 || num(inv.creditAppliedAmount) > 0 || num(inv.retainerAppliedAmount) > 0) {
+          blockers.push({
+            category: "opening_ar",
+            reference: inv.invoiceNumber,
+            reason: `Opening AR invoice ${inv.invoiceNumber} has paid/credit/retainer applications`,
+          });
+        }
+      }
+      const [arPayAllocs, arCreditApps, arRetApps, arSalesRets, arPosRets] = await Promise.all([
+        tx
+          .select({ invoiceId: receivedPaymentAllocations.invoiceId })
+          .from(receivedPaymentAllocations)
+          .where(inArray(receivedPaymentAllocations.invoiceId, openingArIds)),
+        tx
+          .select({ invoiceId: creditNoteApplications.invoiceId })
+          .from(creditNoteApplications)
+          .where(inArray(creditNoteApplications.invoiceId, openingArIds)),
+        tx
+          .select({ invoiceId: retainerApplications.invoiceId })
+          .from(retainerApplications)
+          .where(inArray(retainerApplications.invoiceId, openingArIds)),
+        tx
+          .select({ invoiceId: salesReturns.invoiceId, returnNumber: salesReturns.returnNumber, creditNoteNumber: salesReturns.creditNoteNumber })
+          .from(salesReturns)
+          .where(and(eq(salesReturns.companyId, companyId), inArray(salesReturns.invoiceId, openingArIds))),
+        tx
+          .select({ originalInvoiceId: posReturns.originalInvoiceId, returnNumber: posReturns.returnNumber })
+          .from(posReturns)
+          .where(and(eq(posReturns.companyId, companyId), inArray(posReturns.originalInvoiceId, openingArIds))),
+      ]);
+
+      for (const row of arPayAllocs) {
+        const ref = arNumById.get(row.invoiceId) ?? row.invoiceId;
+        if (!blockers.some((b) => b.category === "opening_ar" && b.reference === ref && b.reason.includes("payment allocation"))) {
+          blockers.push({
+            category: "opening_ar",
+            reference: ref,
+            reason: `Opening AR invoice ${ref} has payment allocation(s)`,
+          });
+        }
+      }
+      for (const row of arCreditApps) {
+        const ref = arNumById.get(row.invoiceId) ?? row.invoiceId;
+        blockers.push({
+          category: "opening_ar",
+          reference: ref,
+          reason: `Opening AR invoice ${ref} has credit note application(s)`,
+        });
+      }
+      for (const row of arRetApps) {
+        const ref = arNumById.get(row.invoiceId) ?? row.invoiceId;
+        blockers.push({
+          category: "opening_ar",
+          reference: ref,
+          reason: `Opening AR invoice ${ref} has retainer application(s)`,
+        });
+      }
+      for (const row of arSalesRets) {
+        const ref = row.invoiceId ? (arNumById.get(row.invoiceId) ?? row.invoiceId) : row.returnNumber;
+        blockers.push({
+          category: "opening_ar",
+          reference: ref,
+          reason: `Opening AR invoice ${ref} has sales return / credit note ${row.returnNumber} (${row.creditNoteNumber})`,
+        });
+      }
+      for (const row of arPosRets) {
+        const ref = arNumById.get(row.originalInvoiceId) ?? row.originalInvoiceId;
+        blockers.push({
+          category: "opening_ar",
+          reference: ref,
+          reason: `Opening AR invoice ${ref} has POS return ${row.returnNumber}`,
+        });
+      }
+    }
+
+    // Category 3: Opening AP bills with payments, applications, or purchase returns
+    const openingApRows = await tx
+      .select({
+        id: vendorBills.id,
+        billNumber: vendorBills.billNumber,
+        paidAmount: vendorBills.paidAmount,
+      })
+      .from(vendorBills)
+      .where(and(eq(vendorBills.companyId, companyId), eq(vendorBills.source, "opening_balance")));
+
+    const openingApIds = openingApRows.map((r) => r.id);
+    const apNumById = new Map(openingApRows.map((r) => [r.id, r.billNumber]));
+    if (openingApIds.length > 0) {
+      for (const bill of openingApRows) {
+        if (num(bill.paidAmount) > 0) {
+          blockers.push({
+            category: "opening_ap",
+            reference: bill.billNumber,
+            reason: `Opening AP bill ${bill.billNumber} has payments applied`,
+          });
+        }
+      }
+      const [apPayAllocs, apRets] = await Promise.all([
+        tx
+          .select({ billId: paymentMadeAllocations.billId })
+          .from(paymentMadeAllocations)
+          .where(inArray(paymentMadeAllocations.billId, openingApIds)),
+        tx
+          .select({ billId: purchaseReturns.billId, returnNumber: purchaseReturns.returnNumber })
+          .from(purchaseReturns)
+          .where(and(eq(purchaseReturns.companyId, companyId), inArray(purchaseReturns.billId, openingApIds))),
+      ]);
+      for (const row of apPayAllocs) {
+        const ref = apNumById.get(row.billId) ?? row.billId;
+        if (!blockers.some((b) => b.category === "opening_ap" && b.reference === ref && b.reason.includes("payment allocation"))) {
+          blockers.push({
+            category: "opening_ap",
+            reference: ref,
+            reason: `Opening AP bill ${ref} has payment allocation(s)`,
+          });
+        }
+      }
+      for (const row of apRets) {
+        const ref = row.billId ? (apNumById.get(row.billId) ?? row.billId) : row.returnNumber;
+        blockers.push({
+          category: "opening_ap",
+          reference: ref,
+          reason: `Opening AP bill ${ref} has purchase return ${row.returnNumber}`,
+        });
+      }
+    }
+
+    // Category 4: Opening stock that has since moved (sales, purchases, transfers, adjustments, etc.) or been reserved
+    const openingStockRows = await tx
+      .select({
+        branchId: stockMovements.branchId,
+        productId: stockMovements.productId,
+      })
+      .from(stockMovements)
+      .where(
+        and(
+          eq(stockMovements.companyId, companyId),
+          eq(stockMovements.movementType, "opening_balance"),
+          eq(stockMovements.referenceType, "opening_balance")
+        )
+      );
+
+    if (openingStockRows.length > 0) {
+      const openingPairSet = new Set(openingStockRows.map((m) => `${m.branchId}:${m.productId}`));
+      const openingProductIds = Array.from(new Set(openingStockRows.map((m) => m.productId)));
+      const openingBranchIds = Array.from(new Set(openingStockRows.map((m) => m.branchId)));
+
+      const [subsequentMoves, reservedBps, prodMeta, branchMeta] = await Promise.all([
+        tx
+          .select({
+            branchId: stockMovements.branchId,
+            productId: stockMovements.productId,
+            movementType: stockMovements.movementType,
+            referenceNumber: stockMovements.referenceNumber,
+          })
+          .from(stockMovements)
+          .where(
+            and(
+              eq(stockMovements.companyId, companyId),
+              inArray(stockMovements.productId, openingProductIds),
+              inArray(stockMovements.branchId, openingBranchIds),
+              ne(stockMovements.movementType, "opening_balance")
+            )
+          ),
+        tx
+          .select({
+            branchId: branchProducts.branchId,
+            productId: branchProducts.productId,
+            qtyReserved: branchProducts.qtyReserved,
+          })
+          .from(branchProducts)
+          .where(
+            and(
+              eq(branchProducts.companyId, companyId),
+              inArray(branchProducts.productId, openingProductIds),
+              inArray(branchProducts.branchId, openingBranchIds)
+            )
+          ),
+        tx.select({ id: products.id, sku: products.sku }).from(products).where(inArray(products.id, openingProductIds)),
+        tx.select({ id: branches.id, code: branches.code }).from(branches).where(inArray(branches.id, openingBranchIds)),
+      ]);
+
+      const skuById = new Map(prodMeta.map((p) => [p.id, p.sku]));
+      const brCodeById = new Map(branchMeta.map((b) => [b.id, b.code]));
+
+      for (const mv of subsequentMoves) {
+        if (!openingPairSet.has(`${mv.branchId}:${mv.productId}`)) continue;
+        const ref = `${skuById.get(mv.productId) ?? mv.productId}@${brCodeById.get(mv.branchId) ?? mv.branchId}`;
+        blockers.push({
+          category: "opening_stock",
+          reference: ref,
+          reason: `Opening stock ${ref} has subsequent movement '${mv.movementType}' (${mv.referenceNumber || "no ref"})`,
+        });
+      }
+      for (const bp of reservedBps) {
+        if (!openingPairSet.has(`${bp.branchId}:${bp.productId}`)) continue;
+        if (num(bp.qtyReserved) > 0) {
+          const ref = `${skuById.get(bp.productId) ?? bp.productId}@${brCodeById.get(bp.branchId) ?? bp.branchId}`;
+          blockers.push({
+            category: "opening_stock",
+            reference: ref,
+            reason: `Opening stock ${ref} has reserved quantity (${num(bp.qtyReserved)})`,
+          });
+        }
+      }
+    }
+
+    // Category 5: Opening fixed assets with depreciation or disposal entries
+    const openingFaRows = await tx
+      .select({
+        id: fixedAssets.id,
+        assetCode: fixedAssets.assetCode,
+        status: fixedAssets.status,
+        disposedAt: fixedAssets.disposedAt,
+        disposalJournalEntryId: fixedAssets.disposalJournalEntryId,
+      })
+      .from(fixedAssets)
+      .where(and(eq(fixedAssets.companyId, companyId), eq(fixedAssets.source, "opening_balance")));
+
+    const openingFaIds = openingFaRows.map((r) => r.id);
+    const faCodeById = new Map(openingFaRows.map((r) => [r.id, r.assetCode]));
+    if (openingFaIds.length > 0) {
+      for (const fa of openingFaRows) {
+        if (fa.status === "disposed" || fa.disposedAt !== null || fa.disposalJournalEntryId !== null) {
+          blockers.push({
+            category: "opening_fixed_asset",
+            reference: fa.assetCode,
+            reason: `Opening fixed asset ${fa.assetCode} has been disposed`,
+          });
+        }
+      }
+      const depEntries = await tx
+        .select({ assetId: fixedAssetDepreciationEntries.assetId, periodKey: fixedAssetDepreciationEntries.periodKey })
+        .from(fixedAssetDepreciationEntries)
+        .where(inArray(fixedAssetDepreciationEntries.assetId, openingFaIds));
+      for (const dep of depEntries) {
+        const ref = faCodeById.get(dep.assetId) ?? dep.assetId;
+        blockers.push({
+          category: "opening_fixed_asset",
+          reference: ref,
+          reason: `Opening fixed asset ${ref} has depreciation entry for period ${dep.periodKey}`,
+        });
+      }
+    }
+
+    // Category 6: Opening treasury accounts with transactions, transfers, statements, or reconciliation
+    const openingTrRows = await tx
+      .select({
+        id: treasuryAccounts.id,
+        code: treasuryAccounts.code,
+        glAccountId: treasuryAccounts.glAccountId,
+      })
+      .from(treasuryAccounts)
+      .where(and(eq(treasuryAccounts.companyId, companyId), eq(treasuryAccounts.source, "opening_balance")));
+
+    const openingTrIds = openingTrRows.map((r) => r.id);
+    const openingTrGlIds = openingTrRows.map((r) => r.glAccountId);
+    const trCodeById = new Map(openingTrRows.map((r) => [r.id, r.code]));
+    const trCodeByGlId = new Map(openingTrRows.map((r) => [r.glAccountId, r.code]));
+    if (openingTrIds.length > 0) {
+      const [transfers, statements, stmtLines, expenses, nonOpeningGlLines] = await Promise.all([
+        tx
+          .select({
+            transferNumber: treasuryTransfers.transferNumber,
+            fromId: treasuryTransfers.fromTreasuryAccountId,
+            toId: treasuryTransfers.toTreasuryAccountId,
+          })
+          .from(treasuryTransfers)
+          .where(
+            and(
+              eq(treasuryTransfers.companyId, companyId),
+              or(
+                inArray(treasuryTransfers.fromTreasuryAccountId, openingTrIds),
+                inArray(treasuryTransfers.toTreasuryAccountId, openingTrIds)
+              )
+            )
+          ),
+        tx
+          .select({ treasuryAccountId: bankStatements.treasuryAccountId, statementNumber: bankStatements.statementNumber })
+          .from(bankStatements)
+          .where(and(eq(bankStatements.companyId, companyId), inArray(bankStatements.treasuryAccountId, openingTrIds))),
+        tx
+          .select({ treasuryAccountId: bankStatementLines.treasuryAccountId, status: bankStatementLines.status })
+          .from(bankStatementLines)
+          .where(
+            and(
+              eq(bankStatementLines.companyId, companyId),
+              inArray(bankStatementLines.treasuryAccountId, openingTrIds),
+              or(eq(bankStatementLines.status, "reconciled"), isNotNull(bankStatementLines.matchedJournalLineId))
+            )
+          ),
+        tx
+          .select({ treasuryAccountId: expenseClaims.treasuryAccountId, claimNumber: expenseClaims.claimNumber })
+          .from(expenseClaims)
+          .where(and(eq(expenseClaims.companyId, companyId), inArray(expenseClaims.treasuryAccountId, openingTrIds))),
+        tx
+          .select({
+            accountId: journalLines.accountId,
+            entryNumber: journalEntries.entryNumber,
+            sourceType: journalEntries.sourceType,
+          })
+          .from(journalLines)
+          .innerJoin(journalEntries, eq(journalLines.entryId, journalEntries.id))
+          .where(
+            and(
+              eq(journalEntries.companyId, companyId),
+              eq(journalEntries.status, "posted"),
+              inArray(journalLines.accountId, openingTrGlIds),
+              notInArray(journalEntries.sourceType, ["opening_balance", "opening_balance_reversal"])
+            )
+          ),
+      ]);
+
+      for (const tr of transfers) {
+        const ref = trCodeById.get(tr.fromId) ?? trCodeById.get(tr.toId) ?? tr.transferNumber;
+        blockers.push({
+          category: "opening_treasury",
+          reference: ref,
+          reason: `Opening treasury account ${ref} has transfer ${tr.transferNumber}`,
+        });
+      }
+      for (const st of statements) {
+        const ref = trCodeById.get(st.treasuryAccountId) ?? st.treasuryAccountId;
+        blockers.push({
+          category: "opening_treasury",
+          reference: ref,
+          reason: `Opening treasury account ${ref} has imported bank statement ${st.statementNumber}`,
+        });
+      }
+      for (const sl of stmtLines) {
+        const ref = trCodeById.get(sl.treasuryAccountId) ?? sl.treasuryAccountId;
+        if (!blockers.some((b) => b.category === "opening_treasury" && b.reference === ref && b.reason.includes("reconciled statement"))) {
+          blockers.push({
+            category: "opening_treasury",
+            reference: ref,
+            reason: `Opening treasury account ${ref} has reconciled statement line(s)`,
+          });
+        }
+      }
+      for (const ex of expenses) {
+        const ref = ex.treasuryAccountId ? (trCodeById.get(ex.treasuryAccountId) ?? ex.treasuryAccountId) : ex.claimNumber;
+        blockers.push({
+          category: "opening_treasury",
+          reference: ref,
+          reason: `Opening treasury account ${ref} has expense claim ${ex.claimNumber}`,
+        });
+      }
+      for (const gl of nonOpeningGlLines) {
+        const ref = trCodeByGlId.get(gl.accountId) ?? gl.accountId;
+        blockers.push({
+          category: "opening_treasury",
+          reference: ref,
+          reason: `Opening treasury account ${ref} has posted transaction ${gl.entryNumber} (${gl.sourceType})`,
+        });
+      }
+    }
+
+    if (blockers.length > 0) {
+      const previewList = blockers
+        .slice(0, 10)
+        .map((b) => `[${b.category}] ${b.reason}`)
+        .join("; ");
+      const suffix = blockers.length > 10 ? ` (+${blockers.length - 10} more)` : "";
       throw new AppError(
         409,
-        `Cannot reverse opening balances because non-opening journal entries already exist (e.g. ${guard.firstNonOpeningJe?.entryNumber}).`,
-        "NON_OPENING_JOURNALS_EXIST"
+        `Cannot reverse opening balances due to ${blockers.length} blocking item(s): ${previewList}${suffix}`,
+        "OPENING_REVERSAL_BLOCKED",
+        { blockers }
       );
-    }
-
-    // Ensure no payments or depreciation were recorded against opening artifacts
-    const openingArIds = (
-      await tx
-        .select({ id: salesInvoices.id })
-        .from(salesInvoices)
-        .where(and(eq(salesInvoices.companyId, companyId), eq(salesInvoices.source, "opening_balance")))
-    ).map((r) => r.id);
-
-    if (openingArIds.length > 0) {
-      const [arAlloc] = await tx
-        .select({ id: receivedPaymentAllocations.id })
-        .from(receivedPaymentAllocations)
-        .where(inArray(receivedPaymentAllocations.invoiceId, openingArIds))
-        .limit(1);
-      if (arAlloc) {
-        throw new AppError(409, "Cannot reverse opening balances because payments have been applied to opening AR invoices", "OPENING_DOCS_REFERENCED");
-      }
-    }
-
-    const openingApIds = (
-      await tx
-        .select({ id: vendorBills.id })
-        .from(vendorBills)
-        .where(and(eq(vendorBills.companyId, companyId), eq(vendorBills.source, "opening_balance")))
-    ).map((r) => r.id);
-
-    if (openingApIds.length > 0) {
-      const [apAlloc] = await tx
-        .select({ id: paymentMadeAllocations.id })
-        .from(paymentMadeAllocations)
-        .where(inArray(paymentMadeAllocations.billId, openingApIds))
-        .limit(1);
-      if (apAlloc) {
-        throw new AppError(409, "Cannot reverse opening balances because payments have been applied to opening AP bills", "OPENING_DOCS_REFERENCED");
-      }
-    }
-
-    const openingFaIds = (
-      await tx
-        .select({ id: fixedAssets.id })
-        .from(fixedAssets)
-        .where(and(eq(fixedAssets.companyId, companyId), eq(fixedAssets.source, "opening_balance")))
-    ).map((r) => r.id);
-
-    if (openingFaIds.length > 0) {
-      const [dep] = await tx
-        .select({ id: fixedAssetDepreciationEntries.id })
-        .from(fixedAssetDepreciationEntries)
-        .where(inArray(fixedAssetDepreciationEntries.assetId, openingFaIds))
-        .limit(1);
-      if (dep) {
-        throw new AppError(409, "Cannot reverse opening balances because depreciation has been posted on opening fixed assets", "OPENING_DOCS_REFERENCED");
-      }
     }
 
     // 1. Post mirror reversal JE dated at openingJe.entryDate (keeping original status='posted' so net = 0)
@@ -2869,6 +3437,63 @@ export async function reverseOpeningBalances(
       removedOpeningStockMovements: deletedStockMoves.length,
     };
   });
+}
+
+/**
+ * Read-only Cutover Readiness Admin Check:
+ * Verifies all 8 subledger-to-GL reconciliation controls, accounting setup health,
+ * and audit-log tamper-evident hash chain in parallel without modifying state.
+ */
+export async function getCutoverReadiness(
+  db: AppDatabase,
+  actor: RequestActor
+): Promise<CutoverReadinessDto> {
+  const companyId = actorCompanyId(actor);
+  const [reconciliation, setupHealth, auditChain] = await Promise.all([
+    getSubledgerReconciliation(db, actor),
+    getAccountingSetupHealth(db, actor),
+    verifyAuditLogChain(db, companyId),
+  ]);
+
+  const failingKeys = reconciliation.items.filter((i) => !i.isReconciled).map((i) => i.key);
+  const passedControls = reconciliation.items.length - failingKeys.length;
+  const ready = reconciliation.allReconciled && setupHealth.healthy && auditChain.valid;
+
+  return {
+    ready,
+    status: ready ? "PASS" : "FAIL",
+    checkedAt: new Date().toISOString(),
+    checks: {
+      reconciliation: {
+        passed: reconciliation.allReconciled,
+        totalControls: reconciliation.items.length,
+        passedControls,
+        failingKeys,
+        summary: reconciliation.allReconciled
+          ? `All ${reconciliation.items.length} subledger-to-GL controls reconciled`
+          : `${failingKeys.length} of ${reconciliation.items.length} control(s) out of balance: ${failingKeys.join(", ")}`,
+      },
+      setupHealth: {
+        passed: setupHealth.healthy,
+        totalMappings: setupHealth.totalMappings,
+        validMappings: setupHealth.validMappings,
+        issueCount: setupHealth.issues.length,
+        summary: setupHealth.healthy
+          ? `All ${setupHealth.totalMappings} required GL mappings healthy`
+          : `${setupHealth.issues.length} GL mapping issue(s) require attention`,
+      },
+      auditChain: {
+        passed: auditChain.valid,
+        totalChainedRows: auditChain.totalChainedRows,
+        firstBrokenId: auditChain.firstBrokenId,
+        summary: auditChain.valid
+          ? `Audit hash chain intact (${auditChain.totalChainedRows} chained rows)`
+          : `Audit hash chain broken at ${auditChain.firstBrokenId ?? "unknown row"}: ${auditChain.reason ?? "tamper detected"}`,
+      },
+    },
+    reconciliation,
+    setupHealth,
+  };
 }
 
 // Keep nextDocNumber referenced if needed in future extensions
