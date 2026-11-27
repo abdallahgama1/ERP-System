@@ -356,6 +356,9 @@ export interface VatReturnReportDto {
   glOutputVatBalance: number;
   glInputVatBalance: number;
   glNetVatPayable: number;
+  openingOutputVatCarryover?: number;
+  openingInputVatCarryover?: number;
+  openingVatReconciliationNote?: string;
 }
 
 export const closeFiscalYearSchema = z.object({

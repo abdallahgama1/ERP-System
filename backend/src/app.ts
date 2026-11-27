@@ -32,6 +32,7 @@ import { eventRoutes } from "./routes/events.ts";
 import { expensesRoutes } from "./routes/expenses.ts";
 import { exportRoutes } from "./routes/exports.ts";
 import { fixedAssetsRoutes } from "./routes/fixed-assets.ts";
+import { importRoutes } from "./routes/imports.ts";
 import { inventoryRoutes } from "./routes/inventory.ts";
 import { manufacturingRoutes } from "./routes/manufacturing.ts";
 import { notificationRoutes } from "./routes/notifications.ts";
@@ -340,6 +341,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(attachmentRoutes);
   await app.register(searchRoutes);
   await app.register(exportRoutes);
+  await app.register(importRoutes);
   await app.register(savedViewsRoutes);
   await app.register(printTemplatesRoutes);
 
