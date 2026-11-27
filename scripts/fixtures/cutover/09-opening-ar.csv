@@ -1,0 +1,3 @@
+invoice_number,customer_code,branch_code,invoice_date,due_date,open_amount,currency,fx_rate,notes
+OPEN-AR-2025-001,CUST-SYN-01,HQ-01,2025-12-10,2026-01-09,"45,000.00",EGP,1,Legacy invoice carried forward at cutover
+OPEN-AR-2025-002,CUST-SYN-02,HQ-01,2025-12-20,2026-02-03,"30,000.00",EGP,1,Legacy invoice carried forward at cutover

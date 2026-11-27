@@ -34,6 +34,13 @@ backend/uploads/
 *.dump
 *.dump.sha256
 
+# Real company cutover / migration CSVs (never commit real financial data)
+cutover-data/
+data/cutover/
+imports/real/
+scripts/fixtures/cutover/local/
+*.real.csv
+
 # Editor & OS files
 .vscode/*
 !.vscode/extensions.json

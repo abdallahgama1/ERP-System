@@ -1,0 +1,11 @@
+account_code,debit,credit,description
+1030,"200,000.00",0,Opening CIB Main Operating EGP
+1031,"15,000.00",0,Opening HQ Petty Cashbox
+1100,"75,000.00",0,Opening Accounts Receivable Control
+1200,"42,000.00",0,Opening Inventory Valuation Control
+1300,"3,500.00",0,Opening Input VAT Carryover
+1500,"300,000.00",0,Opening Fixed Assets Cost Control
+1510,0,"72,000.00",Opening Accumulated Depreciation
+2000,0,"52,000.00",Opening Accounts Payable Control
+2300,0,"5,600.00",Opening Output VAT Carryover
+3100,0,"505,900.00",Opening Retained Earnings and Prior Equity

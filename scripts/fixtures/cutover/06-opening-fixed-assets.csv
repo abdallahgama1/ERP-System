@@ -1,0 +1,3 @@
+asset_code,name,category,acquisition_date,in_service_date,acquisition_cost,accumulated_depreciation,salvage_value,useful_life_months,depreciation_method,branch_code,asset_account_code,accum_dep_account_code,dep_expense_account_code,serial_number
+FA-SYN-01,Delivery Van Cairo,Vehicles,2024-01-15,2024-01-15,"240,000.00","60,000.00","20,000.00",60,straight_line,HQ-01,1500,1510,5700,SYN-VIN-0001
+FA-SYN-02,Warehouse Forklift Electric,Machinery,2024-07-01,2024-07-01,"60,000.00","12,000.00","6,000.00",60,straight_line,HQ-01,1500,1510,5700,SYN-FL-0002

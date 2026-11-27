@@ -63,6 +63,9 @@ jobs:
       - name: Run sample year ledger & subledger-to-GL reconciliation check
         run: npm run demo:ledger
 
+      - name: Run Go-Live cutover rehearsal on scratch Postgres
+        run: npm run rehearse:cutover
+
       - name: Run PostgreSQL backup/restore & migration 0007 upgrade verification
         env:
           RESTORE_TEST_ADMIN_URL: postgresql://erp:erp_ci_password@127.0.0.1:5432/postgres

@@ -1,0 +1,4 @@
+code,name,eta_receiver_type,tax_number,email,phone,company,billing_address,currency,payment_terms_days,credit_limit
+CUST-SYN-01,شركة النيل للتوريدات الهندسية,B,200-300-400,ap@nile-syn.example,+20224001001,Nile Engineering SAE,12 El Tahrir St Cairo,EGP,30,300000
+CUST-SYN-02,Delta Packaging Co,B,500600700,finance@delta-syn.example,+20348002002,Delta Packaging SAE,Industrial Zone Alexandria,EGP,45,200000
+CUST-SYN-03,أحمد محمود منصور,P,29001011234567,ahmed.syn@example.com,+201001234567,,Nasr City Cairo,EGP,0,

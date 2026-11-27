@@ -1,0 +1,3 @@
+sku,name,name_ar,barcode,category,brand,unit,cost_price,selling_price,min_stock_level,item_type,eta_code_type,eta_item_code,eta_unit_type
+SYN-VALVE-01,Industrial Brass Valve 2-Inch,صمام نحاس صناعي 2 بوصة,6221000001001,Valves,ApexFlow,pcs,"150.00","260.00",10,stock,GS1,6221000001001,EA
+SYN-PUMP-02,Centrifugal Water Pump 1.5HP,مضخة مياه طرد مركزي 1.5 حصان,6221000002002,Pumps,HydroMax,pcs,"300.00","495.00",5,stock,GS1,6221000002002,EA

@@ -1,0 +1,3 @@
+code,name,account_type,currency,gl_account_code,opening_balance,bank_name,account_number,iban,branch_code
+BNK-CIB-SYN,CIB Main Operating EGP,bank,EGP,1030,"200,000.00",CIB Egypt,1000200030,EG380010000100000001000200030,HQ-01
+CSH-HQ-SYN,HQ Petty Cashbox,cashbox,EGP,1031,"15,000.00",,,,HQ-01

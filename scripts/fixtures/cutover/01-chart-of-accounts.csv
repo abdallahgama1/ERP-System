@@ -1,0 +1,11 @@
+code,name,account_type,normal_balance,description,is_active
+1030,Main Operating Bank - CIB EGP,asset,debit,Primary corporate EGP operating bank account (synthetic),true
+1031,HQ Petty Cashbox,asset,debit,Headquarters petty cashbox (synthetic),true
+1100,Accounts Receivable,asset,debit,Trade receivables control account,true
+1200,Inventory Asset,asset,debit,Merchandise inventory control account,true
+1300,Input VAT Recoverable,asset,debit,VAT input tax control account,true
+1500,Fixed Assets - Cost,asset,debit,Property plant and equipment historical cost,true
+1510,Accumulated Depreciation,asset,credit,Contra-asset accumulated depreciation,true
+2000,Accounts Payable,liability,credit,Trade payables control account,true
+2300,Output VAT Payable,liability,credit,VAT output tax control account,true
+3100,Retained Earnings,equity,credit,Accumulated prior earnings carried forward at cutover,true

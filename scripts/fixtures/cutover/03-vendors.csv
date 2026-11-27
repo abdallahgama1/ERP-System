@@ -1,0 +1,3 @@
+code,name,tax_number,email,phone,company,address,currency,payment_terms_days
+VEND-SYN-01,مؤسسة الإسكندرية للصناعات,400-500-600,ar@alex-syn.example,+20349003003,Alexandria Industries SAE,Borg El Arab Alexandria,EGP,45
+VEND-SYN-02,Red Sea Steel Trading,700800900,billing@redsea-syn.example,+20226004004,Red Sea Steel SAE,10th of Ramadan City,EGP,30
