@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   CsvImportResultDto,
+  CutoverReadinessDto,
   ImportDatasetKind,
   OpeningBalancesImportResultDto,
   OpeningCutoverStatusDto,
@@ -14,6 +15,7 @@ import { erpQueryKeys } from "./queryKeys";
 
 export const importQueryKeys = {
   openingStatus: () => ["imports", "opening-status"] as const,
+  cutoverReadiness: () => ["imports", "cutover-readiness"] as const,
 };
 
 export function useOpeningCutoverStatusQuery(enabled = true) {
@@ -26,11 +28,22 @@ export function useOpeningCutoverStatusQuery(enabled = true) {
   });
 }
 
+export function useCutoverReadinessQuery(enabled = true) {
+  const { user } = useAuth();
+  const { role } = usePermissions();
+  return useQuery({
+    queryKey: importQueryKeys.cutoverReadiness(),
+    queryFn: () => apiRequest<CutoverReadinessDto>("/api/imports/cutover-readiness"),
+    enabled: Boolean(user) && enabled && role === "admin",
+  });
+}
+
 export function useImportMutations() {
   const queryClient = useQueryClient();
 
   const invalidateAllOperational = () => {
     void queryClient.invalidateQueries({ queryKey: importQueryKeys.openingStatus() });
+    void queryClient.invalidateQueries({ queryKey: importQueryKeys.cutoverReadiness() });
     void queryClient.invalidateQueries({ queryKey: erpQueryKeys.accounting.all });
     void queryClient.invalidateQueries({ queryKey: erpQueryKeys.inventory.all });
     void queryClient.invalidateQueries({ queryKey: erpQueryKeys.sales.all });
@@ -42,10 +55,20 @@ export function useImportMutations() {
   };
 
   const runStandardImport = useMutation({
-    mutationFn: ({ kind, csv, dryRun }: { kind: StandardImportKind; csv: string; dryRun: boolean }) =>
+    mutationFn: ({
+      kind,
+      csv,
+      dryRun,
+      updateExisting = false,
+    }: {
+      kind: StandardImportKind;
+      csv: string;
+      dryRun: boolean;
+      updateExisting?: boolean;
+    }) =>
       apiRequest<CsvImportResultDto>(`/api/imports/${kind}`, {
         method: "POST",
-        body: { csv, dryRun },
+        body: { csv, dryRun, updateExisting },
       }),
     onSuccess: (res) => {
       if (!res.dryRun && res.valid) {

@@ -66,6 +66,8 @@ test.describe("Admin UI: Go-Live Data Import & Cutover (/admin/imports)", () => 
     await page.getByTestId("opening-commit-btn").click();
     await expect(page.getByTestId("opening-reconciliation-results")).toBeVisible();
     await expect(page.getByTestId("reverse-opening-btn")).toBeVisible();
+    await expect(page.getByTestId("cutover-readiness-card")).toBeVisible();
+    await expect(page.getByTestId("cutover-readiness-badge")).toContainText(/READY|PASS/i);
 
     // Verify controlled opening reversal via UI
     await page.getByTestId("reverse-opening-btn").click();
@@ -73,6 +75,7 @@ test.describe("Admin UI: Go-Live Data Import & Cutover (/admin/imports)", () => 
     await page.getByTestId("reverse-opening-confirm").click();
     await expect(page.getByRole("dialog")).toBeHidden();
     await expect(page.getByTestId("reverse-opening-btn")).toBeHidden();
+    await expect(page.getByTestId("cutover-readiness-badge")).toContainText(/READY|PASS/i);
 
     // Verify Arabic RTL
     await page.evaluate(() => {

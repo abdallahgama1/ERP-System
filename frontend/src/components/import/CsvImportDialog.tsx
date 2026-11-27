@@ -20,6 +20,8 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Table,
@@ -55,14 +57,21 @@ export default function CsvImportDialog({
 
   const [fileName, setFileName] = useState<string>("");
   const [csvText, setCsvText] = useState<string>("");
+  const [updateExisting, setUpdateExisting] = useState<boolean>(false);
   const [result, setResult] = useState<CsvImportResultDto | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
 
+  const supportsUpdateExisting =
+    kind === "chart_of_accounts" ||
+    kind === "customers" ||
+    kind === "vendors" ||
+    kind === "products";
   const templateDef = CSV_TEMPLATES[kind];
 
   const reset = () => {
     setFileName("");
     setCsvText("");
+    setUpdateExisting(false);
     setResult(null);
     setRequestError(null);
   };
@@ -97,7 +106,12 @@ export default function CsvImportDialog({
     if (!csvText.trim()) return;
     setRequestError(null);
     try {
-      const res = await runStandardImport.mutateAsync({ kind, csv: csvText, dryRun: true });
+      const res = await runStandardImport.mutateAsync({
+        kind,
+        csv: csvText,
+        dryRun: true,
+        updateExisting: supportsUpdateExisting ? updateExisting : false,
+      });
       setResult(res);
     } catch (err) {
       const msg = err instanceof Error ? err.message : t("common.error");
@@ -110,7 +124,12 @@ export default function CsvImportDialog({
     if (!csvText.trim()) return;
     setRequestError(null);
     try {
-      const res = await runStandardImport.mutateAsync({ kind, csv: csvText, dryRun: false });
+      const res = await runStandardImport.mutateAsync({
+        kind,
+        csv: csvText,
+        dryRun: false,
+        updateExisting: supportsUpdateExisting ? updateExisting : false,
+      });
       setResult(res);
       if (res.valid) {
         toast({
@@ -186,6 +205,31 @@ export default function CsvImportDialog({
               />
             </label>
           </div>
+
+          {supportsUpdateExisting && (
+            <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <Label htmlFor={`csv-update-existing-${kind}`}>
+                  {t("imports.updateExistingLabel", "Update existing records")}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    "imports.updateExistingHint",
+                    "Off by default: rows matching an existing code/SKU fail with 'already exists'. Enable to update only the columns present in the CSV (balances are never modified)."
+                  )}
+                </p>
+              </div>
+              <Switch
+                id={`csv-update-existing-${kind}`}
+                checked={updateExisting}
+                onCheckedChange={(checked) => {
+                  setUpdateExisting(checked);
+                  setResult(null);
+                }}
+                data-testid={`csv-update-existing-${kind}`}
+              />
+            </div>
+          )}
 
           {requestError && (
             <Alert variant="destructive" role="alert" data-testid="csv-import-request-error">

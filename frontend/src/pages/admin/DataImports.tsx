@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import {
   CSV_TEMPLATES,
@@ -12,7 +13,9 @@ import {
   Download,
   FileSpreadsheet,
   Play,
+  RefreshCw,
   RotateCcw,
+  ShieldCheck,
   Upload,
   XCircle,
 } from "lucide-react";
@@ -46,6 +49,7 @@ import { formatMoney } from "@/lib/money";
 import CsvImportDialog from "@/components/import/CsvImportDialog";
 import {
   downloadImportTemplate,
+  useCutoverReadinessQuery,
   useImportMutations,
   useOpeningCutoverStatusQuery,
 } from "@/hooks/queries/useImportsQueries";
@@ -123,6 +127,11 @@ export default function DataImports() {
   const ccy = settings.currency || "EGP";
 
   const { data: status } = useOpeningCutoverStatusQuery();
+  const {
+    data: readiness,
+    isFetching: readinessFetching,
+    refetch: refetchReadiness,
+  } = useCutoverReadinessQuery();
   const { runOpeningBalancesImport, reverseOpeningBalances } = useImportMutations();
 
   const [activeDialogKind, setActiveDialogKind] = useState<StandardImportKind | null>(null);
@@ -259,6 +268,96 @@ export default function DataImports() {
                   )}
           </AlertDescription>
         </Alert>
+      )}
+
+      {/* Read-Only Cutover Readiness Gate */}
+      {readiness && (
+        <Card data-testid="cutover-readiness-card">
+          <CardHeader className="pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <ShieldCheck className="h-5 w-5 text-primary" />
+                  {t("imports.readiness.title", "Cutover Readiness Check")}
+                  <Badge
+                    variant={readiness.ready ? "secondary" : "destructive"}
+                    className={
+                      readiness.ready
+                        ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                        : undefined
+                    }
+                    data-testid="cutover-readiness-badge"
+                  >
+                    {readiness.ready
+                      ? t("imports.readiness.ready", "PASS — Ready")
+                      : t("imports.readiness.notReady", "FAIL — Action Required")}
+                  </Badge>
+                </CardTitle>
+                <CardDescription>
+                  {t(
+                    "imports.readiness.description",
+                    "Read-only verification across all 8 reconciliation controls, accounting setup health, and the audit-log hash chain."
+                  )}
+                </CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={readinessFetching}
+                onClick={() => void refetchReadiness()}
+                data-testid="cutover-readiness-refresh"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 me-1.5 ${readinessFetching ? "animate-spin" : ""}`} />
+                {t("common.refresh", "Refresh")}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-lg border p-3 space-y-1" data-testid="readiness-check-reconciliation">
+                <div className="flex items-center justify-between gap-2">
+                  <Link to="/accounting/reconciliation" className="text-sm font-medium hover:underline">
+                    {t("imports.readiness.reconciliation", "Subledger Reconciliation")}
+                  </Link>
+                  <Badge variant={readiness.checks.reconciliation.passed ? "secondary" : "destructive"}>
+                    {readiness.checks.reconciliation.passed
+                      ? t("accounting.reconciliation.pass", "Pass")
+                      : t("accounting.reconciliation.fail", "Fail")}
+                  </Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">{readiness.checks.reconciliation.summary}</p>
+              </div>
+
+              <div className="rounded-lg border p-3 space-y-1" data-testid="readiness-check-setupHealth">
+                <div className="flex items-center justify-between gap-2">
+                  <Link to="/accounting/setup-health" className="text-sm font-medium hover:underline">
+                    {t("imports.readiness.setupHealth", "Accounting Setup Health")}
+                  </Link>
+                  <Badge variant={readiness.checks.setupHealth.passed ? "secondary" : "destructive"}>
+                    {readiness.checks.setupHealth.passed
+                      ? t("accounting.reconciliation.pass", "Pass")
+                      : t("accounting.reconciliation.fail", "Fail")}
+                  </Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">{readiness.checks.setupHealth.summary}</p>
+              </div>
+
+              <div className="rounded-lg border p-3 space-y-1" data-testid="readiness-check-auditChain">
+                <div className="flex items-center justify-between gap-2">
+                  <Link to="/audit-log" className="text-sm font-medium hover:underline">
+                    {t("imports.readiness.auditChain", "Audit Hash Chain")}
+                  </Link>
+                  <Badge variant={readiness.checks.auditChain.passed ? "secondary" : "destructive"}>
+                    {readiness.checks.auditChain.passed
+                      ? t("accounting.reconciliation.pass", "Pass")
+                      : t("accounting.reconciliation.fail", "Fail")}
+                  </Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">{readiness.checks.auditChain.summary}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Steps 1-7: Master Data & Staged Opening Subledgers */}

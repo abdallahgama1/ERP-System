@@ -96,18 +96,59 @@ describe("DataImports Admin UI & Opening Document Report Exclusions", () => {
           },
         });
       }
+      if (url === "/api/imports/cutover-readiness") {
+        return Promise.resolve({
+          ready: true,
+          status: "PASS",
+          checkedAt: "2026-01-01T00:00:00.000Z",
+          checks: {
+            reconciliation: {
+              passed: true,
+              totalControls: 8,
+              passedControls: 8,
+              failingKeys: [],
+              summary: "All 8 subledger-to-GL controls reconciled",
+            },
+            setupHealth: {
+              passed: true,
+              totalMappings: 28,
+              validMappings: 28,
+              issueCount: 0,
+              summary: "All 28 required GL mappings healthy",
+            },
+            auditChain: {
+              passed: true,
+              totalChainedRows: 12,
+              firstBrokenId: null,
+              summary: "Audit hash chain intact (12 chained rows)",
+            },
+          },
+          reconciliation: { asOfDate: "2026-01-01", allReconciled: true, items: [] },
+          setupHealth: { healthy: true, totalMappings: 28, validMappings: 28, issues: [] },
+        });
+      }
       return Promise.resolve({});
     });
 
     const { unmount } = renderWithShell(<DataImports />);
 
     await waitFor(() => {
+      expect(screen.getByTestId("cutover-readiness-card")).toBeInTheDocument();
+      expect(screen.getByTestId("cutover-readiness-badge")).toHaveTextContent(/PASS/i);
       expect(screen.getByTestId("import-card-chart_of_accounts")).toBeInTheDocument();
       expect(screen.getByTestId("import-card-opening_fixed_assets")).toBeInTheDocument();
       expect(screen.getByTestId("import-card-opening_treasury")).toBeInTheDocument();
       expect(screen.getByTestId("opening-balances-card")).toBeInTheDocument();
       expect(screen.getByTestId("reverse-opening-btn")).toBeInTheDocument();
     });
+
+    // Open Customers import dialog and verify default create-only + explicit updateExisting toggle
+    fireEvent.click(screen.getByTestId("open-import-customers"));
+    const updateToggle = await screen.findByTestId("csv-update-existing-customers");
+    expect(updateToggle).toHaveAttribute("data-state", "unchecked");
+    fireEvent.click(updateToggle);
+    expect(updateToggle).toHaveAttribute("data-state", "checked");
+    fireEvent.keyDown(document, { key: "Escape" });
 
     fireEvent.click(screen.getByTestId("reverse-opening-btn"));
     expect(await screen.findByTestId("reverse-opening-reason")).toBeInTheDocument();
@@ -121,6 +162,74 @@ describe("DataImports Admin UI & Opening Document Report Exclusions", () => {
       expect(
         screen.getByRole("heading", { level: 1, name: /استيراد البيانات والانتقال التشغيلي/ })
       ).toBeInTheDocument();
+    });
+  });
+
+  it("1b. displays FAIL state on Cutover Readiness card when any control is not clean", async () => {
+    const admin = buildAdmin();
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "/api/auth/me") return Promise.resolve({ user: admin });
+      if (url === "/api/branches") return Promise.resolve({ branches: [{ id: "b1", code: "HQ", name: "Main HQ", isDefault: true }] });
+      if (url === "/api/settings/company") return Promise.resolve({ settings: { currency: "EGP" } });
+      if (url === "/api/settings/preferences") return Promise.resolve({ preferences: {} });
+      if (url === "/api/imports/opening-balances/status") {
+        return Promise.resolve({
+          hasOpeningJournal: false,
+          openingJournalEntryId: null,
+          openingJournalEntryNumber: null,
+          cutoverDate: null,
+          hasNonOpeningJournals: false,
+          canImportOpening: true,
+          canReverseOpening: false,
+          blockedReason: null,
+          counts: {
+            openingArInvoices: 0,
+            openingApBills: 0,
+            openingFixedAssets: 0,
+            openingTreasuryAccounts: 0,
+            openingStockMovements: 0,
+          },
+        });
+      }
+      if (url === "/api/imports/cutover-readiness") {
+        return Promise.resolve({
+          ready: false,
+          status: "FAIL",
+          checkedAt: "2026-01-01T00:00:00.000Z",
+          checks: {
+            reconciliation: {
+              passed: false,
+              totalControls: 8,
+              passedControls: 7,
+              failingKeys: ["ar"],
+              summary: "1 of 8 control(s) out of balance: ar",
+            },
+            setupHealth: {
+              passed: true,
+              totalMappings: 28,
+              validMappings: 28,
+              issueCount: 0,
+              summary: "All 28 required GL mappings healthy",
+            },
+            auditChain: {
+              passed: false,
+              totalChainedRows: 10,
+              firstBrokenId: "audit-row-4",
+              summary: "Audit hash chain broken at audit-row-4",
+            },
+          },
+          reconciliation: { asOfDate: "2026-01-01", allReconciled: false, items: [] },
+          setupHealth: { healthy: true, totalMappings: 28, validMappings: 28, issues: [] },
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    renderWithShell(<DataImports />);
+    await waitFor(() => {
+      expect(screen.getByTestId("cutover-readiness-badge")).toHaveTextContent(/FAIL/i);
+      expect(screen.getByText(/1 of 8 control\(s\) out of balance: ar/i)).toBeInTheDocument();
+      expect(screen.getByText(/Audit hash chain broken at audit-row-4/i)).toBeInTheDocument();
     });
   });
 
