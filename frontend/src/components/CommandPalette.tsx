@@ -24,6 +24,7 @@ import {
   Store,
   Target,
   Truck,
+  Upload,
   Users,
 } from "lucide-react";
 import type { AppRole, GlobalSearchResultItemDto, PermissionModule, SearchEntityType } from "@erp/shared";
@@ -84,6 +85,7 @@ const QUICK_NAV_ITEMS: readonly QuickNavItem[] = [
   { id: "expenses", labelKey: "nav.expenses", fallbackLabel: "Operating Expenses", route: "/expenses", keywords: "petty cash reimbursement expense claim", module: "expenses", icon: Receipt },
   { id: "approvals", labelKey: "nav.admin.approvals", fallbackLabel: "Approvals", route: "/approvals", keywords: "workflow approve", module: "approvals", icon: FileCheck },
   { id: "einvoicing", labelKey: "nav.admin.einvoicing", fallbackLabel: "E-Invoice Queue", route: "/admin/einvoicing", keywords: "eta zatca", module: "einvoicing", icon: FileText },
+  { id: "data-imports", labelKey: "nav.admin.imports", fallbackLabel: "Data Import & Cutover", route: "/admin/imports", keywords: "csv import migration cutover opening balances", roles: ["admin"], icon: Upload },
   { id: "audit-log", labelKey: "nav.admin.auditLog", fallbackLabel: "Audit Log", route: "/audit-log", keywords: "history diff", module: "audit", icon: History },
   { id: "roles", labelKey: "nav.admin.roles", fallbackLabel: "Roles & Permissions", route: "/roles", keywords: "rbac permissions", module: "roles", icon: Shield },
   { id: "users", labelKey: "nav.users", fallbackLabel: "Users", route: "/users", keywords: "staff accounts", module: "users", icon: Users },

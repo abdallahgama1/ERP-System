@@ -27,29 +27,22 @@ import { exportJsonToExcel } from "@/lib/export/excel";
 import { Product } from "@/types";
 import { useToast } from "@/hooks/use-toast";
 import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
-import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import ProductLedgerDialog from "@/components/inventory/ProductLedgerDialog";
-import type { ImportColumn } from "@/components/import/BulkImportDialog";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { TaxonomySelect } from "@/components/taxonomy/TaxonomySelect";
-import { useTaxonomyQuery } from "@/hooks/queries/useTaxonomyQueries";
 import { EnterpriseDataTable, type EnterpriseColumn } from "@/components/EnterpriseDataTable";
 import { AttachmentsPanel } from "@/components/AttachmentsPanel";
 
-const BulkImportDialog = lazy(() => import("@/components/import/BulkImportDialog"));
+const CsvImportDialog = lazy(() => import("@/components/import/CsvImportDialog"));
 
 const Products = () => {
   const { t } = useTranslation();
   const { settings } = useSettings();
   const { can } = usePermissions();
   const { products, addProduct, updateProduct, deleteProduct, getAvailableQuantity, getAssignedQuantity, branchProducts, branches } = useInventoryScope({ products: true });
-  const { record } = useAuditRecorder();
-  const { data: taxonomyData } = useTaxonomyQuery();
-  const brands = taxonomyData?.brands ?? [];
-  const categories = taxonomyData?.categories ?? [];
   const [searchTerm, setSearchTerm] = useState("");
   const [page, setPage] = useState(1);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -295,80 +288,6 @@ const Products = () => {
     if (available <= 10) return { label: t('products.lowAvailable'), variant: "destructive" as const };
     if (available <= 25) return { label: t('products.mediumStock'), variant: "secondary" as const };
     return { label: t('products.inStock'), variant: "default" as const };
-  };
-
-  // Product import columns configuration
-  const productImportColumns: ImportColumn[] = [
-    { key: "sku", label: "SKU", required: true },
-    { key: "name", label: "Name", required: true },
-    { key: "category", label: "Category", required: true },
-    { key: "brand", label: "Brand", required: true },
-    { key: "cost_price", label: "Cost Price", required: true },
-    { key: "selling_price", label: "Selling Price", required: true },
-    { key: "quantity", label: "Quantity", required: true },
-  ];
-
-  const handleProductImport = async (data: Record<string, unknown>[]) => {
-    // Validate brand / category against the managed taxonomy lists.
-    const knownBrands = new Set(brands.map(b => b.name.trim().toLowerCase()));
-    const knownCategories = new Set(categories.map(c => c.name.trim().toLowerCase()));
-    const unknown: string[] = [];
-    for (const row of data) {
-      const b = String(row.brand || '').trim();
-      const c = String(row.category || '').trim();
-      if (b && !knownBrands.has(b.toLowerCase())) unknown.push(b);
-      if (c && !knownCategories.has(c.toLowerCase())) unknown.push(c);
-    }
-    if (unknown.length > 0) {
-      toast({
-        title: t('products.unknownTaxonomy', 'Unknown brand or category'),
-        description: t('products.unknownTaxonomyDescription', {
-          defaultValue: 'Create these in Brands / Categories first: {{values}}',
-          values: [...new Set(unknown)].slice(0, 5).join(', '),
-        }),
-        variant: 'destructive',
-      });
-      throw new Error('unknown_taxonomy');
-    }
-
-    // Duplicate-SKU guard: check within the file AND against existing products.
-    const existingSkus = new Set(products.map(p => p.product_sku.trim().toLowerCase()));
-      const seen = new Set<string>();
-      const dupes: string[] = [];
-      for (const row of data) {
-        const sku = String(row.sku || '').trim().toLowerCase();
-        if (!sku) continue;
-        if (existingSkus.has(sku) || seen.has(sku)) {
-          dupes.push(sku);
-        }
-        seen.add(sku);
-      }
-      if (dupes.length > 0) {
-        toast({
-          title: t('products.duplicateSku', 'Duplicate SKU'),
-          description: t('products.duplicateSkuImport', {
-            defaultValue: 'Duplicate SKUs detected: {{skus}}',
-            skus: [...new Set(dupes)].slice(0, 5).join(', '),
-          }),
-          variant: 'destructive',
-        });
-        throw new Error('duplicate_sku');
-      }
-
-    let importedCount = 0;
-    for (const row of data) {
-      const res = await addProduct({
-        product_name: String(row.name || ""),
-        product_sku: String(row.sku || ""),
-        category: String(row.category || ""),
-        brand: String(row.brand || ""),
-        costPrice: Math.max(0, Number(row.cost_price) || 0),
-        sellingPrice: Math.max(0, Number(row.selling_price) || 0),
-        quantity: Math.max(0, Number(row.quantity) || 0),
-      });
-      if (res.ok) importedCount += 1;
-    }
-    record('inventory', `Bulk imported ${importedCount} products`, { entity: 'product' });
   };
 
   const handleExportProducts = async () => {
@@ -952,17 +871,15 @@ const Products = () => {
         />
       )}
 
-      {/* Bulk Import Dialog */}
+      {/* Unified Server CSV Import Dialog */}
       {isImportDialogOpen && (
         <Suspense fallback={null}>
-          <BulkImportDialog
+          <CsvImportDialog
             open={isImportDialogOpen}
             onOpenChange={setIsImportDialogOpen}
+            kind="products"
             title={t('bulkImport.importProducts')}
-            description={t('bulkImport.productsDescription')}
-            columns={productImportColumns}
-            templateFileName="products_import_template.xlsx"
-            onConfirmImport={handleProductImport}
+            description={t('imports.datasets.productsDesc', 'Import product catalog including barcodes, Arabic names, UOM, and ETA GS1/EGS fields.')}
           />
         </Suspense>
       )}

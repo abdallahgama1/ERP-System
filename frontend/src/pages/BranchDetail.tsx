@@ -41,7 +41,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import MovementHistoryTable from "@/components/inventory/MovementHistoryTable";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 
-const BulkImportDialog = lazy(() => import("@/components/import/BulkImportDialog"));
+const CsvImportDialog = lazy(() => import("@/components/import/CsvImportDialog"));
 
 const BranchDetail = () => {
   const { branchId } = useParams<{ branchId: string }>();
@@ -612,35 +612,15 @@ const BranchDetail = () => {
         </TabsContent>
       </Tabs>
 
-      {/* Bulk Import Dialog */}
+      {/* Unified Server CSV Import Dialog (Opening Stock per Branch) */}
       {isImportDialogOpen && (
         <Suspense fallback={null}>
-          <BulkImportDialog
+          <CsvImportDialog
             open={isImportDialogOpen}
             onOpenChange={setIsImportDialogOpen}
-            title={t('bulkImport.importBranchAssignment')}
-            description={t('bulkImport.branchAssignmentDescription')}
-            columns={[
-              { key: "sku", label: "SKU", required: true },
-              { key: "branch_name", label: "Branch Name", required: true },
-              { key: "quantity", label: "Quantity", required: true },
-            ]}
-            templateFileName="branch_assignment_import_template.xlsx"
-            onConfirmImport={async (data) => {
-              for (const row of data) {
-                const product = products.find(p => p.product_sku === String(row.sku));
-                const branch = branches.find(b => b.branch_name === String(row.branch_name));
-                if (product && branch) {
-                  await assignToBranch(
-                    product.productId,
-                    branch.branchId,
-                    Number(row.quantity) || 0,
-                    product.sellingPrice,
-                    product.costPrice
-                  );
-                }
-              }
-            }}
+            kind="opening_stock"
+            title={t('imports.datasets.openingStock', 'Opening Stock per Branch')}
+            description={t('imports.datasets.openingStockDesc', 'Load physical opening stock quantities and unit costs per branch (reconciled to GL 1200).')}
           />
         </Suspense>
       )}

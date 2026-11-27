@@ -43,7 +43,8 @@ import {
   Factory,
   Landmark,
   Target,
-  MonitorSmartphone
+  MonitorSmartphone,
+  Upload
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import type { AppRole } from "@erp/shared";
@@ -141,9 +142,10 @@ const taxonomyItems = [
   { titleKey: "nav.taxonomy.units", url: "/units-of-measure", icon: Ruler },
 ];
 
-const adminItems: Array<{ titleKey: string; url: string; icon: typeof Shield; module?: PermissionModule }> = [
+const adminItems: Array<{ titleKey: string; url: string; icon: typeof Shield; module?: PermissionModule; roles?: AppRole[] }> = [
   { titleKey: "nav.admin.approvals", url: "/approvals", icon: ClipboardCheck, module: "approvals" },
   { titleKey: "nav.admin.einvoicing", url: "/admin/einvoicing", icon: Receipt, module: "einvoicing" },
+  { titleKey: "nav.admin.imports", url: "/admin/imports", icon: Upload, roles: ["admin"] },
   { titleKey: "nav.admin.auditLog", url: "/audit-log", icon: History, module: "audit" },
   { titleKey: "nav.admin.roles", url: "/roles", icon: Shield, module: "roles" },
   { titleKey: "nav.admin.notifications", url: "/notifications", icon: Bell },
@@ -208,7 +210,9 @@ export function AppSidebar() {
   const isAccountingActive = visibleAccountingItems.some(item => currentPath.startsWith(item.url));
   const isReportsActive = reportsItems.some(item => currentPath.startsWith(item.url));
   const isTaxonomyActive = taxonomyItems.some(item => currentPath.startsWith(item.url));
-  const visibleAdminItems = adminItems.filter((item) => !item.module || can(item.module, "view"));
+  const visibleAdminItems = adminItems.filter(
+    (item) => (!item.module || can(item.module, "view")) && (!item.roles || item.roles.includes(role))
+  );
   const isAdminActive = visibleAdminItems.some(item => currentPath.startsWith(item.url));
 
   const renderGroup = (

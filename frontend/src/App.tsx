@@ -54,6 +54,7 @@ const ARAging = lazy(() => import("./pages/reports/ARAging"));
 const AuditLog = lazy(() => import("./pages/admin/AuditLog"));
 const Approvals = lazy(() => import("./pages/admin/Approvals"));
 const EInvoiceQueue = lazy(() => import("./pages/admin/EInvoiceQueue"));
+const DataImports = lazy(() => import("./pages/admin/DataImports"));
 const Roles = lazy(() => import("./pages/admin/Roles"));
 const Notifications = lazy(() => import("./pages/admin/Notifications"));
 const Help = lazy(() => import("./pages/admin/Help"));
@@ -146,6 +147,14 @@ const BackOfficeWorkspace = () => (
         <Route path="/approvals" element={guard("approvals", <Approvals />)} />
         <Route path="/admin/einvoicing" element={guard("einvoicing", <EInvoiceQueue />)} />
         <Route path="/einvoicing" element={guard("einvoicing", <EInvoiceQueue />)} />
+        <Route
+          path="/admin/imports"
+          element={
+            <RequirePermission roles={["admin"]} mode="page">
+              <DataImports />
+            </RequirePermission>
+          }
+        />
         <Route path="/roles" element={guard("roles", <Roles />)} />
         <Route path="/notifications" element={<Notifications />} />
         <Route path="/help" element={<Help />} />
