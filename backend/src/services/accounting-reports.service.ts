@@ -524,6 +524,7 @@ export async function getVatReturnSummary(
     eq(salesInvoices.companyId, companyId),
     ne(salesInvoices.status, "Cancelled"),
     ne(salesInvoices.status, "Draft"),
+    ne(salesInvoices.source, "opening_balance"),
   ];
   if (filter.branchId) invConds.push(eq(salesInvoices.branchId, filter.branchId));
   if (fromDt) invConds.push(gte(salesInvoices.invoiceDate, fromDt));
@@ -545,6 +546,7 @@ export async function getVatReturnSummary(
   const billConds: SQL[] = [
     eq(vendorBills.companyId, companyId),
     ne(vendorBills.status, "Cancelled"),
+    ne(vendorBills.source, "opening_balance"),
   ];
   if (filter.branchId) billConds.push(eq(vendorBills.branchId, filter.branchId));
   if (fromDt) billConds.push(gte(vendorBills.billDate, fromDt));
@@ -715,6 +717,46 @@ export async function getVatReturnSummary(
   const glOutputVatBalance = outGlRow ? roundCurrency(outGlRow.credit - outGlRow.debit, 4) : 0;
   const glInputVatBalance = inGlRow ? roundCurrency(inGlRow.debit - inGlRow.credit, 4) : 0;
 
+  // Query opening-balance VAT carryover (from cutover opening journal & any reversal) separately
+  // so opening VAT reconciles to GL 2300/1300 without polluting current-period sales/purchase VAT buckets.
+  const openingVatConds: SQL[] = [
+    eq(journalEntries.companyId, companyId),
+    eq(journalEntries.status, "posted"),
+    inArray(journalEntries.sourceType, ["opening_balance", "opening_balance_reversal"]),
+    inArray(journalLines.accountId, [glMap.output_vat, glMap.input_vat].filter(Boolean)),
+  ];
+  if (filter.branchId) openingVatConds.push(eq(journalEntries.branchId, filter.branchId));
+  if (fromDt) openingVatConds.push(gte(journalEntries.entryDate, fromDt));
+  if (toDt) openingVatConds.push(lte(journalEntries.entryDate, toDt));
+
+  const openingVatRows =
+    glMap.output_vat || glMap.input_vat
+      ? await db
+          .select({
+            accountId: journalLines.accountId,
+            debit: sql<string>`coalesce(sum(${journalLines.debitBase}), 0)`,
+            credit: sql<string>`coalesce(sum(${journalLines.creditBase}), 0)`,
+          })
+          .from(journalLines)
+          .innerJoin(journalEntries, eq(journalLines.entryId, journalEntries.id))
+          .where(and(...openingVatConds))
+          .groupBy(journalLines.accountId)
+      : [];
+
+  const openOutRow = openingVatRows.find((r) => r.accountId === glMap.output_vat);
+  const openInRow = openingVatRows.find((r) => r.accountId === glMap.input_vat);
+  const openingOutputVatCarryover = openOutRow
+    ? roundCurrency(num(openOutRow.credit) - num(openOutRow.debit), 4)
+    : 0;
+  const openingInputVatCarryover = openInRow
+    ? roundCurrency(num(openInRow.debit) - num(openInRow.credit), 4)
+    : 0;
+
+  const openingVatReconciliationNote =
+    openingOutputVatCarryover !== 0 || openingInputVatCarryover !== 0
+      ? `Opening cutover VAT carryover (Output: ${openingOutputVatCarryover.toFixed(2)}, Input: ${openingInputVatCarryover.toFixed(2)}) is excluded from current-period VAT return document buckets and reconciled separately against GL 2300/1300.`
+      : undefined;
+
   return {
     fromDate: filter.fromDate ?? null,
     toDate: filter.toDate ?? null,
@@ -728,6 +770,9 @@ export async function getVatReturnSummary(
     glOutputVatBalance,
     glInputVatBalance,
     glNetVatPayable: roundCurrency(glOutputVatBalance - glInputVatBalance, 4),
+    openingOutputVatCarryover,
+    openingInputVatCarryover,
+    ...(openingVatReconciliationNote ? { openingVatReconciliationNote } : {}),
   };
 }
 
@@ -1095,12 +1140,39 @@ export async function getSubledgerReconciliation(
     };
   };
 
+  const outputVatSubledgerTotal = roundCurrency(
+    vat.totalOutputVat + (vat.openingOutputVatCarryover ?? 0),
+    4
+  );
+  const inputVatSubledgerTotal = roundCurrency(
+    vat.totalInputVat + (vat.openingInputVatCarryover ?? 0),
+    4
+  );
+
   const items: SubledgerReconciliationItemDto[] = [
     makeItem("accounts_receivable", "Accounts Receivable vs Customer Balances", arMeta, arSubledger, arGl),
     makeItem("accounts_payable", "Accounts Payable vs Vendor Balances", apMeta, apSubledger, apGl),
     makeItem("inventory_asset", "Inventory Valuation vs Inventory Control", invMeta, invSubledger, invGl),
-    makeItem("output_vat", "Output VAT Subledger vs Output VAT Payable", outVatMeta, vat.totalOutputVat, vat.glOutputVatBalance),
-    makeItem("input_vat", "Input VAT Subledger vs Input VAT Recoverable", inVatMeta, vat.totalInputVat, vat.glInputVatBalance),
+    makeItem(
+      "output_vat",
+      "Output VAT Subledger vs Output VAT Payable",
+      outVatMeta,
+      outputVatSubledgerTotal,
+      vat.glOutputVatBalance,
+      (vat.openingOutputVatCarryover ?? 0) !== 0
+        ? `Includes ${(vat.openingOutputVatCarryover ?? 0).toFixed(2)} opening cutover VAT carryover (excluded from current-period VAT return sales buckets).`
+        : undefined
+    ),
+    makeItem(
+      "input_vat",
+      "Input VAT Subledger vs Input VAT Recoverable",
+      inVatMeta,
+      inputVatSubledgerTotal,
+      vat.glInputVatBalance,
+      (vat.openingInputVatCarryover ?? 0) !== 0
+        ? `Includes ${(vat.openingInputVatCarryover ?? 0).toFixed(2)} opening cutover VAT carryover (excluded from current-period VAT return purchase buckets).`
+        : undefined
+    ),
     makeItem("fixed_assets_cost", "Fixed Assets Register Cost vs Asset Control", faCostMeta, faCostSubledger, faCostGl),
     makeItem(
       "accumulated_depreciation",

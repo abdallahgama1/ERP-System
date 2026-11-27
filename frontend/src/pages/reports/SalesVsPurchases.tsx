@@ -29,8 +29,12 @@ export default function SalesVsPurchases() {
       r[k] += v;
       m.set(key, r);
     };
-    invoices.filter((i) => i.status !== "Draft" && i.status !== "Cancelled").forEach((i) => add(i.invoiceDate, "sales", i.subtotal));
-    bills.filter((b) => b.status !== "Draft" && b.status !== "Cancelled").forEach((b) => add(b.billDate, "purchases", b.subtotal));
+    invoices
+      .filter((i) => i.status !== "Draft" && i.status !== "Cancelled" && i.source !== "opening_balance")
+      .forEach((i) => add(i.invoiceDate, "sales", i.subtotal));
+    bills
+      .filter((b) => b.status !== "Draft" && b.status !== "Cancelled" && b.source !== "opening_balance")
+      .forEach((b) => add(b.billDate, "purchases", b.subtotal));
     return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([month, r]) => {
       const margin = r.sales - r.purchases;
       return { month, ...r, margin, marginPct: r.sales ? (margin / r.sales) * 100 : 0 };

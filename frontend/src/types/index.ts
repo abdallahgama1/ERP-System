@@ -174,6 +174,7 @@ export interface Invoice {
   invoiceDate: string;
   dueDate: string;
   status: InvoiceStatus;
+  source?: "standard" | "opening_balance";
   items: InvoiceItem[];
   subtotal: number;
   totalTax: number;
@@ -509,6 +510,7 @@ export interface VendorBill {
   billDate: string;
   dueDate: string;
   status: BillStatus;
+  source?: "standard" | "opening_balance";
   matchStatus: BillMatchStatus;
   matchNotes: string[];
   items: VendorBillItem[];

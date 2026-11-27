@@ -184,6 +184,7 @@ export function usePurchasingScope(options: PurchasingScopeOptions = {}) {
         billDate: b.billDate.slice(0, 10),
         dueDate: b.dueDate.slice(0, 10),
         status: b.status,
+        source: b.source ?? "standard",
         matchStatus,
         matchNotes,
         items,

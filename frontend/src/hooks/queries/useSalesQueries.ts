@@ -70,6 +70,7 @@ export interface ApiInvoice {
   branchId: string;
   soId: string | null;
   status: InvoiceStatus;
+  source?: "standard" | "opening_balance";
   invoiceDate: string;
   dueDate: string;
   subtotal: number;

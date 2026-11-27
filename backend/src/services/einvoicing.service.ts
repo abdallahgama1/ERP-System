@@ -564,7 +564,7 @@ export async function applyInvoiceEInvoiceMetadata(
         : eq(salesInvoices.id, invoiceId)
     )
     .limit(1);
-  if (!inv) {
+  if (!inv || inv.source === "opening_balance") {
     return {
       eInvoiceStatus: "not_applicable",
       icv: null,

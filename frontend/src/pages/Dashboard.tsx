@@ -68,9 +68,11 @@ const Dashboard = () => {
     const invoices = cachedInvoices?.invoices ?? [];
     const bills = cachedBills?.bills ?? [];
     const open = invoices.filter((i) => i.status !== "Draft" && i.status !== "Cancelled");
-    const revenue = open.reduce((s, i) => s + i.subtotal, 0);
+    const revenue = open
+      .filter((i) => i.source !== "opening_balance")
+      .reduce((s, i) => s + i.subtotal, 0);
     const purchases = bills
-      .filter((b) => b.status !== "Draft" && b.status !== "Cancelled")
+      .filter((b) => b.status !== "Draft" && b.status !== "Cancelled" && b.source !== "opening_balance")
       .reduce((s, b) => s + b.subtotal, 0);
     const receivables = open.reduce(
       (s, i) => s + Math.max(0, i.totalAmount - (i.paidAmount + i.creditAppliedAmount + i.retainerAppliedAmount)),

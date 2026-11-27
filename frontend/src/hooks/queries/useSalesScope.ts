@@ -197,6 +197,7 @@ export function useSalesScope(options: SalesScopeOptions = {}) {
       invoiceDate: inv.invoiceDate.slice(0, 10),
       dueDate: inv.dueDate.slice(0, 10),
       status: inv.status,
+      source: inv.source ?? "standard",
       subtotal: inv.subtotal,
       totalTax: inv.taxTotal,
       grandTotal: inv.totalAmount,

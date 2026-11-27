@@ -86,6 +86,7 @@ export interface ApiBill {
   poId: string | null;
   receiveId: string | null;
   status: BillStatus;
+  source?: "standard" | "opening_balance";
   billDate: string;
   dueDate: string;
   subtotal: number;
