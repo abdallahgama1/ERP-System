@@ -6,6 +6,8 @@ This document is the single consolidated operations reference for running **Coun
 - [BACKUP_RESTORE_AND_ROLLBACK.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/BACKUP_RESTORE_AND_ROLLBACK.md) — Step-by-step `pg_dump`/`pg_restore`, `erp_uploads` archive recovery, and rollback runbook.
 - [SETUP_AND_OPERATIONS_GUIDE.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/SETUP_AND_OPERATIONS_GUIDE.md) — Local development, test runners, and module walkthroughs.
 - [ACCOUNTANT_REVIEW.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/ACCOUNTANT_REVIEW.md) — General Ledger auto-posting rules, subledger-to-GL reconciliation, COA mapping health, and fiscal year close/reopen.
+- [GO_LIVE.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/GO_LIVE.md) — Go-live cutover plan, CSV import order, re-import semantics, and rollback runbook.
+- [UAT_SCRIPT.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/UAT_SCRIPT.md) — Step-by-step full-day user acceptance testing script in EGP for pre-go-live rehearsal.
 
 ---
 
@@ -19,6 +21,7 @@ This document is the single consolidated operations reference for running **Coun
 | `GET /api/audit-logs/verify` | Tamper-evidence check | Admin-only; verifies SHA-256 hash chain across `audit_logs` | `200 OK` `{ "valid": true, ... }` | Security audits & post-restore drills |
 | `GET /api/accounting/setup-health` | GL mapping health | Admin-only; verifies all 28 `DEFAULT_COA` control mappings exist, are active, and have valid `account_type` | `200 OK` `{ "healthy": true, "issues": [] }` | Post-upgrade / onboarding checks |
 | `GET /api/accounting/reports/reconciliation` | Subledger-to-GL reconciliation | Admin-only; checks AR, AP, Inventory, Output VAT, Input VAT, Fixed Assets, and Treasury vs GL | `200 OK` `{ "allReconciled": true, ... }` | Period-end close & CI (`npm run demo:ledger`) |
+| `GET /api/imports/cutover-readiness` | Cutover readiness gate | Admin-only, read-only; verifies all 8 reconciliation controls, accounting setup health, and audit-log hash chain | `200 OK` `{ "ready": true, "status": "PASS", ... }` | Go-live cutover checklist & `/admin/imports` |
 
 All HTTP requests receive a sanitized `x-request-id` correlation header echoed in responses and Pino JSON logs. Sensitive fields (`password`, `token`, `pin`, `mfaEncryptionKey`, `smtpPass`, `s3SecretAccessKey`, connection strings) are scrubbed automatically ([logger.ts](file:///c:/Users/mohamed/Desktop/count-it-keep-it/backend/src/logging/logger.ts)).
 
@@ -124,6 +127,8 @@ TOTP secrets in `user_mfa` are encrypted with AES-256-GCM and tagged with `key_v
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_FORCE_PATH_STYLE` | `""` / `""` / `false` | If `STORAGE_DRIVER=s3` | S3 credentials and path-style toggle (MinIO/R2) |
 | `ATTACHMENT_VIRUS_SCAN_ENABLED` | `false` | No | Enables ClamAV `zINSTREAM` scanning on uploads |
 | `ATTACHMENT_VIRUS_SCAN_CLAMAV_HOST` / `PORT` / `TIMEOUT_MS` / `FAIL_CLOSED` | `127.0.0.1` / `3310` / `10000` / `true` | If scan enabled | ClamAV daemon connection and fail-closed policy (`503` if unreachable) |
+| `CSV_IMPORT_MAX_ROWS` | `10000` | No | Maximum data rows accepted per CSV import file (`400 CSV_ROW_LIMIT_EXCEEDED` above limit) |
+| `CSV_IMPORT_MAX_BYTES` | `5242880` (5 MiB) | No | Maximum UTF-8 byte size accepted per CSV import payload (`413 CSV_TOO_LARGE` above limit) |
 
 ### Observability, Email, ETA Egypt & Backups
 

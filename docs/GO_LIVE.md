@@ -42,7 +42,10 @@ This runbook governs migrating an existing single-company business from legacy a
 2. **Prepare Your Real CSV Files Outside Git:**
    - Download CSV templates from **Admin → Data Import & Cutover** (`/admin/imports`) or `GET /api/imports/templates/:kind`.
    - Place real company CSVs in a git-ignored directory such as `./cutover-data/` (already listed in `.gitignore` — **never commit real financial data**).
-   - CSV files support UTF-8 (with or without BOM), Arabic text, Arabic-Indic numerals (`٠-٩`), Excel thousands separators, and decimal commas. Max 5 MiB / 10,000 rows per file.
+   - CSV files support UTF-8 (with or without BOM), Arabic text, Arabic-Indic numerals (`٠-٩`), Excel thousands separators, and decimal commas. Default limits: **5 MiB** (`CSV_IMPORT_MAX_BYTES`) and **10,000 rows** (`CSV_IMPORT_MAX_ROWS`, configurable by environment variable).
+   - **Re-Import Behavior (COA, Customers, Vendors, Products):**
+     - **Default (`updateExisting = false`):** Any row matching an existing `code` or `sku` is **rejected** in dry-run and commit with an `"already exists"` error so accidental re-uploads never silently overwrite master data.
+     - **Explicit Update Mode (`updateExisting = true`):** Updates **only the columns present in the uploaded CSV headers** (omitted columns remain unchanged) and **never touches financial or stock balances** (`qtyOnHand`, `avgCost`, `paidAmount`, `accountType`, `normalBalance`, or journal lines).
    - Validate ETA Egypt requirements before cutover:
      - Customers: `eta_receiver_type` (`B`, `P`, or `F`); Business (`B`) requires 9-digit Tax Registration Number (RIN); Person (`P`) validates 14-digit National ID when supplied.
      - Vendors: 9-digit RIN or 14-digit National ID when supplied.
@@ -107,8 +110,8 @@ Do **not** open the system to operational users until every check below passes:
 3. **Physical Stock Spot-Check:** Spot-check branch stock counts in **Branches** and **Inventory Valuation** against signed physical count sheets.
 4. **AR / AP Aging Verification:** Open **Reports → AR Aging** (`/reports/ar-aging`) and confirm open customer balances match the legacy aging report by customer and due bucket, while **Sales vs Purchases** (`/reports/sales-vs-purchases`) and **VAT Return** sales/purchase buckets show `0.00` prior to new operational transactions.
 5. **E-Invoice Queue Clean:** Open **Administration → E-Invoice Queue** (`/admin/einvoicing`) and confirm **zero** opening AR documents appear in the queue.
-6. **Accounting Setup Health:** Open **Accounting → Setup Health** (`/accounting/setup-health`) and confirm **Healthy** (`0` issues).
-7. **Audit Log Hash Chain:** Verify `GET /api/audit-logs/verify` returns `valid: true`.
+6. **Cutover Readiness Gate (`GET /api/imports/cutover-readiness`):** Open **Admin → Data Import & Cutover** (`/admin/imports`) and confirm the read-only **Cutover Readiness Check** banner reports **PASS — Ready** (all 8 reconciliation controls passing, Accounting Setup Health clean, and Audit Log Hash Chain valid).
+7. **Run Staff UAT on Rehearsal DB:** Have finance and operations staff execute [UAT_SCRIPT.md](./UAT_SCRIPT.md) on a rehearsal database before enabling production user access.
 8. **Take Post-Cutover Golden Backup:** Capture a fresh `pg_dump` immediately after accountant sign-off and before enabling live user access.
 
 ---
@@ -116,13 +119,23 @@ Do **not** open the system to operational users until every check below passes:
 ## 5. Undo & Rollback Procedures
 
 ### Option A — Controlled Opening Reversal (Before Live Operations Begin)
-If a cutover mistake is found **before** any non-opening journal entry, payment allocation, or depreciation run has been posted:
-1. Open **Admin → Data Import & Cutover** (`/admin/imports`) and click **Reverse Opening Cutover** (or call `POST /api/imports/opening-balances/reverse` with an admin session and required `reason`).
-2. This atomically:
-   - Posts a balanced mirror reversing journal entry (`opening_balance_reversal`) dated at `cutoverDate`
-   - Removes all flagged opening AR invoices, AP bills, fixed assets, treasury accounts, and opening stock
-   - Writes `opening_balances.reversed` into the tamper-evident audit hash chain
-3. Fix the source CSVs and re-run Steps 5–8 cleanly.
+If a cutover mistake is found **before** any operational activity occurs, open **Admin → Data Import & Cutover** (`/admin/imports`) and click **Reverse Opening Cutover** (or call `POST /api/imports/opening-balances/reverse` with an admin session and required `reason`).
+
+> [!WARNING]
+> Reversal is **automatically refused (HTTP 409 `OPENING_REVERSAL_BLOCKED`)** with a complete list of blocking items if ANY of the following exist:
+> - Any opening AR invoice has payments, allocations, credit notes, retainer applications, sales returns, or POS returns
+> - Any opening AP bill has payments, allocations, or purchase returns
+> - Any opening stock item has subsequently moved (sales, purchases, transfers, adjustments, stock takes, work orders) or has reserved quantity
+> - Any opening fixed asset has depreciation or disposal entries
+> - Any opening treasury account has transfers, imported bank statements, reconciled statement lines, expense claims, or non-opening GL transactions
+> - Any non-opening journal entry exists in or after the cutover period
+
+When clean, reversal atomically:
+- Posts a balanced mirror reversing journal entry (`opening_balance_reversal`) dated at `cutoverDate`
+- Removes all flagged opening AR invoices, AP bills, fixed assets, treasury accounts, and opening stock
+- Writes `opening_balances.reversed` into the tamper-evident audit hash chain
+
+Fix the source CSVs and re-run Steps 5–8 cleanly.
 
 ### Option B — Full Database Rollback via Pre-Cutover Backup
 If live operational postings have already started or you need a complete revert to the pre-cutover state:
