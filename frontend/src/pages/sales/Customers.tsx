@@ -16,6 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { useSalesScope } from "@/hooks/queries/useSalesScope";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import type { Customer } from "@/types";
@@ -77,6 +79,7 @@ export default function Customers() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [form, setForm] = useState<FormData>(initialForm);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [duplicateTaxWarning, setDuplicateTaxWarning] = useState<string | null>(null);
 
   const { data: customersPage } = useCustomersPageQuery({
     page,
@@ -132,11 +135,11 @@ export default function Customers() {
       setForm(initialForm);
     }
     setErrors({});
+    setDuplicateTaxWarning(null);
     setOpen(true);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const saveCustomerAction = useIdempotentAction(async (confirmDuplicate: boolean = false) => {
     const result = customerSchema.safeParse(form);
     if (!result.success) {
       const next: Record<string, string> = {};
@@ -164,17 +167,29 @@ export default function Customers() {
       billingAddress: form.billingAddress,
       shippingAddress: form.shippingAddress,
       notes: form.notes,
+      confirmDuplicate,
     };
 
     const err = await (editing ? updateCustomer(editing.id, payload) : addCustomer(payload));
     if (err) {
+      if (err.startsWith("DUPLICATE_TAX_NUMBER_WARNING:")) {
+        setDuplicateTaxWarning(err.slice("DUPLICATE_TAX_NUMBER_WARNING:".length));
+        return { ok: false, status: 409 };
+      }
       toast({ variant: "destructive", title: t("common.error"), description: err });
-      return;
+      return { ok: false };
     }
+    setDuplicateTaxWarning(null);
     toast({ title: editing ? t("customers.customerUpdated") : t("customers.customerCreated") });
     setOpen(false);
     setEditing(null);
     setForm(initialForm);
+    return { ok: true };
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void saveCustomerAction.run(false);
   };
 
   const termsLabel = (terms: Customer["paymentTerms"]) =>
@@ -302,8 +317,8 @@ export default function Customers() {
         </Card>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <Dialog open={open} onOpenChange={saveCustomerAction.guardOpenChange((o) => { setOpen(o); if (!o) setDuplicateTaxWarning(null); })}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" locked={saveCustomerAction.isPending}>
           <DialogHeader>
             <DialogTitle>{editing ? t("customers.editCustomer") : t("customers.addNewCustomer")}</DialogTitle>
             <DialogDescription>{t("customers.formDescription")}</DialogDescription>
@@ -456,9 +471,39 @@ export default function Customers() {
               <Textarea id="notes" rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
             </div>
 
+            {duplicateTaxWarning && (
+              <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm space-y-2">
+                <p className="font-medium text-amber-900 dark:text-amber-200">{t("common.confirmDuplicateTaxTitle")}</p>
+                <p className="text-muted-foreground">{duplicateTaxWarning}</p>
+                <SubmitButton
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  pending={saveCustomerAction.isPending}
+                  isSlow={saveCustomerAction.isSlow}
+                  onClick={() => void saveCustomerAction.run(true)}
+                >
+                  {t("common.confirmDuplicateTaxAction")}
+                </SubmitButton>
+              </div>
+            )}
+
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
-              <Button type="submit">{editing ? t("common.save") : t("customers.addCustomer")}</Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={saveCustomerAction.isPending}
+                onClick={() => setOpen(false)}
+              >
+                {t("common.cancel")}
+              </Button>
+              <SubmitButton
+                type="submit"
+                pending={saveCustomerAction.isPending}
+                isSlow={saveCustomerAction.isSlow}
+              >
+                {editing ? t("common.save") : t("customers.addCustomer")}
+              </SubmitButton>
             </DialogFooter>
           </form>
         </DialogContent>

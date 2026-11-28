@@ -35,6 +35,8 @@ import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { TaxonomySelect } from "@/components/taxonomy/TaxonomySelect";
 import { EnterpriseDataTable, type EnterpriseColumn } from "@/components/EnterpriseDataTable";
 import { AttachmentsPanel } from "@/components/AttachmentsPanel";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 
 const CsvImportDialog = lazy(() => import("@/components/import/CsvImportDialog"));
 
@@ -169,9 +171,7 @@ const Products = () => {
     setEditingProduct(null);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    
+  const saveProductAction = useIdempotentAction(async () => {
     // Duplicate SKU guard (case-insensitive)
     const normalizedSku = formData.product_sku.trim().toLowerCase();
     if (!normalizedSku) {
@@ -220,21 +220,24 @@ const Products = () => {
       const res = await updateProduct(editingProduct.productId, formData);
       if (res.ok === false) {
         toast({ title: t('common.error'), description: res.error, variant: "destructive" });
-        return;
+        return res;
       }
       toast({ title: t('products.productUpdated') });
     } else {
       const res = await addProduct(formData);
       if (res.ok === false) {
         toast({ title: t('common.error'), description: res.error, variant: "destructive" });
-        return;
+        return res;
       }
       toast({ title: t('products.productAdded') });
     }
     
     resetForm();
     setIsAddDialogOpen(false);
-  };
+    return { ok: true };
+  });
+
+  const handleSubmit = saveProductAction.handleSubmit;
 
   const handleEdit = (product: Product) => {
     setEditingProduct(product);
@@ -487,7 +490,7 @@ const Products = () => {
             </Button>
           )}
           
-          <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+          <Dialog open={isAddDialogOpen} onOpenChange={saveProductAction.guardOpenChange(setIsAddDialogOpen)}>
             {canCreate && (
               <DialogTrigger asChild>
                 <Button onClick={resetForm}>
@@ -496,7 +499,7 @@ const Products = () => {
                 </Button>
               </DialogTrigger>
             )}
-            <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto" locked={saveProductAction.isPending}>
             <DialogHeader>
               <DialogTitle>
                 {editingProduct ? t('products.editProduct') : t('products.addNewProduct')}
@@ -756,12 +759,21 @@ const Products = () => {
               </div>
 
               <div className="flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setIsAddDialogOpen(false)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={saveProductAction.isPending}
+                  onClick={() => setIsAddDialogOpen(false)}
+                >
                   {t('common.cancel')}
                 </Button>
-                <Button type="submit">
+                <SubmitButton
+                  type="submit"
+                  pending={saveProductAction.isPending}
+                  isSlow={saveProductAction.isSlow}
+                >
                   {editingProduct ? t('common.update') : t('common.add')} {t('products.title').slice(0, -1)}
-                </Button>
+                </SubmitButton>
               </div>
             </form>
             </DialogContent>

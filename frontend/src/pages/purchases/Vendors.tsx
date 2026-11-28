@@ -34,6 +34,8 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import type { Vendor } from "@/types";
 import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import { usePermissions } from "@/contexts/PermissionsContext";
@@ -85,6 +87,7 @@ const Vendors = () => {
   const [deleteVendorId, setDeleteVendorId] = useState<string | null>(null);
   const [formData, setFormData] = useState<VendorFormData>(initialFormData);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [duplicateTaxWarning, setDuplicateTaxWarning] = useState<string | null>(null);
 
   const { data: vendorsPage } = useVendorsPageQuery({
     page,
@@ -115,6 +118,7 @@ const Vendors = () => {
   const resetForm = () => {
     setFormData(initialFormData);
     setFormErrors({});
+    setDuplicateTaxWarning(null);
     setEditingVendor(null);
   };
 
@@ -139,9 +143,7 @@ const Vendors = () => {
     setIsDialogOpen(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    
+  const saveVendorAction = useIdempotentAction(async (confirmDuplicate: boolean = false) => {
     const result = vendorSchema.safeParse(formData);
     
     if (!result.success) {
@@ -160,7 +162,7 @@ const Vendors = () => {
       return;
     }
 
-    // Duplicate email / tax-ID guards
+    // Duplicate email guard
     const dupErrors: Record<string, string> = {};
     const emailNorm = result.data.email?.trim().toLowerCase();
     if (emailNorm) {
@@ -169,14 +171,6 @@ const Vendors = () => {
              (!editingVendor || v.id !== editingVendor.id)
       );
       if (emailTaken) dupErrors.email = t("vendors.duplicateEmail", "A vendor with this email already exists");
-    }
-    const taxNorm = result.data.taxNumber?.trim().toLowerCase();
-    if (taxNorm) {
-      const taxTaken = vendors.some(
-        v => v.taxNumber?.trim().toLowerCase() === taxNorm &&
-             (!editingVendor || v.id !== editingVendor.id)
-      );
-      if (taxTaken) dupErrors.taxNumber = t("vendors.duplicateTaxId", "A vendor with this Tax ID already exists");
     }
     if (Object.keys(dupErrors).length > 0) {
       setFormErrors(dupErrors);
@@ -188,38 +182,42 @@ const Vendors = () => {
       return;
     }
 
-    if (editingVendor) {
-      updateVendor(editingVendor.id, {
-        displayName: result.data.displayName,
-        contactFirstName: result.data.contactFirstName,
-        contactLastName: result.data.contactLastName,
-        email: result.data.email,
-        phone: result.data.phone,
-        taxNumber: result.data.taxNumber,
-        currency: result.data.currency,
-        paymentTerms: result.data.paymentTerms,
-        billingAddress: result.data.billingAddress,
-        shippingAddress: result.data.shippingAddress,
-      });
-      toast({ title: t("vendors.vendorUpdated") });
-    } else {
-      addVendor({
-        displayName: result.data.displayName,
-        contactFirstName: result.data.contactFirstName,
-        contactLastName: result.data.contactLastName,
-        email: result.data.email,
-        phone: result.data.phone,
-        taxNumber: result.data.taxNumber,
-        currency: result.data.currency,
-        paymentTerms: result.data.paymentTerms,
-        billingAddress: result.data.billingAddress,
-        shippingAddress: result.data.shippingAddress,
-      });
-      toast({ title: t("vendors.vendorCreated") });
+    const payload = {
+      displayName: result.data.displayName,
+      contactFirstName: result.data.contactFirstName,
+      contactLastName: result.data.contactLastName,
+      email: result.data.email,
+      phone: result.data.phone,
+      taxNumber: result.data.taxNumber,
+      currency: result.data.currency,
+      paymentTerms: result.data.paymentTerms,
+      billingAddress: result.data.billingAddress,
+      shippingAddress: result.data.shippingAddress,
+      confirmDuplicate,
+    };
+
+    const res = editingVendor
+      ? await updateVendor(editingVendor.id, payload)
+      : await addVendor(payload);
+
+    if (res.ok === false) {
+      if (res.code === "DUPLICATE_TAX_NUMBER_WARNING") {
+        setDuplicateTaxWarning(res.error);
+        return { ok: false, status: 409 };
+      }
+      toast({ variant: "destructive", title: t("common.error"), description: res.error });
+      return res;
     }
 
+    toast({ title: editingVendor ? t("vendors.vendorUpdated") : t("vendors.vendorCreated") });
     setIsDialogOpen(false);
     resetForm();
+    return { ok: true };
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void saveVendorAction.run(false);
   };
 
   const handleDeleteClick = (vendorId: string) => {
@@ -393,8 +391,8 @@ const Vendors = () => {
       )}
 
       {/* Add/Edit Vendor Dialog */}
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <Dialog open={isDialogOpen} onOpenChange={saveVendorAction.guardOpenChange((o) => { setIsDialogOpen(o); if (!o) resetForm(); })}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" locked={saveVendorAction.isPending}>
           <DialogHeader>
             <DialogTitle>
               {editingVendor ? t("vendors.editVendor") : t("vendors.addNewVendor")}
@@ -551,11 +549,29 @@ const Vendors = () => {
               </div>
             </div>
 
+            {duplicateTaxWarning && (
+              <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm space-y-2">
+                <p className="font-medium text-amber-900 dark:text-amber-200">{t("common.confirmDuplicateTaxTitle")}</p>
+                <p className="text-muted-foreground">{duplicateTaxWarning}</p>
+                <SubmitButton
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  pending={saveVendorAction.isPending}
+                  isSlow={saveVendorAction.isSlow}
+                  onClick={() => void saveVendorAction.run(true)}
+                >
+                  {t("common.confirmDuplicateTaxAction")}
+                </SubmitButton>
+              </div>
+            )}
+
             {/* Actions */}
             <div className="flex justify-end gap-2">
               <Button
                 type="button"
                 variant="outline"
+                disabled={saveVendorAction.isPending}
                 onClick={() => {
                   setIsDialogOpen(false);
                   resetForm();
@@ -563,9 +579,13 @@ const Vendors = () => {
               >
                 {t("common.cancel")}
               </Button>
-              <Button type="submit">
+              <SubmitButton
+                type="submit"
+                pending={saveVendorAction.isPending}
+                isSlow={saveVendorAction.isSlow}
+              >
                 {editingVendor ? t("common.save") : t("vendors.createVendor")}
-              </Button>
+              </SubmitButton>
             </div>
           </form>
         </DialogContent>

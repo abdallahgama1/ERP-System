@@ -40,6 +40,8 @@ import { formatMoney } from "@/lib/money";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import MovementHistoryTable from "@/components/inventory/MovementHistoryTable";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 
 const CsvImportDialog = lazy(() => import("@/components/import/CsvImportDialog"));
 
@@ -119,9 +121,7 @@ const BranchDetail = () => {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    
+  const saveBranchInventoryAction = useIdempotentAction(async () => {
     if (editingItem) {
       const currentBranchQty = editingItem.quantity;
       const productAvailable = getAvailableQuantity(editingItem.productId);
@@ -148,7 +148,7 @@ const BranchDetail = () => {
         toast({ title: t("branchInventory.productUpdated") });
       } else {
         toast({ title: t("branchInventory.updateFailed"), variant: "destructive" });
-        return;
+        return { ok: false };
       }
     } else {
       const existingItem = branchProducts.find(
@@ -194,13 +194,16 @@ const BranchDetail = () => {
         toast({ title: t("branchInventory.productAssigned") });
       } else {
         toast({ title: t("branchInventory.assignFailed"), variant: "destructive" });
-        return;
+        return { ok: false };
       }
     }
     
     resetForm();
     setIsAddDialogOpen(false);
-  };
+    return { ok: true };
+  });
+
+  const handleSubmit = saveBranchInventoryAction.handleSubmit;
 
   const handleEdit = (item: BranchProduct) => {
     setEditingItem(item);
@@ -323,10 +326,10 @@ const BranchDetail = () => {
             </Button>
           )}
           
-          <Dialog open={isAddDialogOpen} onOpenChange={(open) => {
+          <Dialog open={isAddDialogOpen} onOpenChange={saveBranchInventoryAction.guardOpenChange((open) => {
             setIsAddDialogOpen(open);
             if (!open) resetForm();
-          }}>
+          })}>
             {canEditStock && (
               <DialogTrigger asChild>
                 <Button onClick={resetForm}>
@@ -335,7 +338,7 @@ const BranchDetail = () => {
                 </Button>
               </DialogTrigger>
             )}
-            <DialogContent className="max-w-md">
+            <DialogContent className="max-w-md" locked={saveBranchInventoryAction.isPending}>
               <DialogHeader>
                 <DialogTitle>
                   {editingItem ? t("branchInventory.editBranchProduct") : t("branchInventory.assignProduct")}
@@ -423,15 +426,22 @@ const BranchDetail = () => {
                 </div>
                 
                 <div className="flex justify-end gap-2">
-                  <Button type="button" variant="outline" onClick={() => setIsAddDialogOpen(false)}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={saveBranchInventoryAction.isPending}
+                    onClick={() => setIsAddDialogOpen(false)}
+                  >
                     {t("common.cancel")}
                   </Button>
-                  <Button 
-                    type="submit" 
+                  <SubmitButton
+                    type="submit"
+                    pending={saveBranchInventoryAction.isPending}
+                    isSlow={saveBranchInventoryAction.isSlow}
                     disabled={!editingItem && (!formData.productId || formData.quantity <= 0 || formData.quantity > selectedProductAvailable)}
                   >
                     {editingItem ? t("branchInventory.updateProduct") : t("branchInventory.assignProductBtn")}
-                  </Button>
+                  </SubmitButton>
                 </div>
               </form>
             </DialogContent>

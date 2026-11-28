@@ -27,6 +27,8 @@ import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 
 const Branches = () => {
   const { t } = useTranslation();
@@ -72,28 +74,29 @@ const Branches = () => {
     setEditingBranch(null);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
+  const saveBranchAction = useIdempotentAction(async () => {
     if (editingBranch) {
       const res = await updateBranch(editingBranch.branchId, formData);
       if (res.ok === false) {
         toast({ title: t('common.error'), description: res.error, variant: "destructive" });
-        return;
+        return res;
       }
       toast({ title: t('branches.branchUpdated') });
     } else {
       const res = await addBranch(formData);
       if (res.ok === false) {
         toast({ title: t('common.error'), description: res.error, variant: "destructive" });
-        return;
+        return res;
       }
       toast({ title: t('branches.branchAdded') });
     }
 
     resetForm();
     setIsAddDialogOpen(false);
-  };
+    return { ok: true };
+  });
+
+  const handleSubmit = saveBranchAction.handleSubmit;
 
   const handleEdit = (branch: Branch) => {
     setEditingBranch(branch);
@@ -135,10 +138,10 @@ const Branches = () => {
         {(canCreateBranch || canEditBranch) && (
           <Dialog
             open={isAddDialogOpen}
-            onOpenChange={(open) => {
+            onOpenChange={saveBranchAction.guardOpenChange((open) => {
               setIsAddDialogOpen(open);
               if (!open) resetForm();
-            }}
+            })}
           >
             {canCreateBranch && (
               <DialogTrigger asChild>
@@ -148,7 +151,7 @@ const Branches = () => {
                 </Button>
               </DialogTrigger>
             )}
-            <DialogContent className="max-w-md">
+            <DialogContent className="max-w-md" locked={saveBranchAction.isPending}>
             <DialogHeader>
               <DialogTitle>
                 {editingBranch ? t('branches.editBranch') : t('branches.addNewBranch')}
@@ -256,12 +259,21 @@ const Branches = () => {
               </div>
               
               <div className="flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setIsAddDialogOpen(false)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={saveBranchAction.isPending}
+                  onClick={() => setIsAddDialogOpen(false)}
+                >
                   {t('common.cancel')}
                 </Button>
-                <Button type="submit">
+                <SubmitButton
+                  type="submit"
+                  pending={saveBranchAction.isPending}
+                  isSlow={saveBranchAction.isSlow}
+                >
                   {editingBranch ? t('common.update') : t('common.add')} {t('sessions.branch')}
-                </Button>
+                </SubmitButton>
               </div>
             </form>
           </DialogContent>
