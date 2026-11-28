@@ -652,7 +652,9 @@ test.describe("Tier 1: Wave 1 Feature Coverage — Happy Paths (50 Cases)", () =
 
     // T1-EF7-05: Close Command Palette with Escape
     await page.keyboard.press("Control+k");
-    await expect(page.getByRole("dialog").last()).toBeVisible();
+    const reopenDialog = page.getByRole("dialog").last();
+    await expect(reopenDialog).toBeVisible();
+    await expect(reopenDialog.locator("input[cmdk-input], input").first()).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
