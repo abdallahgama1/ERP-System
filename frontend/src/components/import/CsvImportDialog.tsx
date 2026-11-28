@@ -19,6 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -77,6 +78,7 @@ export default function CsvImportDialog({
   };
 
   const handleOpenChange = (next: boolean) => {
+    if (!next && runStandardImport.isPending) return;
     if (!next) reset();
     onOpenChange(next);
   };
@@ -154,7 +156,7 @@ export default function CsvImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+      <DialogContent locked={runStandardImport.isPending} className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FileSpreadsheet className="h-5 w-5 text-primary" />
@@ -347,28 +349,30 @@ export default function CsvImportDialog({
         </div>
 
         <DialogFooter className="gap-2">
-          <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+          <Button type="button" variant="outline" disabled={runStandardImport.isPending} onClick={() => handleOpenChange(false)}>
             {t("common.cancel", "Cancel")}
           </Button>
-          <Button
+          <SubmitButton
             type="button"
             variant="secondary"
-            disabled={!csvText.trim() || runStandardImport.isPending}
+            pending={runStandardImport.isPending}
+            disabled={!csvText.trim()}
             onClick={() => void handleDryRun()}
             data-testid="csv-dry-run-btn"
           >
             <Play className="h-4 w-4 me-1.5" />
             {t("imports.runDryRun", "Validate (Dry Run)")}
-          </Button>
-          <Button
+          </SubmitButton>
+          <SubmitButton
             type="button"
-            disabled={!canCommit || runStandardImport.isPending}
+            pending={runStandardImport.isPending}
+            disabled={!canCommit}
             onClick={() => void handleCommit()}
             data-testid="csv-commit-btn"
           >
             <CheckCircle2 className="h-4 w-4 me-1.5" />
             {t("imports.commitImport", "Commit All-or-Nothing")}
-          </Button>
+          </SubmitButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -18,6 +18,7 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -278,14 +279,16 @@ export default function Roles() {
                   <CardDescription>{selectedRole.description || t("roles.noDescription", "Custom role")}</CardDescription>
                 </div>
                 {canEdit && !isLockedAdminPreset && (
-                  <Button
+                  <SubmitButton
+                    type="button"
                     size="sm"
-                    disabled={!dirty || updateCustomRole.isPending}
+                    pending={updateCustomRole.isPending}
+                    disabled={!dirty}
                     onClick={() => void handleSaveRole()}
                   >
                     <Save className="h-4 w-4 me-2" />
                     {t("common.save", "Save Changes")}
-                  </Button>
+                  </SubmitButton>
                 )}
               </CardHeader>
               <CardContent className="space-y-4">
@@ -381,8 +384,8 @@ export default function Roles() {
       </div>
 
       {/* Create Custom Role Dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <Dialog open={createOpen} onOpenChange={(open) => { if (!open && createCustomRole.isPending) return; setCreateOpen(open); }}>
+        <DialogContent locked={createCustomRole.isPending} className="max-w-3xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t("roles.createCustomRole", "Create Custom Role")}</DialogTitle>
             <DialogDescription>
@@ -464,12 +467,12 @@ export default function Roles() {
             </div>
 
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>
+              <Button type="button" variant="outline" disabled={createCustomRole.isPending} onClick={() => setCreateOpen(false)}>
                 {t("common.cancel")}
               </Button>
-              <Button type="submit" disabled={createCustomRole.isPending}>
+              <SubmitButton type="submit" pending={createCustomRole.isPending}>
                 {t("roles.createRole", "Create Role")}
-              </Button>
+              </SubmitButton>
             </DialogFooter>
           </form>
         </DialogContent>
@@ -478,7 +481,7 @@ export default function Roles() {
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
-        onConfirm={() => void handleDeleteRole()}
+        onConfirm={handleDeleteRole}
         title={t("roles.deleteTitle", "Delete Custom Role")}
         itemName={deleteTarget?.name}
       />

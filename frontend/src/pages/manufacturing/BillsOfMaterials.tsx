@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Boxes, Plus, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
@@ -182,8 +183,8 @@ export default function BillsOfMaterials() {
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) resetForm(); }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <Dialog open={open} onOpenChange={(o) => { if (!o && createBom.isPending) return; setOpen(o); if (!o) resetForm(); }}>
+        <DialogContent locked={createBom.isPending} className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t("manufacturing.boms.new", "New Bill of Materials")}</DialogTitle>
             <DialogDescription>
@@ -307,12 +308,12 @@ export default function BillsOfMaterials() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>
+            <Button variant="outline" disabled={createBom.isPending} onClick={() => setOpen(false)}>
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button onClick={handleSubmit} disabled={createBom.isPending}>
+            <SubmitButton type="button" pending={createBom.isPending} onClick={() => void handleSubmit()}>
               {t("common.save", "Save BOM")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

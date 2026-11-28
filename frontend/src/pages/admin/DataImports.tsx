@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -514,29 +515,32 @@ export default function DataImports() {
           )}
 
           <div className="flex flex-wrap gap-2">
-            <Button
+            <SubmitButton
+              type="button"
               variant="secondary"
-              disabled={!tbCsv.trim() || runOpeningBalancesImport.isPending}
+              pending={runOpeningBalancesImport.isPending}
+              disabled={!tbCsv.trim()}
               onClick={() => void handleOpeningRun(true)}
               data-testid="opening-dry-run-btn"
             >
               <Play className="h-4 w-4 me-1.5" />
               {t("imports.runDryRun", "Validate (Dry Run)")}
-            </Button>
-            <Button
+            </SubmitButton>
+            <SubmitButton
+              type="button"
+              pending={runOpeningBalancesImport.isPending}
               disabled={
                 !openingResult ||
                 !openingResult.dryRun ||
                 !openingResult.valid ||
-                !status?.canImportOpening ||
-                runOpeningBalancesImport.isPending
+                !status?.canImportOpening
               }
               onClick={() => void handleOpeningRun(false)}
               data-testid="opening-commit-btn"
             >
               <CheckCircle2 className="h-4 w-4 me-1.5" />
               {t("imports.commitOpening", "Post Opening Journal & Documents")}
-            </Button>
+            </SubmitButton>
           </div>
 
           {openingResult && (
@@ -632,8 +636,8 @@ export default function DataImports() {
       )}
 
       {/* Controlled Opening Reversal Dialog */}
-      <Dialog open={reverseOpen} onOpenChange={setReverseOpen}>
-        <DialogContent className="max-w-lg">
+      <Dialog open={reverseOpen} onOpenChange={(open) => { if (!open && reverseOpeningBalances.isPending) return; setReverseOpen(open); }}>
+        <DialogContent locked={reverseOpeningBalances.isPending} className="max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-destructive" />
@@ -665,17 +669,19 @@ export default function DataImports() {
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setReverseOpen(false)}>
+            <Button variant="outline" disabled={reverseOpeningBalances.isPending} onClick={() => setReverseOpen(false)}>
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
               variant="destructive"
-              disabled={reverseOpeningBalances.isPending || reverseReason.trim().length < 5}
+              pending={reverseOpeningBalances.isPending}
+              disabled={reverseReason.trim().length < 5}
               onClick={() => void handleReverse()}
               data-testid="reverse-opening-confirm"
             >
               {t("imports.reverseConfirm", "Confirm Reversal")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

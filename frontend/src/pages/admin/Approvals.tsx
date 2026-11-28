@@ -4,6 +4,8 @@ import type { AppRole, ApprovalEntityType } from "@erp/shared";
 import { CheckCircle2, ClipboardCheck, ShieldAlert, XCircle } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -47,6 +49,7 @@ export default function Approvals() {
   const { data: requests = [], isLoading: loadingRequests } = useApprovalRequestsQuery();
   const { data: rules = [], isLoading: loadingRules } = useApprovalRulesQuery();
   const { upsertRule, decideRequest } = useApprovalMutations();
+  const rowLocks = useActionLocks();
 
   const [decisionTarget, setDecisionTarget] = useState<{
     req: ApprovalRequestDto;
@@ -338,14 +341,16 @@ export default function Approvals() {
                           </TableCell>
                           <TableCell className="text-end">
                             {isAdmin && (
-                              <Button
+                              <SubmitButton
+                                type="button"
                                 size="sm"
                                 variant="outline"
-                                disabled={upsertRule.isPending}
-                                onClick={() => void handleSaveRule(rule)}
+                                hideSlowText
+                                pending={rowLocks.isPending(`rule:${rule.id}`)}
+                                onClick={() => void rowLocks.runLocked(`rule:${rule.id}`, () => handleSaveRule(rule))}
                               >
                                 {t("common.save")}
-                              </Button>
+                              </SubmitButton>
                             )}
                           </TableCell>
                         </TableRow>
@@ -359,8 +364,8 @@ export default function Approvals() {
         </TabsContent>
       </Tabs>
 
-      <Dialog open={!!decisionTarget} onOpenChange={(open) => !open && setDecisionTarget(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog open={!!decisionTarget} onOpenChange={(open) => { if (!open && !decideRequest.isPending) setDecisionTarget(null); }}>
+        <DialogContent locked={decideRequest.isPending} className="max-w-md">
           <DialogHeader>
             <DialogTitle>
               {decisionTarget?.decision === "approved"
@@ -385,18 +390,19 @@ export default function Approvals() {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDecisionTarget(null)}>
+            <Button variant="outline" disabled={decideRequest.isPending} onClick={() => setDecisionTarget(null)}>
               {t("common.cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
               variant={decisionTarget?.decision === "approved" ? "default" : "destructive"}
-              disabled={decideRequest.isPending}
+              pending={decideRequest.isPending}
               onClick={() => void handleConfirmDecision()}
             >
               {decisionTarget?.decision === "approved"
                 ? t("approvals.approve", "Approve")
                 : t("approvals.reject", "Reject")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

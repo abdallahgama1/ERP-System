@@ -417,9 +417,9 @@ export function EnterpriseDataTable<T>({
                       >
                         {t("common.cancel", "Cancel")}
                       </Button>
-                      <Button type="submit" size="sm" disabled={createSavedView.isPending}>
+                      <SubmitButton type="submit" size="sm" pending={createSavedView.isPending}>
                         {t("savedViews.save", "Save View")}
-                      </Button>
+                      </SubmitButton>
                     </div>
                   </form>
                 </PopoverContent>

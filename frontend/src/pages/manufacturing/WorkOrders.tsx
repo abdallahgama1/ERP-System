@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import { CheckCircle2, Factory, Play, Plus, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
@@ -46,6 +48,7 @@ export default function WorkOrders() {
   const issueWo = useIssueWorkOrderMutation();
   const completeWo = useCompleteWorkOrderMutation();
   const cancelWo = useCancelWorkOrderMutation();
+  const rowLocks = useActionLocks();
 
   const workOrders = woData?.workOrders ?? [];
   const boms = (bomData?.boms ?? []).filter((b) => b.isActive);
@@ -226,10 +229,17 @@ export default function WorkOrders() {
                     {canEdit && !isTerminal && (
                       <div className="flex flex-wrap gap-2">
                         {hasUnissued && (
-                          <Button size="sm" variant="outline" onClick={() => void handleIssue(wo)} disabled={issueWo.isPending}>
+                          <SubmitButton
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            hideSlowText
+                            pending={rowLocks.isPending(`issue:${wo.id}`)}
+                            onClick={() => void rowLocks.runLocked(`issue:${wo.id}`, () => handleIssue(wo))}
+                          >
                             <Play className="h-3.5 w-3.5 me-1.5" />
                             {t("manufacturing.workOrders.issueMaterials", "Issue Materials")}
-                          </Button>
+                          </SubmitButton>
                         )}
                         {wo.wipValueIssued > 0 && remaining > 0 && (
                           <Button
@@ -243,10 +253,17 @@ export default function WorkOrders() {
                             {t("manufacturing.workOrders.complete", "Complete")}
                           </Button>
                         )}
-                        <Button size="sm" variant="ghost" onClick={() => void handleCancel(wo)} disabled={cancelWo.isPending}>
+                        <SubmitButton
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          hideSlowText
+                          pending={rowLocks.isPending(`cancel:${wo.id}`)}
+                          onClick={() => void rowLocks.runLocked(`cancel:${wo.id}`, () => handleCancel(wo))}
+                        >
                           <XCircle className="h-3.5 w-3.5 me-1.5 text-destructive" />
                           {t("common.cancel", "Cancel")}
-                        </Button>
+                        </SubmitButton>
                       </div>
                     )}
                   </div>
@@ -305,8 +322,8 @@ export default function WorkOrders() {
         </div>
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog open={createOpen} onOpenChange={(o) => { if (!o && createWo.isPending) return; setCreateOpen(o); }}>
+        <DialogContent locked={createWo.isPending} className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t("manufacturing.workOrders.new", "New Work Order")}</DialogTitle>
             <DialogDescription>
@@ -354,18 +371,18 @@ export default function WorkOrders() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+            <Button variant="outline" disabled={createWo.isPending} onClick={() => setCreateOpen(false)}>
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button onClick={handleCreate} disabled={createWo.isPending}>
+            <SubmitButton type="button" pending={createWo.isPending} onClick={() => void handleCreate()}>
               {t("common.create", "Create")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!completingWo} onOpenChange={(o) => !o && setCompletingWo(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog open={!!completingWo} onOpenChange={(o) => { if (!o && !completeWo.isPending) setCompletingWo(null); }}>
+        <DialogContent locked={completeWo.isPending} className="max-w-md">
           <DialogHeader>
             <DialogTitle>
               {t("manufacturing.workOrders.complete", "Complete Work Order")} — {completingWo?.woNumber}
@@ -412,12 +429,12 @@ export default function WorkOrders() {
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCompletingWo(null)}>
+            <Button variant="outline" disabled={completeWo.isPending} onClick={() => setCompletingWo(null)}>
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button onClick={handleComplete} disabled={completeWo.isPending}>
+            <SubmitButton type="button" pending={completeWo.isPending} onClick={() => void handleComplete()}>
               {t("manufacturing.workOrders.receiveFinished", "Receive Finished Goods")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIdempotentMutation as useMutation, useActionLocks } from "@/hooks/useIdempotentSubmit";
 import type {
   EinvoiceQueueSummaryDto,
   EinvoiceSubmissionStatus,
@@ -14,7 +15,6 @@ import {
   Clock,
   Eye,
   FileCode2,
-  Loader2,
   Receipt,
   RefreshCw,
   RotateCcw,
@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -132,6 +133,7 @@ export default function EInvoiceQueue() {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [page, setPage] = useState<number>(1);
   const [selectedItem, setSelectedItem] = useState<EtaSubmissionListItemDto | null>(null);
+  const rowLocks = useActionLocks();
 
   const queryParams = {
     status: statusFilter,
@@ -292,32 +294,26 @@ export default function EInvoiceQueue() {
 
         <div className="flex items-center gap-2">
           {(summary.failed > 0 || summary.rejected > 0) && (
-            <Button
+            <SubmitButton
+              type="button"
               variant="outline"
               data-testid="retry-all-failed-btn"
-              disabled={retryAllMutation.isPending}
+              pending={retryAllMutation.isPending}
               onClick={() => retryAllMutation.mutate()}
             >
-              {retryAllMutation.isPending ? (
-                <Loader2 className="h-4 w-4 me-2 animate-spin" />
-              ) : (
-                <RotateCcw className="h-4 w-4 me-2" />
-              )}
+              <RotateCcw className="h-4 w-4 me-2" />
               {t("einvoicing.retryAll", "Retry Failed & Rejected")}
-            </Button>
+            </SubmitButton>
           )}
-          <Button
+          <SubmitButton
+            type="button"
             variant="default"
-            disabled={processNowMutation.isPending}
+            pending={processNowMutation.isPending}
             onClick={() => processNowMutation.mutate()}
           >
-            {processNowMutation.isPending ? (
-              <Loader2 className="h-4 w-4 me-2 animate-spin" />
-            ) : (
-              <RefreshCw className="h-4 w-4 me-2" />
-            )}
+            <RefreshCw className="h-4 w-4 me-2" />
             {t("einvoicing.processNow", "Process Queue / Poll ETA")}
-          </Button>
+          </SubmitButton>
         </div>
       </div>
 
@@ -567,15 +563,21 @@ export default function EInvoiceQueue() {
                             {t("einvoicing.viewPayload", "View Payload")}
                           </Button>
                           {item.status !== "accepted" && (
-                            <Button
+                            <SubmitButton
+                              type="button"
                               size="sm"
                               variant="ghost"
-                              disabled={retrySingleMutation.isPending}
-                              onClick={() => retrySingleMutation.mutate(item.id)}
+                              hideSlowText
+                              pending={rowLocks.isPending(`retry:${item.id}`)}
+                              onClick={() =>
+                                void rowLocks.runLocked(`retry:${item.id}`, () =>
+                                  retrySingleMutation.mutateAsync(item.id)
+                                )
+                              }
                             >
                               <RotateCcw className="h-3.5 w-3.5 me-1" />
                               {t("einvoicing.retry", "Retry")}
-                            </Button>
+                            </SubmitButton>
                           )}
                         </div>
                       </TableCell>

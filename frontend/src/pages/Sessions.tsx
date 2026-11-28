@@ -483,7 +483,7 @@ const Sessions = () => {
       <ConfirmDeleteDialog
         open={deleteSessionId !== null}
         onOpenChange={(open) => !open && setDeleteSessionId(null)}
-        onConfirm={() => void handleConfirmDelete()}
+        onConfirm={handleConfirmDelete}
         itemName={`Session #${deleteSessionId}`}
       />
     </div>
