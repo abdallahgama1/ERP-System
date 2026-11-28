@@ -109,6 +109,9 @@ export const env = {
   ETA_SIGNER_TOKEN: (process.env.ETA_SIGNER_TOKEN ?? "").trim(),
   ETA_SIGNER_TIMEOUT_MS: parseIntEnv(process.env.ETA_SIGNER_TIMEOUT_MS, 10_000),
   METRICS_TOKEN: (process.env.METRICS_TOKEN ?? "").trim(),
+  UPTIME_STATUS_TOKEN: (process.env.UPTIME_STATUS_TOKEN ?? "").trim(),
+  UPTIME_STATUS_RATE_LIMIT_MAX: parseIntEnv(process.env.UPTIME_STATUS_RATE_LIMIT_MAX, 60),
+  UPTIME_STATUS_RATE_LIMIT_WINDOW_MS: parseIntEnv(process.env.UPTIME_STATUS_RATE_LIMIT_WINDOW_MS, 60_000),
   SENTRY_DSN: (process.env.SENTRY_DSN ?? "").trim(),
   SENTRY_ENVIRONMENT: (process.env.SENTRY_ENVIRONMENT ?? "").trim() || nodeEnv,
   SENTRY_TRACES_SAMPLE_RATE: parseRateEnv(process.env.SENTRY_TRACES_SAMPLE_RATE, 0),
@@ -136,6 +139,21 @@ export function getBackupFreshnessConfig() {
     s3SecretAccessKey: (process.env.BACKUP_S3_SECRET_ACCESS_KEY ?? env.BACKUP_S3_SECRET_ACCESS_KEY).trim(),
     s3ForcePathStyle: parseBoolEnv(process.env.BACKUP_S3_FORCE_PATH_STYLE, env.BACKUP_S3_FORCE_PATH_STYLE),
     s3Prefix: (process.env.BACKUP_S3_PREFIX ?? env.BACKUP_S3_PREFIX).trim().replace(/^\/+|\/+$/g, ""),
+  };
+}
+
+export function getUptimeStatusConfig(): {
+  token: string;
+  rateLimitMax: number;
+  rateLimitWindowMs: number;
+} {
+  return {
+    token: (process.env.UPTIME_STATUS_TOKEN ?? env.UPTIME_STATUS_TOKEN).trim(),
+    rateLimitMax: parseIntEnv(process.env.UPTIME_STATUS_RATE_LIMIT_MAX, env.UPTIME_STATUS_RATE_LIMIT_MAX),
+    rateLimitWindowMs: parseIntEnv(
+      process.env.UPTIME_STATUS_RATE_LIMIT_WINDOW_MS,
+      env.UPTIME_STATUS_RATE_LIMIT_WINDOW_MS
+    ),
   };
 }
 

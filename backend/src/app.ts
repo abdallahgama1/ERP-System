@@ -9,7 +9,7 @@ import type { DestinationStream } from "pino";
 import { env } from "./config.ts";
 import { AppError } from "./db/helpers.ts";
 import { buildPinoOptions, requestContext, sanitizeRequestId } from "./logging/logger.ts";
-import { attachAuthHook } from "./middleware/auth.ts";
+import { attachAuthHook, smokeMonitorReadOnlyHook } from "./middleware/auth.ts";
 import { csrfProtectionHook } from "./middleware/csrf.ts";
 import {
   metricsRoutes,
@@ -157,7 +157,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       path === "/api/health" ||
       path === "/api/health/live" ||
       path === "/api/health/ready" ||
-      path === "/api/metrics";
+      path === "/api/metrics" ||
+      (path === "/api/status" && reply.statusCode < 400);
 
     if (isObservabilityProbe) {
       req.log.debug(logFields, "http.health");
@@ -244,6 +245,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.addHook("onRequest", csrfProtectionHook);
   app.addHook("preHandler", attachAuthHook);
+  app.addHook("preHandler", smokeMonitorReadOnlyHook);
 
   app.setErrorHandler((err, req, reply) => {
     const normalizedRoute = req.routeOptions?.url ?? (req.is404 ? "__unmatched__" : "__unknown__");
@@ -315,7 +317,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   });
 
-  await app.register(eventRoutes);
+  await app.register(eventRoutes, { enableRateLimit: rateLimitActive });
   await app.register(metricsRoutes);
   await app.register(authRoutes, { enableRateLimit: rateLimitActive });
   await app.register(adminRoutes);

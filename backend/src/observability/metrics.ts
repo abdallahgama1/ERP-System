@@ -124,16 +124,21 @@ export function recordHousekeepingFailure(): void {
   erpHousekeepingRunsTotal.inc({ outcome: "failed" });
 }
 
+export function isValidConstantTimeToken(providedToken: string | undefined, expectedToken: string): boolean {
+  const expected = expectedToken.trim();
+  const provided = (providedToken ?? "").trim();
+  if (!expected || !provided) return false;
+
+  const providedDigest = createHash("sha256").update(provided, "utf8").digest();
+  const expectedDigest = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(providedDigest, expectedDigest);
+}
+
 export function isValidBearerToken(authHeader: string | undefined, expectedToken: string): boolean {
   if (!expectedToken) return false;
   const match = /^Bearer\s+(.+)$/i.exec(authHeader ?? "");
   if (!match) return false;
-  const providedToken = match[1]?.trim() ?? "";
-  if (!providedToken) return false;
-
-  const providedDigest = createHash("sha256").update(providedToken, "utf8").digest();
-  const expectedDigest = createHash("sha256").update(expectedToken, "utf8").digest();
-  return timingSafeEqual(providedDigest, expectedDigest);
+  return isValidConstantTimeToken(match[1], expectedToken);
 }
 
 export async function metricsRoutes(app: FastifyInstance): Promise<void> {
