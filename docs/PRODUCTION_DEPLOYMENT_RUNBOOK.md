@@ -47,10 +47,17 @@ Internet (HTTPS :443 / HTTP :80)
 
 ## 3. VPS Docker Compose + Caddy Setup
 
-### Prerequisites
+### Prerequisites & Firewall Checklist
 - Ubuntu 22.04 / 24.04 LTS (or Debian 12) with Docker Engine & Docker Compose plugin (`docker compose version`).
-- Firewall open on `80/tcp`, `443/tcp`, `443/udp` (and SSH `22/tcp`). Do **not** expose port `3001` or `5432` publicly.
 - DNS `A` (and optional `AAAA`) record for `SITE_ADDRESS` (e.g., `erp.example.com`) pointing to the VPS IP.
+
+**Production Firewall & Network Exposure Checklist:**
+- [ ] **Default-deny inbound** on both host UFW (`ufw default deny incoming`) and cloud provider Security Group / VPC Firewall.
+- [ ] **Allow ONLY:** `80/tcp` (ACME HTTP-01 + automatic 308 redirect to HTTPS), `443/tcp` & `443/udp` (HTTPS / HTTP3 via Caddy), and `22/tcp` (SSH restricted to operator IPs or VPN/Tailscale).
+- [ ] **Never publish database port `5432` or backend port `3001` on `0.0.0.0`:** Remember that Docker `iptables` rules bypass UFW when a Compose `ports:` entry binds `0.0.0.0`. Both `backend` (`expose: ["3001"]`) and the optional internal `postgres` profile (`local-db`) publish **zero** host ports. Verify with `ss -tulpn` — only `:22`, `:80`, and `:443` should listen on public interfaces.
+- [ ] **Managed PostgreSQL (Neon/RDS) firewall:** Restrict inbound `5432/tcp` strictly to the VPS static IP and enforce `?sslmode=require`.
+- [ ] **Per-route request body limits enforced at proxy (`Caddyfile` & `frontend/nginx.conf`):** `/api/imports*` (`12MB`), `/api/attachments*` (`15MB`), all other `/api/*` and `/*` routes (`1MB`).
+- [ ] **Incident playbooks ready:** See [docs/INCIDENT_RUNBOOK.md](./INCIDENT_RUNBOOK.md) for outage, DB corruption, key leak, bad migration, and backup restore commands.
 
 ### Option 1: One-Command Automated Bootstrap (`scripts/vps-setup.sh`)
 On a fresh Ubuntu 22.04/24.04 or Debian 12 VPS (with root/`sudo` access):
@@ -298,16 +305,55 @@ bash ./scripts/deploy.sh \
 ```
 
 ### Manual Rollback
-- **Application-only rollback** (no backward-incompatible schema changes):
+- **One-command application rollback** (restores `PREV_BACKEND_IMAGE` and `PREV_FRONTEND_IMAGE` recorded in `.env.last-good-images` with `RUN_MIGRATIONS=false`):
+  ```bash
+  bash ./scripts/deploy.sh --rollback
+  ```
+- **Pinning a specific previous image tag:**
   ```bash
   bash ./scripts/deploy.sh \
     --backend-image ghcr.io/abdallahgama1/erp-system-backend:sha-<previous> \
     --frontend-image ghcr.io/abdallahgama1/erp-system-frontend:sha-<previous>
   ```
-- **Schema-affecting rollback**: Drizzle migrations (`0000`–`0008`) are forward-only SQL files and must never be edited retroactively. If a release introduced breaking DDL:
-  1. Stop `backend` (`docker compose -f docker-compose.prod.yml stop backend`).
-  2. Restore the pre-deploy `pg_dump` + paired `erp_uploads` archive via `scripts/restore-db.sh` (or Neon/RDS PITR to the timestamp immediately before migration). See **[docs/BACKUP_RESTORE_AND_ROLLBACK.md](./BACKUP_RESTORE_AND_ROLLBACK.md)** for full details.
-  3. Deploy the previous good commit/images via `scripts/deploy.sh` with `RUN_MIGRATIONS=false` (or once the schema matches).
+- **Schema-affecting rollback**: Drizzle migrations (`0000`–`0013`) are forward-only SQL files and must never be edited retroactively. See **[docs/INCIDENT_RUNBOOK.md](./INCIDENT_RUNBOOK.md)** and **[docs/BACKUP_RESTORE_AND_ROLLBACK.md](./BACKUP_RESTORE_AND_ROLLBACK.md)** for restoring the pre-deploy snapshot + `erp_uploads` archive before rolling back container tags.
+
+---
+
+## 8B. Staging Environment, Smoke Test & Promotion Procedure
+
+Use `docker-compose.staging.yml` together with `docker-compose.prod.yml` for an isolated staging stack (dedicated internal Postgres 18 with no public `5432` port, separate `erp_staging_*` volumes, `SENTRY_ENVIRONMENT=staging`, and ETA Pre-Prod only):
+
+1. **Bootstrap staging env (once):**
+   ```bash
+   cp .env.staging.example .env.staging && chmod 600 .env.staging
+   # Populate staging-only secrets, SITE_ADDRESS=staging.erp.example.com, and SMOKE_ADMIN_EMAIL/PASSWORD
+   ```
+2. **Deploy a candidate image tag to staging (applies migrations + runs smoke test automatically):**
+   ```bash
+   bash ./scripts/deploy.sh \
+     --overlay-compose-file docker-compose.staging.yml \
+     --env-file .env.staging \
+     --project-name count-it-keep-it-staging \
+     --backend-image ghcr.io/abdallahgama1/erp-system-backend:sha-<candidate> \
+     --frontend-image ghcr.io/abdallahgama1/erp-system-frontend:sha-<candidate> \
+     --smoke-test
+   ```
+3. **Run standalone smoke test (verifies `/api/health/live`, `/api/health/ready`, admin login, 8/8 reconciliation, setup health, audit hash chain, and backup freshness):**
+   ```bash
+   SMOKE_BASE_URL=https://staging.erp.example.com \
+     SMOKE_ADMIN_EMAIL=admin@staging.local \
+     SMOKE_ADMIN_PASSWORD='...' \
+     npm run smoke-test
+   ```
+4. **Roll back staging to the previous image tag if needed:**
+   ```bash
+   bash ./scripts/deploy.sh \
+     --overlay-compose-file docker-compose.staging.yml \
+     --env-file .env.staging \
+     --project-name count-it-keep-it-staging \
+     --rollback
+   ```
+5. **Promote the exact same immutable `sha-<candidate>` image tags to production** via `scripts/deploy.sh` or `.github/workflows/cd.yml`.
 
 ---
 

@@ -8,6 +8,7 @@ This document is the single consolidated operations reference for running **Coun
 - [ACCOUNTANT_REVIEW.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/ACCOUNTANT_REVIEW.md) — General Ledger auto-posting rules, subledger-to-GL reconciliation, COA mapping health, and fiscal year close/reopen.
 - [GO_LIVE.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/GO_LIVE.md) — Go-live cutover plan, CSV import order, re-import semantics, and rollback runbook.
 - [UAT_SCRIPT.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/UAT_SCRIPT.md) — Step-by-step full-day user acceptance testing script in EGP for pre-go-live rehearsal.
+- [INCIDENT_RUNBOOK.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/INCIDENT_RUNBOOK.md) — Production outage, DB corruption, key leak, bad migration, and disaster-recovery restore playbooks.
 
 ---
 
@@ -22,21 +23,42 @@ This document is the single consolidated operations reference for running **Coun
 | `GET /api/accounting/setup-health` | GL mapping health | Admin-only; verifies all 28 `DEFAULT_COA` control mappings exist, are active, and have valid `account_type` | `200 OK` `{ "healthy": true, "issues": [] }` | Post-upgrade / onboarding checks |
 | `GET /api/accounting/reports/reconciliation` | Subledger-to-GL reconciliation | Admin-only; checks AR, AP, Inventory, Output VAT, Input VAT, Fixed Assets, and Treasury vs GL | `200 OK` `{ "allReconciled": true, ... }` | Period-end close & CI (`npm run demo:ledger`) |
 | `GET /api/imports/cutover-readiness` | Cutover readiness gate | Admin-only, read-only; verifies all 8 reconciliation controls, accounting setup health, and audit-log hash chain | `200 OK` `{ "ready": true, "status": "PASS", ... }` | Go-live cutover checklist & `/admin/imports` |
+| `GET /api/admin/backups/freshness` | Backup freshness check | Admin-only; reports age of last successful backup from `BACKUP_STATUS_FILE` (or off-site S3 `latest.json`), flagging stale when `> BACKUP_MAX_AGE_HOURS` (default `26h`); pass `?strict=true` for HTTP `503` when stale/missing | `200 OK` `{ "ok": true, "status": "fresh", "ageHours": ... }` | Monitoring, alerting & `/api/metrics` gauges |
 
 All HTTP requests receive a sanitized `x-request-id` correlation header echoed in responses and Pino JSON logs. Sensitive fields (`password`, `token`, `pin`, `mfaEncryptionKey`, `smtpPass`, `s3SecretAccessKey`, connection strings) are scrubbed automatically ([logger.ts](file:///c:/Users/mohamed/Desktop/count-it-keep-it/backend/src/logging/logger.ts)).
 
 ---
 
-## 2. Backups & Scheduled Restore Drills
+## 2. Scheduled Backups, Off-Site Encryption, Freshness Alerting & Monthly Restore Drills
 
-1. **Automated Backups ([backup-db.sh](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/backup-db.sh)):**
-   - Dumps PostgreSQL in custom format (`pg_dump -Fc`) with SHA-256 checksums, archives `erp_uploads` (`/app/uploads` or `STORAGE_LOCAL_DIR`) into a checksummed `.tar.gz`, and enforces `BACKUP_RETENTION_DAYS` / `BACKUP_MIN_KEEP`.
+1. **Automated Daily Backups + Off-Site Encrypted S3 Sync ([backup-db.sh](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/backup-db.sh), [backup-offsite.mjs](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/backup-offsite.mjs)):**
+   - Dumps PostgreSQL in custom format (`pg_dump -Fc`) with SHA-256 checksums, archives `erp_uploads` (`/app/uploads` or `STORAGE_LOCAL_DIR`) into a checksummed `.tar.gz`, applies local retention (`BACKUP_RETENTION_DAYS` / `BACKUP_MIN_KEEP`), and writes `last-backup-status.json`.
+   - When `BACKUP_S3_BUCKET` is set (Cloudflare R2, MinIO, or AWS S3), encrypts both artifacts client-side with authenticated **AES-256-GCM** using your customer-held `BACKUP_ENCRYPTION_KEY`, uploads `.enc` objects + signed manifests (`manifests/backup_<ts>.json` and `latest.json`), and enforces off-site retention (`BACKUP_OFFSITE_RETENTION_DAYS` / `BACKUP_OFFSITE_MIN_KEEP`).
+   - Schedule via host systemd timer ([count-it-keep-it-backup.timer](file:///c:/Users/mohamed/Desktop/count-it-keep-it/deploy/systemd/count-it-keep-it-backup.timer) installed by `scripts/vps-setup.sh`), cron, or the containerized `--profile backup` Compose service in `docker-compose.prod.yml`.
    - Always use `DIRECT_DATABASE_URL` (non-pooler) when backing up managed Neon/PgBouncer instances.
-2. **Restore & Verification ([restore-db.sh](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/restore-db.sh)):**
-   - Validates `.sha256` checksums before restoring into a target database and uploads directory.
-3. **Automated Restore Drill (`npm run test:restore` / [test-backup-restore.mjs](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/test-backup-restore.mjs)):**
-   - Runs automatically in CI on every push/PR and can be executed locally against an ephemeral Postgres container (`npm run test:restore`, or `npm run test:restore -- --dev-copy` to drill against a copy of dev data).
-   - **Recommended cadence:** Monthly production restore drill into a scratch database followed by `GET /ready`, `GET /api/audit-logs/verify`, and `GET /api/accounting/reports/reconciliation`.
+2. **Backup Freshness Check & 26-Hour Alerting:**
+   - **Admin API:** `GET /api/admin/backups/freshness` (add `?strict=true` to return HTTP `503` whenever age exceeds `BACKUP_MAX_AGE_HOURS`, default `26`).
+   - **Prometheus Alertmanager Rule** (scraped from `/api/metrics`):
+     ```yaml
+     groups:
+       - name: erp-backups
+         rules:
+           - alert: ErpBackupStaleOrMissing
+             expr: erp_backup_freshness_ok == 0 or erp_backup_age_seconds > 93600
+             for: 10m
+             labels:
+               severity: critical
+             annotations:
+               summary: "ERP backup is missing or older than 26 hours"
+               description: "Last successful backup age is {{ $value }}s (threshold 93600s / 26h). Inspect count-it-keep-it-backup.timer and /var/log/erp-backup.log."
+     ```
+3. **Restore & Verification ([restore-db.sh](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/restore-db.sh)):**
+   - Validates `.sha256` checksums (and transparently decrypts `.enc` files when `BACKUP_ENCRYPTION_KEY` is set) before restoring into a target database and uploads directory.
+4. **Monthly Off-Site Restore Drill (`npm run drill:restore` / [monthly-restore-drill.mjs](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/monthly-restore-drill.mjs)):**
+   - Downloads the latest encrypted off-site backup from S3/R2/MinIO (or `--local-dir <dir>`), decrypts with `BACKUP_ENCRYPTION_KEY`, verifies SHA-256 checksums, restores into an ephemeral scratch PostgreSQL 18 container, runs Drizzle migrations, and verifies **all 8 reconciliation controls**, **accounting setup health (28/28)**, and the **audit-log SHA-256 hash chain**.
+   - Scheduled monthly via [count-it-keep-it-restore-drill.timer](file:///c:/Users/mohamed/Desktop/count-it-keep-it/deploy/systemd/count-it-keep-it-restore-drill.timer) or run manually: `npm run drill:restore`.
+5. **CI Backup/Restore Upgrade Gate (`npm run test:restore` / [test-backup-restore.mjs](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/test-backup-restore.mjs)):**
+   - Runs automatically in CI on every push/PR against Postgres 18.
 
 ---
 
@@ -143,4 +165,10 @@ TOTP secrets in `user_mfa` are encrypted with AES-256-GCM and tagged with `key_v
 | `ETA_INVOICE_VERSION` | `1.0` | No | B2B e-Invoice schema version (`1.0` signed or `0.9` unsigned preprod) |
 | `ETA_SIGNER_URL` / `ETA_SIGNER_TOKEN` / `ETA_SIGNER_TIMEOUT_MS` | `""` / `""` / `10000` | If `ETA_INVOICE_VERSION=1.0` | Local CAdES-BES USB token signer bridge URL & auth token |
 | `PRE_DEPLOY_BACKUP` / `BACKUP_DIR` / `BACKUP_RETENTION_DAYS` / `BACKUP_MIN_KEEP` | `true` / `/var/backups/count-it-keep-it` / `14` / `5` | Recommended | Used by `scripts/deploy.sh` and `scripts/backup-db.sh` |
+| `BACKUP_STATUS_FILE` / `BACKUP_MAX_AGE_HOURS` | `/var/backups/count-it-keep-it/last-backup-status.json` / `26` | Recommended | Freshness status JSON file and stale threshold (hours) checked by `/api/admin/backups/freshness` & `/api/metrics` |
+| `BACKUP_S3_BUCKET` / `ENDPOINT` / `REGION` / `PREFIX` / `FORCE_PATH_STYLE` | `""` / `""` / `auto` / `backups/count-it-keep-it` / `false` | Recommended (off-site) | S3-compatible off-site backup target (Cloudflare R2, MinIO, AWS S3) |
+| `BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY` | `""` | If `BACKUP_S3_BUCKET` set | Off-site backup bucket credentials |
+| `BACKUP_ENCRYPTION_KEY` | `""` | **Yes** if off-site | Customer-held 32-byte key (64 hex or base64) for client-side AES-256-GCM encryption of off-site backups |
+| `BACKUP_OFFSITE_RETENTION_DAYS` / `BACKUP_OFFSITE_MIN_KEEP` / `BACKUP_OFFSITE_REQUIRED` | `30` / `7` / `false` | No | Off-site S3 retention policy and strict off-site requirement toggle |
+| `SMOKE_ADMIN_EMAIL` / `SMOKE_ADMIN_PASSWORD` | `""` | Optional | Admin credentials used by `scripts/smoke-test.mjs` and post-deploy smoke verification in `scripts/deploy.sh` |
 | `TEST_DATABASE_URL` / `USE_REMOTE_TEST_DB` / `TEST_PG_PORT` / `RESTORE_TEST_ADMIN_URL` | Local Docker PG 18 (`5439`) | Test/CI only | Test runner DB overrides (`scripts/run-with-local-test-db.mjs`, `test-backup-restore.mjs`) |

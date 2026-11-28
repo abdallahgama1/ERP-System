@@ -48,6 +48,33 @@ What `scripts/backup-db.sh` does:
 STORAGE_LOCAL_DIR=./backend/uploads bash scripts/backup-db.sh ./backups
 ```
 
+### Encrypted Off-Site S3 Sync (Cloudflare R2, MinIO, AWS S3)
+
+When `BACKUP_S3_BUCKET` and `BACKUP_ENCRYPTION_KEY` are configured in `.env`, `scripts/backup-db.sh` automatically invokes `scripts/backup-offsite.mjs`:
+1. Encrypts both the `.dump` and `erp_uploads_*.tar.gz` client-side using authenticated **AES-256-GCM** (`CKIBK1` envelope) with your customer-held 32-byte `BACKUP_ENCRYPTION_KEY` (`openssl rand -hex 32`).
+2. Uploads encrypted `.enc` objects plus a SHA-256 manifest (`<prefix>/manifests/backup_<UTC>.json` and `<prefix>/latest.json`) to Cloudflare R2 (`BACKUP_S3_FORCE_PATH_STYLE=false`), MinIO (`BACKUP_S3_FORCE_PATH_STYLE=true`), or AWS S3 (`BACKUP_S3_ENDPOINT=""`).
+3. Enforces off-site retention (`BACKUP_OFFSITE_RETENTION_DAYS=30`, `BACKUP_OFFSITE_MIN_KEEP=7`) and updates `last-backup-status.json` for `GET /api/admin/backups/freshness` and Prometheus `erp_backup_age_seconds`.
+
+**Scheduling options (pick one):**
+- **Host systemd timer (recommended on Ubuntu/Debian):** `scripts/vps-setup.sh` installs and enables `deploy/systemd/count-it-keep-it-backup.timer` (`02:00 UTC` daily). Check status with `systemctl list-timers count-it-keep-it-*`.
+- **Docker Compose backup profile:** `docker compose -f docker-compose.prod.yml --profile backup up -d` starts `backup-scheduler` (`BACKUP_CRON_SCHEDULE="0 2 * * *"`).
+
+### Monthly Off-Site Restore Drill (`npm run drill:restore`)
+
+Run monthly (or enable `deploy/systemd/count-it-keep-it-restore-drill.timer` for the 1st of each month at `04:00 UTC`):
+```bash
+cd /opt/count-it-keep-it
+set -a && source .env && set +a
+# Downloads latest encrypted S3 backup, decrypts with BACKUP_ENCRYPTION_KEY, restores into
+# an isolated scratch PostgreSQL 18 container, applies Drizzle migrations, and verifies
+# 8/8 reconciliation controls, 28/28 setup-health mappings, and the audit-log hash chain:
+npm run drill:restore
+
+# Or test a local backup directory:
+node scripts/monthly-restore-drill.mjs --local-dir /var/backups/count-it-keep-it
+```
+The drill prints RPO (backup age in hours), RTO (restore + verification seconds), row counts, and exits non-zero if any check fails. Always destroy temporary scratch databases automatically (handled in `finally`).
+
 ---
 
 ## 3. Restoring a Backup (`scripts/restore-db.sh`)
