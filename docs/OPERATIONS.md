@@ -71,16 +71,19 @@ All HTTP requests receive a sanitized `x-request-id` correlation header echoed i
 - **Fresh DB:** The very first account created on `/signup` automatically becomes `admin` with `'all'` branch scope.
 - **Create a new admin, promote an existing user, or reset an admin password without raw SQL:**
   ```bash
-  # Create a new admin (auto-generates a strong password if --password is omitted)
+  # Interactive hidden password prompt (local DB)
   npm run admin:create -- --email admin@company.com --name "Company Admin"
 
+  # Pipe password safely via stdin on production VPS (never pass passwords as CLI arguments)
+  printf '%s\n' "$ADMIN_SECRET" | npm run admin:create -- --env-file /opt/count-it-keep-it/.env --allow-production --email admin@company.com --password-stdin
+
   # Promote an existing user to admin (preserves their current password)
-  npm run admin:create -- --email existing@company.com
+  npm run admin:create -- --env-file /opt/count-it-keep-it/.env --allow-production --email existing@company.com
 
   # Reset an admin's password and revoke active sessions
-  npm run admin:create -- --email admin@company.com --reset-password
+  npm run admin:create -- --env-file /opt/count-it-keep-it/.env --allow-production --email admin@company.com --reset-password
   ```
-  On a production VPS, pass `--env-file /opt/count-it-keep-it/.env`. All changes are recorded in the tamper-evident `audit_logs` hash chain.
+  `scripts/create-admin.mjs` refuses `--password` CLI arguments (to prevent shell-history/`ps` leakage), refuses production or non-local `DATABASE_URL` targets without `--allow-production`, never prints passwords or hashes to stdout/stderr, and records every change in the tamper-evident `audit_logs` hash chain.
 
 ### MFA Encryption Key Rotation
 

@@ -2,17 +2,20 @@
 /**
  * Create a new Admin user, promote an existing user to Admin, or reset an Admin's password.
  *
- * Works safely on both a brand-new empty database (runs ensureSeededDefaults inside a transaction)
- * and an existing production/development database, while keeping the tamper-evident audit hash chain valid.
+ * Security invariants:
+ * - NEVER accepts --password on the command line (argv leaks to `ps` and shell history).
+ *   Password is supplied via interactive hidden TTY prompt, --password-stdin, or ADMIN_PASSWORD env var.
+ * - Refuses to run against a production or non-local DATABASE_URL unless --allow-production is passed.
+ * - Records every change inside the tamper-evident SHA-256 `audit_logs` hash chain.
+ * - NEVER prints any password, hash, token, or database credential to stdout/stderr.
  *
  * Usage:
- *   npm run admin:create -- --email admin@co.eg
- *   npm run admin:create -- --email admin@co.eg --name "Mohamed" --password "StrongPassword123!"
- *   npm run admin:create -- --email existing@co.eg --promote
+ *   npm run admin:create -- --email admin@co.eg --name "Mohamed"
+ *   printf '%s\n' "$SECRET" | npm run admin:create -- --email admin@co.eg --password-stdin
+ *   npm run admin:create -- --email existing@co.eg
  *   npm run admin:create -- --email admin@co.eg --reset-password
- *   npm run admin:create -- --env-file /opt/count-it-keep-it/.env --email admin@co.eg --json
+ *   npm run admin:create -- --env-file /opt/count-it-keep-it/.env --allow-production --email admin@co.eg
  */
-import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,24 +25,158 @@ import { register } from "tsx/esm/api";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h" || a === "--help") {
       opts.help = true;
+    } else if (a.startsWith("--password=")) {
+      opts.unsafeCliPassword = true;
+    } else if (a === "--password") {
+      opts.unsafeCliPassword = true;
     } else if (a.startsWith("--")) {
-      const k = a.slice(2);
-      const next = argv[i + 1];
-      if (!next || next.startsWith("--")) {
-        opts[k] = true;
+      const eqIdx = a.indexOf("=");
+      if (eqIdx > 2) {
+        opts[a.slice(2, eqIdx)] = a.slice(eqIdx + 1);
       } else {
-        opts[k] = next;
-        i += 1;
+        const k = a.slice(2);
+        const next = argv[i + 1];
+        if (!next || next.startsWith("--")) {
+          opts[k] = true;
+        } else {
+          opts[k] = next;
+          i += 1;
+        }
       }
     }
   }
   return opts;
+}
+
+export function isProductionOrRemoteDbUrl(databaseUrl, nodeEnv = process.env.NODE_ENV) {
+  if (String(nodeEnv ?? "").toLowerCase() === "production") return true;
+  if (!databaseUrl) return false;
+  try {
+    const parsed = new URL(databaseUrl);
+    const host = parsed.hostname.toLowerCase();
+    const isLocalHost =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "postgres" ||
+      host === "db";
+    return !isLocalHost;
+  } catch {
+    return true;
+  }
+}
+
+export function assertSafeDatabaseTarget({
+  databaseUrl = process.env.DATABASE_URL ?? "",
+  allowProduction = false,
+  nodeEnv = process.env.NODE_ENV ?? "",
+} = {}) {
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required (configure backend/.env or pass --env-file <path>).");
+  }
+  if (isProductionOrRemoteDbUrl(databaseUrl, nodeEnv) && !allowProduction) {
+    throw new Error(
+      "Refusing to run admin:create against a production or non-local DATABASE_URL without --allow-production. " +
+        "Verify the target database and re-run with --allow-production."
+    );
+  }
+}
+
+export function assertNoUnsafeCliPassword(opts) {
+  if (opts?.unsafeCliPassword) {
+    throw new Error(
+      "Passing --password on the command line is unsafe (it leaks to shell history and process listings). " +
+        "Provide the password via interactive TTY prompt, --password-stdin, or the ADMIN_PASSWORD environment variable."
+    );
+  }
+}
+
+async function readPasswordFromStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
+  const firstLine = raw.split(/\r?\n/, 1)[0] ?? "";
+  return firstLine;
+}
+
+async function promptHiddenPassword(label) {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw new Error(
+      "Interactive password prompt requires a TTY. In non-interactive shells, pipe the password with --password-stdin or set ADMIN_PASSWORD."
+    );
+  }
+  return new Promise((resolve, reject) => {
+    const stdin = process.stdin;
+    const stderr = process.stderr;
+    stderr.write(label);
+    let value = "";
+    const wasRaw = stdin.isRaw;
+    stdin.setRawMode(true);
+    stdin.resume();
+
+    const cleanup = () => {
+      stdin.removeListener("data", onData);
+      if (typeof stdin.setRawMode === "function") {
+        stdin.setRawMode(Boolean(wasRaw));
+      }
+      stdin.pause();
+    };
+
+    const onData = (buf) => {
+      const str = buf.toString("utf8");
+      for (const ch of str) {
+        if (ch === "\u0003") {
+          cleanup();
+          stderr.write("\n");
+          reject(new Error("Aborted by user."));
+          return;
+        }
+        if (ch === "\r" || ch === "\n") {
+          cleanup();
+          stderr.write("\n");
+          resolve(value);
+          return;
+        }
+        if (ch === "\u007f" || ch === "\b") {
+          value = value.slice(0, -1);
+        } else {
+          value += ch;
+        }
+      }
+    };
+
+    stdin.on("data", onData);
+  });
+}
+
+async function resolveInteractiveOrStdinPassword({ passwordStdin = false, envPassword = "" } = {}) {
+  if (passwordStdin) {
+    const stdinPw = await readPasswordFromStdin();
+    if (!stdinPw) {
+      throw new Error("--password-stdin was specified, but stdin was empty.");
+    }
+    return stdinPw;
+  }
+  if (envPassword) {
+    return envPassword;
+  }
+  if (process.stdin.isTTY && process.stderr.isTTY) {
+    const first = await promptHiddenPassword("Enter admin password (min 8 chars): ");
+    const confirm = await promptHiddenPassword("Confirm admin password: ");
+    if (first !== confirm) {
+      throw new Error("Passwords do not match.");
+    }
+    return first;
+  }
+  return "";
 }
 
 export async function createOrPromoteAdmin(
@@ -101,7 +238,6 @@ export async function createOrPromoteAdmin(
     let userId;
     let action;
     let passwordChanged = false;
-    let finalPassword = null;
     let effectiveName = resolvedName;
 
     if (existingUser) {
@@ -127,8 +263,12 @@ export async function createOrPromoteAdmin(
       const shouldSetPassword = Boolean(explicitPassword || resetPassword);
 
       if (shouldSetPassword) {
-        finalPassword = explicitPassword || randomBytes(18).toString("base64url");
-        const passwordHash = await hashPassword(finalPassword);
+        if (!explicitPassword) {
+          throw new Error(
+            "A password is required for --reset-password. Supply it via interactive prompt, --password-stdin, or ADMIN_PASSWORD."
+          );
+        }
+        const passwordHash = await hashPassword(explicitPassword);
         await tx
           .update(users)
           .set({
@@ -161,8 +301,12 @@ export async function createOrPromoteAdmin(
         action = existingRole?.role === "admin" ? "admin.verified" : "admin.promoted";
       }
     } else {
-      finalPassword = explicitPassword || randomBytes(18).toString("base64url");
-      const passwordHash = await hashPassword(finalPassword);
+      if (!explicitPassword) {
+        throw new Error(
+          "A password is required when creating a new admin account. Supply it via interactive prompt, --password-stdin, or ADMIN_PASSWORD."
+        );
+      }
+      const passwordHash = await hashPassword(explicitPassword);
       const [created] = await tx
         .insert(users)
         .values({
@@ -241,6 +385,7 @@ export async function createOrPromoteAdmin(
       },
     });
 
+    // Never return passwords, hashes, or secrets from this helper
     return {
       userId,
       name: effectiveName,
@@ -249,7 +394,6 @@ export async function createOrPromoteAdmin(
       branchScopeMode: "all",
       action,
       passwordChanged,
-      password: passwordChanged ? finalPassword : null,
     };
   });
 }
@@ -259,56 +403,97 @@ const isDirectEntry =
 
 if (isDirectEntry) {
   const opts = parseArgs(process.argv.slice(2));
-  if (opts.help || !opts.email) {
+  if (opts.help || (!opts.email && !opts.unsafeCliPassword)) {
     console.log(`Usage:
-  npm run admin:create -- --email <email> [--name <name>] [--password <pass>] [--reset-password] [--env-file <path>] [--json]
+  npm run admin:create -- --email <email> [--name <name>] [--reset-password] [--password-stdin] [--allow-production] [--env-file <path>] [--json]
+
+Password input (never passed via --password CLI flag):
+  - Interactive TTY: prompts securely with masked input
+  - Non-interactive: pipe password via --password-stdin or set ADMIN_PASSWORD env var
+  - Promoting an existing user without --reset-password keeps their existing password
 
 Examples:
-  # Create a new admin with an auto-generated strong password:
+  # Interactive hidden password prompt (local DB):
   npm run admin:create -- --email admin@company.com --name "Company Admin"
 
+  # Pipe password safely via stdin on production VPS:
+  printf '%s\\n' "$ADMIN_SECRET" | npm run admin:create -- --env-file /opt/count-it-keep-it/.env --allow-production --email admin@company.com --password-stdin
+
   # Promote an existing user to admin (keeps their current password):
-  npm run admin:create -- --email existing@company.com
+  npm run admin:create -- --env-file /opt/count-it-keep-it/.env --allow-production --email existing@company.com
 
   # Reset an admin's password (revokes active sessions):
-  npm run admin:create -- --email admin@company.com --reset-password`);
+  npm run admin:create -- --env-file /opt/count-it-keep-it/.env --allow-production --email admin@company.com --reset-password`);
     process.exit(opts.help ? 0 : 1);
+  }
+
+  try {
+    assertNoUnsafeCliPassword(opts);
+  } catch (err) {
+    console.error(`[admin:create] FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
 
   if (opts["env-file"]) {
     dotenv.config({ path: path.resolve(process.cwd(), opts["env-file"]) });
-  } else {
+  } else if (!process.env.DATABASE_URL) {
     const backendEnv = path.resolve(repoRoot, "backend/.env");
     const rootEnv = path.resolve(repoRoot, ".env");
     if (fs.existsSync(backendEnv)) dotenv.config({ path: backendEnv });
     else if (fs.existsSync(rootEnv)) dotenv.config({ path: rootEnv });
   }
 
+  try {
+    assertSafeDatabaseTarget({
+      databaseUrl: process.env.DATABASE_URL ?? "",
+      allowProduction: Boolean(opts["allow-production"]),
+      nodeEnv: process.env.NODE_ENV ?? "",
+    });
+  } catch (err) {
+    console.error(`[admin:create] FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
   const unregisterTsx = register();
   (async () => {
     const { closeDatabase, getDb } = await import("../backend/src/db/index.ts");
+    const { eq } = await import("drizzle-orm");
+    const { users } = await import("../backend/drizzle/schema.ts");
     try {
-      const result = await createOrPromoteAdmin(getDb(), {
-        email: opts.email,
+      const normalizedEmail = String(opts.email ?? "").trim().toLowerCase();
+      const db = getDb();
+      const [existing] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, normalizedEmail))
+        .limit(1);
+
+      const needsPassword = !existing || Boolean(opts["reset-password"]) || Boolean(opts["password-stdin"]);
+      const suppliedPassword = needsPassword
+        ? await resolveInteractiveOrStdinPassword({
+            passwordStdin: Boolean(opts["password-stdin"]),
+            envPassword: process.env.ADMIN_PASSWORD ?? "",
+          })
+        : "";
+
+      const result = await createOrPromoteAdmin(db, {
+        email: normalizedEmail,
         name: opts.name ?? "",
-        password: opts.password ?? "",
+        password: suppliedPassword,
         resetPassword: Boolean(opts["reset-password"]),
       });
+
       if (opts.json) {
         console.log(JSON.stringify({ ok: true, ...result }, null, 2));
       } else {
         console.log(`Admin account ready (${result.action}):`);
-        console.log(`  User ID:      ${result.userId}`);
-        console.log(`  Name:         ${result.name}`);
-        console.log(`  Email:        ${result.email}`);
-        console.log(`  Role:         ${result.role} (all branches)`);
-        if (result.password) {
-          console.log(`  Password:     ${result.password}`);
-          console.log("");
-          console.log("Log in at /login with this email & password, then enable 2FA in Security Settings.");
-        } else {
-          console.log("  Password:     (unchanged; pass --reset-password to generate a new password)");
-        }
+        console.log(`  User ID:          ${result.userId}`);
+        console.log(`  Name:             ${result.name}`);
+        console.log(`  Email:            ${result.email}`);
+        console.log(`  Role:             ${result.role} (all branches)`);
+        console.log(`  Password updated: ${result.passwordChanged ? "yes (not printed for security)" : "no (unchanged)"}`);
+        console.log("");
+        console.log("Log in at /login and enable 2FA in Security Settings.");
       }
     } finally {
       await closeDatabase().catch(() => {});

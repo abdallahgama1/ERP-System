@@ -657,4 +657,58 @@ describeWithDb("Run B1: Backend Idempotency, Normalized Unique Constraints, TRN 
       );
     }
   }, 30_000);
+
+  it("5. admin can delete an unused branch that has audit_logs entries without modifying any audit row or breaking the hash chain", async () => {
+    const { auditLogs, branches } = await import("../../drizzle/schema.ts");
+
+    // Create a brand-new branch (writes branch.created to audit_logs with branch_id = created.id)
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/branches",
+      headers: adminHeaders,
+      payload: { name: "Ephemeral Branch", branchType: "retail" },
+    });
+    expect(createRes.statusCode).toBe(201);
+    const createdBranchId = createRes.json().branch.id as string;
+
+    const [auditBefore] = await db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.entityId, createdBranchId), eq(auditLogs.action, "branch.created")))
+      .limit(1);
+    expect(auditBefore).toBeDefined();
+    expect(auditBefore!.branchId).toBe(createdBranchId);
+
+    // Delete the unused branch via API
+    const deleteRes = await app.inject({
+      method: "DELETE",
+      url: `/api/branches/${createdBranchId}`,
+      headers: adminHeaders,
+    });
+    expect(deleteRes.statusCode).toBe(200);
+    expect(deleteRes.json().ok).toBe(true);
+
+    // Branch row is gone
+    const remainingBranch = await db.select({ id: branches.id }).from(branches).where(eq(branches.id, createdBranchId));
+    expect(remainingBranch).toHaveLength(0);
+
+    // Original branch.created audit row is 100% untouched (branchId & entryHash unchanged)
+    const [auditAfter] = await db
+      .select()
+      .from(auditLogs)
+      .where(eq(auditLogs.id, auditBefore!.id))
+      .limit(1);
+    expect(auditAfter).toBeDefined();
+    expect(auditAfter!.branchId).toBe(createdBranchId);
+    expect(auditAfter!.entryHash).toBe(auditBefore!.entryHash);
+
+    // Audit hash chain verification passes cleanly
+    const verifyRes = await app.inject({
+      method: "GET",
+      url: "/api/audit-logs/verify",
+      headers: adminHeaders,
+    });
+    expect(verifyRes.statusCode).toBe(200);
+    expect(verifyRes.json().valid).toBe(true);
+  });
 });

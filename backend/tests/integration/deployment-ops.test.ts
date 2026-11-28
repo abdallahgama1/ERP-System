@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -873,9 +874,18 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
     }
   });
 
-  it("4. scripts/create-admin.mjs creates new admins, promotes existing users, resets passwords, preserves audit chain, and refuses Smoke Monitor", async () => {
-    const createAdminUrl = pathToFileURL(path.resolve(__dirname, "../../../scripts/create-admin.mjs")).href;
-    const { createOrPromoteAdmin } = (await import(createAdminUrl)) as {
+  it("4. scripts/create-admin.mjs refuses --password argv & prod DB without --allow-production, accepts stdin/env password, never prints secrets, and preserves audit chain", async () => {
+    const createAdminScript = path.resolve(__dirname, "../../../scripts/create-admin.mjs");
+    const createAdminUrl = pathToFileURL(createAdminScript).href;
+    const {
+      assertNoUnsafeCliPassword,
+      assertSafeDatabaseTarget,
+      createOrPromoteAdmin,
+      parseArgs,
+    } = (await import(createAdminUrl)) as {
+      parseArgs: (argv: string[]) => Record<string, unknown>;
+      assertNoUnsafeCliPassword: (opts: Record<string, unknown>) => void;
+      assertSafeDatabaseTarget: (opts: Record<string, unknown>) => void;
       createOrPromoteAdmin: (
         database: AppDatabase,
         opts: Record<string, unknown>
@@ -886,32 +896,87 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
         branchScopeMode: string;
         action: string;
         passwordChanged: boolean;
-        password: string | null;
+        password?: unknown;
       }>;
     };
 
-    // 4a. Create a brand-new admin with auto-generated password
-    const created = await createOrPromoteAdmin(db, {
-      email: "cli-admin@test.local",
-      name: "CLI Admin",
-    });
-    expect(created.action).toBe("admin.created");
-    expect(created.role).toBe("admin");
-    expect(created.branchScopeMode).toBe("all");
-    expect(created.passwordChanged).toBe(true);
-    expect(created.password).toBeTruthy();
+    // 4a. Refuses --password on CLI argv (prevents ps/shell history leakage)
+    expect(() => assertNoUnsafeCliPassword(parseArgs(["--email", "a@b.eg", "--password", "Leak1234!"]))).toThrow(
+      /unsafe/i
+    );
+    expect(() => assertNoUnsafeCliPassword(parseArgs(["--email", "a@b.eg", "--password=Leak1234!"]))).toThrow(
+      /unsafe/i
+    );
+
+    // 4b. Refuses production or remote DATABASE_URL without --allow-production
+    expect(() =>
+      assertSafeDatabaseTarget({
+        databaseUrl: "postgresql://erp:pw@prod-db.example.com:5432/erp",
+        allowProduction: false,
+      })
+    ).toThrow(/--allow-production/);
+    expect(() =>
+      assertSafeDatabaseTarget({
+        databaseUrl: "postgresql://erp:pw@127.0.0.1:5432/erp",
+        allowProduction: false,
+        nodeEnv: "production",
+      })
+    ).toThrow(/--allow-production/);
+    expect(() =>
+      assertSafeDatabaseTarget({
+        databaseUrl: "postgresql://erp:pw@prod-db.example.com:5432/erp",
+        allowProduction: true,
+        nodeEnv: "production",
+      })
+    ).not.toThrow();
+
+    // 4c. CLI execution via --password-stdin creates admin and NEVER prints the password or hash
+    const initialSecret = "CliStdinSecret!2026#A";
+    const cliRun = execFileSync(
+      process.execPath,
+      [createAdminScript, "--email", "cli-admin@test.local", "--name", "CLI Admin", "--password-stdin", "--json"],
+      {
+        input: `${initialSecret}\n`,
+        env: { ...process.env, DATABASE_URL: testDbUrl, NODE_ENV: "development" },
+        encoding: "utf8",
+      }
+    );
+    expect(cliRun).not.toContain(initialSecret);
+    expect(cliRun).not.toContain("passwordHash");
+    const createdJson = JSON.parse(cliRun);
+    expect(createdJson.ok).toBe(true);
+    expect(createdJson.action).toBe("admin.created");
+    expect(createdJson.role).toBe("admin");
+    expect(createdJson.branchScopeMode).toBe("all");
+    expect(createdJson.passwordChanged).toBe(true);
+    expect(createdJson.password).toBeUndefined();
+
+    // CLI refuses --password even when spawned as a real process
+    let unsafeCliExitFailed = false;
+    try {
+      execFileSync(
+        process.execPath,
+        [createAdminScript, "--email", "bad@test.local", "--password", "CliArgLeak!123"],
+        { env: { ...process.env, DATABASE_URL: testDbUrl, NODE_ENV: "development" }, stdio: "pipe" }
+      );
+    } catch (err) {
+      unsafeCliExitFailed = true;
+      const stderr = String((err as { stderr?: Buffer | string }).stderr ?? "");
+      expect(stderr).toMatch(/unsafe/i);
+    }
+    expect(unsafeCliExitFailed).toBe(true);
 
     const cliAdminLogin = await app.inject({
       method: "POST",
       url: "/api/auth/login",
-      payload: { email: created.email, password: created.password },
+      payload: { email: "cli-admin@test.local", password: initialSecret },
     });
     expect(cliAdminLogin.statusCode).toBe(200);
     expect(cliAdminLogin.json().user.role).toBe("admin");
     expect(cliAdminLogin.json().user.branchScopeMode).toBe("all");
     const cliAdminHeaders = authHeaders(cliAdminLogin);
 
-    // 4b. Promote an existing standard user (keeping existing password)
+    // 4d. Promote an existing standard user (keeping existing password)
     const regSignup = await app.inject({
       method: "POST",
       url: "/api/auth/signup",
@@ -923,7 +988,7 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
     const promoted = await createOrPromoteAdmin(db, { email: "regular-to-admin@test.local" });
     expect(promoted.action).toBe("admin.promoted");
     expect(promoted.passwordChanged).toBe(false);
-    expect(promoted.password).toBeNull();
+    expect("password" in promoted).toBe(false);
 
     const promotedLogin = await app.inject({
       method: "POST",
@@ -933,14 +998,16 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
     expect(promotedLogin.statusCode).toBe(200);
     expect(promotedLogin.json().user.role).toBe("admin");
 
-    // 4c. Reset admin password revokes prior session & accepts new password
+    // 4e. Reset admin password revokes prior session, accepts new password, and never returns password
+    const rotatedSecret = "RotatedAdminSecret!2026#B";
     const reset = await createOrPromoteAdmin(db, {
-      email: created.email,
+      email: "cli-admin@test.local",
+      password: rotatedSecret,
       resetPassword: true,
     });
     expect(reset.action).toBe("admin.password_reset");
     expect(reset.passwordChanged).toBe(true);
-    expect(reset.password).not.toBe(created.password);
+    expect("password" in reset).toBe(false);
 
     const oldSessionMe = await app.inject({
       method: "GET",
@@ -952,12 +1019,12 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
     const newLogin = await app.inject({
       method: "POST",
       url: "/api/auth/login",
-      payload: { email: created.email, password: reset.password },
+      payload: { email: "cli-admin@test.local", password: rotatedSecret },
     });
     expect(newLogin.statusCode).toBe(200);
     expect(newLogin.json().user.role).toBe("admin");
 
-    // 4d. Refuses to elevate the dedicated read-only Smoke Monitor service account
+    // 4f. Refuses to elevate the dedicated read-only Smoke Monitor service account
     const createSmokeUrl = pathToFileURL(path.resolve(__dirname, "../../../scripts/create-smoke-user.mjs")).href;
     const { provisionSmokeUser } = (await import(createSmokeUrl)) as {
       provisionSmokeUser: (database: AppDatabase, opts?: Record<string, unknown>) => Promise<{ email: string }>;
@@ -967,7 +1034,7 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
       /Refusing to promote dedicated read-only/i
     );
 
-    // 4e. Audit log hash chain remains 100% valid
+    // 4g. Audit log hash chain remains 100% valid
     const verifyRes = await app.inject({
       method: "GET",
       url: "/api/audit-logs/verify",
