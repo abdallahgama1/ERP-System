@@ -9,6 +9,7 @@ import {
 import { BookOpen, Plus, Search, FileSpreadsheet } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
@@ -336,8 +337,14 @@ export default function ChartOfAccounts() {
       </Tabs>
 
       {/* New Account Modal */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog
+        open={createOpen}
+        onOpenChange={(o) => {
+          if (!o && createAccount.isPending) return;
+          setCreateOpen(o);
+        }}
+      >
+        <DialogContent className="max-w-md" locked={createAccount.isPending}>
           <DialogHeader>
             <DialogTitle>{t("accounting.accounts.add", "New Account")}</DialogTitle>
             <DialogDescription>
@@ -391,12 +398,16 @@ export default function ChartOfAccounts() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+            <Button variant="outline" disabled={createAccount.isPending} onClick={() => setCreateOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={() => void handleCreate()} disabled={createAccount.isPending}>
+            <SubmitButton
+              type="button"
+              pending={createAccount.isPending}
+              onClick={() => void handleCreate()}
+            >
               {t("common.create")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

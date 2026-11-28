@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { FixedAssetDepreciationMethod, FixedAssetDto } from "@erp/shared";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -305,8 +306,14 @@ export default function FixedAssets() {
       </Card>
 
       {/* Register Fixed Asset Dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-xl">
+      <Dialog
+        open={createOpen}
+        onOpenChange={(o) => {
+          if (!o && createAsset.isPending) return;
+          setCreateOpen(o);
+        }}
+      >
+        <DialogContent className="max-w-xl" locked={createAsset.isPending}>
           <DialogHeader>
             <DialogTitle>Register Fixed Asset</DialogTitle>
             <DialogDescription>
@@ -446,19 +453,25 @@ export default function FixedAssets() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+            <Button variant="outline" disabled={createAsset.isPending} onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => void handleCreate()} disabled={createAsset.isPending}>
+            <SubmitButton type="button" pending={createAsset.isPending} onClick={() => void handleCreate()}>
               Capitalize Asset
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Run Monthly Depreciation Dialog */}
-      <Dialog open={depOpen} onOpenChange={setDepOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog
+        open={depOpen}
+        onOpenChange={(o) => {
+          if (!o && runDepreciation.isPending) return;
+          setDepOpen(o);
+        }}
+      >
+        <DialogContent className="max-w-md" locked={runDepreciation.isPending}>
           <DialogHeader>
             <DialogTitle>Run Automated Monthly Depreciation</DialogTitle>
             <DialogDescription>
@@ -475,19 +488,25 @@ export default function FixedAssets() {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDepOpen(false)}>
+            <Button variant="outline" disabled={runDepreciation.isPending} onClick={() => setDepOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => void handleRunDep()} disabled={runDepreciation.isPending}>
+            <SubmitButton type="button" pending={runDepreciation.isPending} onClick={() => void handleRunDep()}>
               Post Depreciation Run
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Dispose Asset Dialog */}
-      <Dialog open={Boolean(disposeTarget)} onOpenChange={(o) => !o && setDisposeTarget(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog
+        open={Boolean(disposeTarget)}
+        onOpenChange={(o) => {
+          if (!o && disposeAsset.isPending) return;
+          if (!o) setDisposeTarget(null);
+        }}
+      >
+        <DialogContent className="max-w-md" locked={disposeAsset.isPending}>
           <DialogHeader>
             <DialogTitle>Dispose Fixed Asset</DialogTitle>
             <DialogDescription>
@@ -518,12 +537,17 @@ export default function FixedAssets() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDisposeTarget(null)}>
+            <Button variant="outline" disabled={disposeAsset.isPending} onClick={() => setDisposeTarget(null)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={() => void handleDispose()} disabled={disposeAsset.isPending}>
+            <SubmitButton
+              type="button"
+              variant="destructive"
+              pending={disposeAsset.isPending}
+              onClick={() => void handleDispose()}
+            >
               Confirm Disposal
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

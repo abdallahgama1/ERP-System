@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { CalendarClock, Lock, Unlock, Plus, RefreshCw, CheckCircle2, RotateCcw, AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -299,10 +300,12 @@ export default function FiscalPeriods() {
                           </TableCell>
                           <TableCell className="text-end">
                             {canLock && fy.status === "open" && (
-                              <Button
+                              <SubmitButton
+                                type="button"
                                 variant="outline"
                                 size="sm"
-                                disabled={togglePeriodLock.isPending}
+                                hideSlowText
+                                pending={togglePeriodLock.isPending}
                                 onClick={() => void handleToggleLock(p.id, isLocked)}
                               >
                                 {isLocked ? (
@@ -316,7 +319,7 @@ export default function FiscalPeriods() {
                                     {t("accounting.periods.lock", "Lock")}
                                   </>
                                 )}
-                              </Button>
+                              </SubmitButton>
                             )}
                           </TableCell>
                         </TableRow>
@@ -331,8 +334,14 @@ export default function FiscalPeriods() {
       )}
 
       {/* New Fiscal Year Dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog
+        open={createOpen}
+        onOpenChange={(o) => {
+          if (!o && createFiscalYear.isPending) return;
+          setCreateOpen(o);
+        }}
+      >
+        <DialogContent className="max-w-md" locked={createFiscalYear.isPending}>
           <DialogHeader>
             <DialogTitle>{t("accounting.periods.addYear", "New Fiscal Year")}</DialogTitle>
             <DialogDescription>
@@ -356,19 +365,25 @@ export default function FiscalPeriods() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+            <Button variant="outline" disabled={createFiscalYear.isPending} onClick={() => setCreateOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={() => void handleCreateYear()} disabled={createFiscalYear.isPending}>
+            <SubmitButton type="button" pending={createFiscalYear.isPending} onClick={() => void handleCreateYear()}>
               {t("common.create")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Year-End Fiscal Closing Wizard */}
-      <Dialog open={Boolean(closeTarget)} onOpenChange={(o) => !o && setCloseTarget(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog
+        open={Boolean(closeTarget)}
+        onOpenChange={(o) => {
+          if (!o && closeFiscalYear.isPending) return;
+          if (!o) setCloseTarget(null);
+        }}
+      >
+        <DialogContent className="max-w-md" locked={closeFiscalYear.isPending}>
           <DialogHeader>
             <DialogTitle>Year-End Closing Wizard — {closeTarget?.name}</DialogTitle>
             <DialogDescription>
@@ -385,16 +400,17 @@ export default function FiscalPeriods() {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCloseTarget(null)}>
+            <Button variant="outline" disabled={closeFiscalYear.isPending} onClick={() => setCloseTarget(null)}>
               Cancel
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
               variant="destructive"
+              pending={closeFiscalYear.isPending}
               onClick={() => void handleCloseYear()}
-              disabled={closeFiscalYear.isPending}
             >
               Execute Year-End Close
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -403,13 +419,14 @@ export default function FiscalPeriods() {
       <Dialog
         open={Boolean(reopenTarget)}
         onOpenChange={(o) => {
+          if (!o && reopenFiscalYear.isPending) return;
           if (!o) {
             setReopenTarget(null);
             setReopenError(null);
           }
         }}
       >
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg" locked={reopenFiscalYear.isPending}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-amber-600" />
@@ -490,6 +507,7 @@ export default function FiscalPeriods() {
           <DialogFooter>
             <Button
               variant="outline"
+              disabled={reopenFiscalYear.isPending}
               onClick={() => {
                 setReopenTarget(null);
                 setReopenError(null);
@@ -497,22 +515,30 @@ export default function FiscalPeriods() {
             >
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
               variant="destructive"
+              pending={reopenFiscalYear.isPending}
               onClick={() => void handleReopenYear()}
-              disabled={reopenFiscalYear.isPending || reopenReason.trim().length < 3}
+              disabled={reopenReason.trim().length < 3}
               data-testid="reopen-confirm-btn"
             >
               <RotateCcw className="h-4 w-4 me-1.5" />
               {t("accounting.periods.reopen.confirm", "Confirm Reopen")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Period-End FX Revaluation Wizard */}
-      <Dialog open={fxOpen} onOpenChange={setFxOpen}>
-        <DialogContent className="max-w-2xl">
+      <Dialog
+        open={fxOpen}
+        onOpenChange={(o) => {
+          if (!o && runFxRevaluation.isPending) return;
+          setFxOpen(o);
+        }}
+      >
+        <DialogContent className="max-w-2xl" locked={runFxRevaluation.isPending}>
           <DialogHeader>
             <DialogTitle>Period-End Foreign Currency Revaluation</DialogTitle>
             <DialogDescription>
@@ -578,15 +604,17 @@ export default function FiscalPeriods() {
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setFxOpen(false)}>
+            <Button variant="outline" disabled={runFxRevaluation.isPending} onClick={() => setFxOpen(false)}>
               Cancel
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
+              pending={runFxRevaluation.isPending}
               onClick={() => void handlePostFxReval()}
-              disabled={runFxRevaluation.isPending || (fxPreview?.lines.length ?? 0) === 0}
+              disabled={(fxPreview?.lines.length ?? 0) === 0}
             >
               Post FX Revaluation
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

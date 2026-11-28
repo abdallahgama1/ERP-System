@@ -288,7 +288,8 @@ export function useActionLocks(slowThresholdMs = DEFAULT_SLOW_THRESHOLD_MS) {
 
 /**
  * TanStack Query `useMutation` wrapper adding synchronous double-submit protection,
- * intent-scoped `Idempotency-Key` propagation, and 3-second slow-network feedback.
+ * intent-scoped `Idempotency-Key` propagation on BOTH `mutate` and `mutateAsync`,
+ * and 3-second slow-network feedback.
  */
 export function useIdempotentMutation<TData = unknown, TError = Error, TVariables = void, TContext = unknown>(
   options: UseMutationOptions<TData, TError, TVariables, TContext> & IdempotentActionOptions
@@ -299,19 +300,138 @@ export function useIdempotentMutation<TData = unknown, TError = Error, TVariable
   resetKey: () => void;
   guardOpenChange: (onOpenChange: (open: boolean) => void) => (open: boolean) => void;
 } {
-  const { slowThresholdMs, ...mutationOptions } = options;
-  const mutation = useMutation(mutationOptions);
-  const action = useIdempotentAction<[TVariables], TData>(
-    (variables) => mutation.mutateAsync(variables),
-    { slowThresholdMs }
+  const { slowThresholdMs = DEFAULT_SLOW_THRESHOLD_MS, mutationFn, ...restOptions } = options;
+  const inFlightRef = useRef(false);
+  const inFlightPromiseRef = useRef<Promise<TData> | null>(null);
+  const keyRef = useRef<string | null>(null);
+  const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+  const [isLockedPending, setIsLockedPending] = useState(false);
+  const [isSlow, setIsSlow] = useState(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (slowTimerRef.current) {
+        clearTimeout(slowTimerRef.current);
+        slowTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const getKey = useCallback(() => {
+    if (!keyRef.current) {
+      keyRef.current = generateIdempotencyKey();
+    }
+    return keyRef.current;
+  }, []);
+
+  const resetKey = useCallback(() => {
+    keyRef.current = null;
+  }, []);
+
+  const wrappedMutationFn = mutationFn
+    ? async (variables: TVariables): Promise<TData> => {
+        const key = getKey();
+        try {
+          const result = await runWithIdempotencyKey(key, () => mutationFn(variables));
+          keyRef.current = null;
+          return result;
+        } catch (err) {
+          if (shouldRotateKeyOnError(err)) {
+            keyRef.current = null;
+          }
+          throw err;
+        }
+      }
+    : undefined;
+
+  const mutation = useMutation({
+    ...restOptions,
+    ...(wrappedMutationFn ? { mutationFn: wrappedMutationFn } : {}),
+  });
+
+  const startPendingWindow = useCallback(() => {
+    inFlightRef.current = true;
+    setIsLockedPending(true);
+    setIsSlow(false);
+    if (slowTimerRef.current) clearTimeout(slowTimerRef.current);
+    slowTimerRef.current = setTimeout(() => {
+      if (mountedRef.current && inFlightRef.current) {
+        setIsSlow(true);
+      }
+    }, slowThresholdMs);
+  }, [slowThresholdMs]);
+
+  const stopPendingWindow = useCallback(() => {
+    if (slowTimerRef.current) {
+      clearTimeout(slowTimerRef.current);
+      slowTimerRef.current = null;
+    }
+    inFlightRef.current = false;
+    inFlightPromiseRef.current = null;
+    if (mountedRef.current) {
+      setIsLockedPending(false);
+      setIsSlow(false);
+    }
+  }, []);
+
+  const guardedMutateAsync: typeof mutation.mutateAsync = useCallback(
+    (variables, mutateOptions) => {
+      if (inFlightRef.current && inFlightPromiseRef.current) {
+        return inFlightPromiseRef.current;
+      }
+      startPendingWindow();
+      const promise = mutation.mutateAsync(variables, mutateOptions).finally(stopPendingWindow);
+      inFlightPromiseRef.current = promise;
+      return promise;
+    },
+    [mutation, startPendingWindow, stopPendingWindow]
+  );
+
+  const guardedMutate: typeof mutation.mutate = useCallback(
+    (variables, mutateOptions) => {
+      if (inFlightRef.current) return;
+      startPendingWindow();
+      const origSettled = mutateOptions?.onSettled;
+      mutation.mutate(variables, {
+        ...mutateOptions,
+        onSettled: (...args) => {
+          stopPendingWindow();
+          origSettled?.(...args);
+        },
+      });
+    },
+    [mutation, startPendingWindow, stopPendingWindow]
+  );
+
+  const run = useCallback(
+    async (variables: TVariables): Promise<TData | undefined> => {
+      if (inFlightRef.current) return undefined;
+      return guardedMutateAsync(variables);
+    },
+    [guardedMutateAsync]
+  );
+
+  const guardOpenChange = useCallback(
+    (onOpenChange: (open: boolean) => void) =>
+      (open: boolean) => {
+        if (!open && inFlightRef.current) return;
+        if (!open) keyRef.current = null;
+        onOpenChange(open);
+      },
+    []
   );
 
   return {
     ...mutation,
-    isPending: mutation.isPending || action.isPending,
-    isSlow: action.isSlow,
-    run: action.run,
-    resetKey: action.resetKey,
-    guardOpenChange: action.guardOpenChange,
+    mutate: guardedMutate,
+    mutateAsync: guardedMutateAsync,
+    isPending: mutation.isPending || isLockedPending,
+    isSlow,
+    run,
+    resetKey,
+    guardOpenChange,
   };
 }

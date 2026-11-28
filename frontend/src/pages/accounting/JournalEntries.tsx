@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { FileText, Plus, RotateCcw, Search, Trash2, CheckCircle2, AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -446,8 +447,14 @@ export default function JournalEntries() {
       </Dialog>
 
       {/* Create Manual Journal Modal */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+      <Dialog
+        open={createOpen}
+        onOpenChange={(o) => {
+          if (!o && createJournalEntry.isPending) return;
+          setCreateOpen(o);
+        }}
+      >
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto" locked={createJournalEntry.isPending}>
           <DialogHeader>
             <DialogTitle>{t("accounting.journals.new", "New Journal Entry")}</DialogTitle>
             <DialogDescription>
@@ -662,22 +669,30 @@ export default function JournalEntries() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+            <Button variant="outline" disabled={createJournalEntry.isPending} onClick={() => setCreateOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
+              pending={createJournalEntry.isPending}
               onClick={() => void handleSubmitJournal()}
-              disabled={createJournalEntry.isPending || !totals.isBalanced}
+              disabled={!totals.isBalanced}
             >
               {t("accounting.journals.post", "Post Entry")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Reverse Journal Confirmation */}
-      <Dialog open={!!reverseTarget} onOpenChange={(open) => !open && setReverseTarget(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog
+        open={!!reverseTarget}
+        onOpenChange={(open) => {
+          if (!open && reverseJournalEntry.isPending) return;
+          if (!open) setReverseTarget(null);
+        }}
+      >
+        <DialogContent className="max-w-md" locked={reverseJournalEntry.isPending}>
           <DialogHeader>
             <DialogTitle>
               {t("accounting.journals.reverse", "Reverse Entry")} {reverseTarget?.entryNumber}
@@ -700,16 +715,18 @@ export default function JournalEntries() {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setReverseTarget(null)}>
+            <Button variant="outline" disabled={reverseJournalEntry.isPending} onClick={() => setReverseTarget(null)}>
               {t("common.cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
               variant="destructive"
-              disabled={!reverseReason.trim() || reverseJournalEntry.isPending}
+              pending={reverseJournalEntry.isPending}
+              disabled={!reverseReason.trim()}
               onClick={() => void handleReverse()}
             >
               {t("accounting.journals.confirmReverse", "Post Reversal")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

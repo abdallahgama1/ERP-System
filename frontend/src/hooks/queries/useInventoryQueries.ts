@@ -1,4 +1,5 @@
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIdempotentMutation as useMutation } from "@/hooks/useIdempotentSubmit";
 import type { CursorPageInfo, OffsetPageInfo } from "@erp/shared";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiRequest } from "@/lib/api-client";

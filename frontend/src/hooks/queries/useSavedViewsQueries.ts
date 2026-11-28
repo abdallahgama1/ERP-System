@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIdempotentMutation as useMutation } from "@/hooks/useIdempotentSubmit";
 import type { CreateSavedViewInput, SavedViewDto, UpdateSavedViewInput } from "@erp/shared";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiRequest } from "@/lib/api-client";

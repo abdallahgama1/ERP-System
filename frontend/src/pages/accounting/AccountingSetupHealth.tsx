@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import {
@@ -344,8 +345,14 @@ export default function AccountingSetupHealth() {
       ) : null}
 
       {/* One-click Remap Dialog */}
-      <Dialog open={Boolean(remapIssue)} onOpenChange={(open) => !open && setRemapIssue(null)}>
-        <DialogContent className="max-w-lg">
+      <Dialog
+        open={Boolean(remapIssue)}
+        onOpenChange={(open) => {
+          if (!open && updateMapping.isPending) return;
+          if (!open) setRemapIssue(null);
+        }}
+      >
+        <DialogContent className="max-w-lg" locked={updateMapping.isPending}>
           <DialogHeader>
             <DialogTitle>
               {t("accounting.setupHealth.remapDialogTitle", "Remap GL Posting Key")} —{" "}
@@ -422,16 +429,18 @@ export default function AccountingSetupHealth() {
           )}
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRemapIssue(null)}>
+            <Button variant="outline" disabled={updateMapping.isPending} onClick={() => setRemapIssue(null)}>
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
+              pending={updateMapping.isPending}
               onClick={() => void handleConfirmRemap()}
-              disabled={updateMapping.isPending || !selectedAccountId}
+              disabled={!selectedAccountId}
               data-testid="remap-confirm-btn"
             >
               {t("accounting.setupHealth.confirmRemap", "Save Mapping")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

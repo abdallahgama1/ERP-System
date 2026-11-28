@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { CostCenterDto } from "@erp/shared";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -181,8 +182,14 @@ export default function CostCenters() {
         </CardContent>
       </Card>
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent>
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(o) => {
+          if (!o && (createCostCenter.isPending || updateCostCenter.isPending)) return;
+          setDialogOpen(o);
+        }}
+      >
+        <DialogContent locked={createCostCenter.isPending || updateCostCenter.isPending}>
           <DialogHeader>
             <DialogTitle>
               {editing
@@ -253,15 +260,20 @@ export default function CostCenters() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
+            <Button
+              variant="outline"
+              disabled={createCostCenter.isPending || updateCostCenter.isPending}
+              onClick={() => setDialogOpen(false)}
+            >
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
+              pending={createCostCenter.isPending || updateCostCenter.isPending}
               onClick={handleSave}
-              disabled={createCostCenter.isPending || updateCostCenter.isPending}
             >
               {t("common.save", "Save")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

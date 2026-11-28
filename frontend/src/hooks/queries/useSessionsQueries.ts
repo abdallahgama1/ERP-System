@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIdempotentMutation as useMutation } from "@/hooks/useIdempotentSubmit";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiRequest } from "@/lib/api-client";
 import type { Branch, Product, Session, SessionItem } from "@/types";
