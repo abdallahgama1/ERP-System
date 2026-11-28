@@ -25,6 +25,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { usePurchasingScope } from "@/hooks/queries/usePurchasingScope";
 import type { PurchaseOrder, PurchaseOrderItem, Branch } from "@/types";
@@ -102,8 +104,7 @@ const PurchaseReceiveForm = () => {
   // Calculate totals
   const totalItemsReceiving = lineItems.reduce((sum, item) => sum + item.receivingNow, 0);
 
-  // Handle submit
-  const handleSubmit = async () => {
+  const receiveAction = useIdempotentAction(async () => {
     if (!selectedBranchId) {
       toast({
         title: t("purchaseReceives.branchRequired"),
@@ -155,7 +156,7 @@ const PurchaseReceiveForm = () => {
 
     if (res.ok === false) {
       toast({ title: res.error, variant: "destructive" });
-      return;
+      return res;
     }
 
     // Determine if fully received or partially received
@@ -171,7 +172,8 @@ const PurchaseReceiveForm = () => {
     });
 
     navigate("/purchases/receives");
-  };
+    return { ok: true };
+  });
 
   if (!purchaseOrder) {
     return (
@@ -202,10 +204,16 @@ const PurchaseReceiveForm = () => {
             <p className="text-muted-foreground">{receiveNumber}</p>
           </div>
         </div>
-        <Button onClick={handleSubmit} disabled={!hasItemsToReceive}>
+        <SubmitButton
+          type="button"
+          pending={receiveAction.isPending}
+          isSlow={receiveAction.isSlow}
+          onClick={() => void receiveAction.run()}
+          disabled={!hasItemsToReceive}
+        >
           <Check className="me-2 h-4 w-4" />
           {t("purchaseReceives.confirmReceive")}
-        </Button>
+        </SubmitButton>
       </div>
 
       {/* PO Info */}

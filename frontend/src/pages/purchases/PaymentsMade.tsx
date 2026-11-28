@@ -16,6 +16,8 @@ import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import type { PaymentMade, PaymentMethod } from "@/types";
 
 const METHODS: PaymentMethod[] = ["cash", "bank", "card", "cheque"];
@@ -66,7 +68,7 @@ export default function PaymentsMade() {
     setAllocations({});
   };
 
-  const handleSubmit = async () => {
+  const recordPaymentAction = useIdempotentAction(async () => {
     if (!vendorId) {
       toast({ title: "Select a vendor", variant: "destructive" });
       return;
@@ -88,24 +90,26 @@ export default function PaymentsMade() {
     });
     if (result.ok === false) {
       toast({ title: result.error, variant: "destructive" });
-      return;
+      return result;
     }
     toast({ title: `${result.payment.paymentNumber} recorded` });
     setDialogOpen(false);
     resetForm();
-  };
+    return { ok: true };
+  });
 
-  const confirmVoid = async () => {
+  const voidPaymentAction = useIdempotentAction(async () => {
     if (!pendingVoid) return;
     const res = await voidPayment(pendingVoid.id, voidReason, user?.name || user?.email);
     if (res.ok === false) {
       toast({ title: res.error, variant: "destructive" });
-      return;
+      return res;
     }
     toast({ title: `${pendingVoid.paymentNumber} voided` });
     setPendingVoid(null);
     setVoidReason("");
-  };
+    return { ok: true };
+  });
 
   const activePayments = payments.filter((p) => p.status !== "Voided");
   const totalPaid = activePayments.reduce((s, p) => s + p.amount, 0);
@@ -222,8 +226,8 @@ export default function PaymentsMade() {
         </CardContent>
       </Card>
 
-      <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <Dialog open={dialogOpen} onOpenChange={recordPaymentAction.guardOpenChange((open) => { setDialogOpen(open); if (!open) resetForm(); })}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" locked={recordPaymentAction.isPending}>
           <DialogHeader>
             <DialogTitle>Record Payment</DialogTitle>
             <DialogDescription>
@@ -336,18 +340,24 @@ export default function PaymentsMade() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
+            <Button variant="outline" disabled={recordPaymentAction.isPending} onClick={() => setDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSubmit} disabled={totalAllocated <= 0}>
+            <SubmitButton
+              type="button"
+              pending={recordPaymentAction.isPending}
+              isSlow={recordPaymentAction.isSlow}
+              onClick={() => void recordPaymentAction.run()}
+              disabled={totalAllocated <= 0}
+            >
               Record Payment
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!pendingVoid} onOpenChange={(open) => !open && setPendingVoid(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog open={!!pendingVoid} onOpenChange={voidPaymentAction.guardOpenChange((open) => !open && setPendingVoid(null))}>
+        <DialogContent className="max-w-md" locked={voidPaymentAction.isPending}>
           <DialogHeader>
             <DialogTitle>Void {pendingVoid?.paymentNumber}</DialogTitle>
             <DialogDescription>
@@ -365,12 +375,19 @@ export default function PaymentsMade() {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPendingVoid(null)}>
+            <Button variant="outline" disabled={voidPaymentAction.isPending} onClick={() => setPendingVoid(null)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={confirmVoid} disabled={!voidReason.trim()}>
+            <SubmitButton
+              type="button"
+              variant="destructive"
+              pending={voidPaymentAction.isPending}
+              isSlow={voidPaymentAction.isSlow}
+              onClick={() => void voidPaymentAction.run()}
+              disabled={!voidReason.trim()}
+            >
               Confirm Void
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -36,6 +36,8 @@ import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import type { PurchaseReturnReason } from "@/types";
 
 const REASONS: PurchaseReturnReason[] = ["damaged", "wrong_item", "expired", "quality", "other"];
@@ -71,7 +73,7 @@ export default function PurchaseReturns() {
     setReturnQtys({});
   };
 
-  const handleSubmit = async () => {
+  const createReturnAction = useIdempotentAction(async () => {
     if (!selectedReceive) {
       toast({ title: "Select a Goods Receipt", variant: "destructive" });
       return;
@@ -93,13 +95,14 @@ export default function PurchaseReturns() {
     });
     if (result.ok === false) {
       toast({ title: result.error, variant: "destructive" });
-      return;
+      return result;
     }
 
     toast({ title: `${result.purchaseReturn.reference} created` });
     setDialogOpen(false);
     resetForm();
-  };
+    return { ok: true };
+  });
 
   return (
     <div className="space-y-6">
@@ -165,8 +168,8 @@ export default function PurchaseReturns() {
         </CardContent>
       </Card>
 
-      <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
-        <DialogContent className="max-w-3xl">
+      <Dialog open={dialogOpen} onOpenChange={createReturnAction.guardOpenChange((open) => { setDialogOpen(open); if (!open) resetForm(); })}>
+        <DialogContent className="max-w-3xl" locked={createReturnAction.isPending}>
           <DialogHeader>
             <DialogTitle>New Purchase Return</DialogTitle>
             <DialogDescription>
@@ -268,10 +271,17 @@ export default function PurchaseReturns() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
+            <Button variant="outline" disabled={createReturnAction.isPending} onClick={() => setDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSubmit}>Create Return</Button>
+            <SubmitButton
+              type="button"
+              pending={createReturnAction.isPending}
+              isSlow={createReturnAction.isSlow}
+              onClick={() => void createReturnAction.run()}
+            >
+              Create Return
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

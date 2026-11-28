@@ -24,6 +24,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 import { downloadPurchaseOrderPdf, printPurchaseOrder } from "@/lib/pdf/purchaseOrderPdf";
 import type { PurchaseOrder, PurchaseOrderStatus } from "@/types";
 import { useBranch } from "@/contexts/BranchContext";
@@ -47,6 +49,7 @@ const PurchaseOrders = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [page, setPage] = useState(1);
   const [deletePoId, setDeletePoId] = useState<string | null>(null);
+  const rowLocks = useActionLocks();
 
   const { data: purchaseOrdersPage } = usePurchaseOrdersPageQuery({
     page,
@@ -289,18 +292,23 @@ const PurchaseOrders = () => {
                             </Button>
                           )}
                           {canDelete && po.status === "Issued" && po.items.every((i) => i.receivedQty === 0) && (
-                            <Button
+                            <SubmitButton
+                              type="button"
                               variant="ghost"
                               size="icon"
-                              onClick={async () => {
-                                const res = await cancelPurchaseOrder(po.id);
-                                if (res.ok === false) toast({ title: res.error, variant: "destructive" });
-                                else toast({ title: t("purchaseOrders.cancelled", "Purchase order cancelled") });
-                              }}
+                              pending={rowLocks.isPending(`cancel:${po.id}`)}
+                              onClick={() =>
+                                void rowLocks.runLocked(`cancel:${po.id}`, async () => {
+                                  const res = await cancelPurchaseOrder(po.id);
+                                  if (res.ok === false) toast({ title: res.error, variant: "destructive" });
+                                  else toast({ title: t("purchaseOrders.cancelled", "Purchase order cancelled") });
+                                  return res;
+                                })
+                              }
                               title={t("common.cancel")}
                             >
                               <Ban className="h-4 w-4 text-destructive" />
-                            </Button>
+                            </SubmitButton>
                           )}
                         </div>
                       </TableCell>

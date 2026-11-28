@@ -23,6 +23,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { VendorCombobox } from "@/components/purchases/VendorCombobox";
 import { ProductSelector } from "@/components/purchases/ProductSelector";
 import { downloadPurchaseOrderPdf, printPurchaseOrder } from "@/lib/pdf/purchaseOrderPdf";
@@ -161,8 +163,7 @@ const PurchaseOrderForm = () => {
     setLineItems((prev) => prev.filter((item) => item.tempId !== tempId));
   }, []);
 
-  // Handle save as draft
-  const handleSaveDraft = async () => {
+  const saveDraftAction = useIdempotentAction(async () => {
     if (!selectedVendor) {
       toast({
         title: t("purchaseOrders.vendorRequired"),
@@ -179,13 +180,14 @@ const PurchaseOrderForm = () => {
       return;
     }
 
-    await persistPO("Draft");
+    const ok = await persistPO("Draft");
+    if (!ok) return { ok: false };
     toast({ title: t("purchaseOrders.savedAsDraft") });
     navigate("/purchases/orders");
-  };
+    return { ok: true };
+  });
 
-  // Handle issue PO
-  const handleIssuePO = async () => {
+  const issuePoAction = useIdempotentAction(async () => {
     if (!selectedVendor) {
       toast({
         title: t("purchaseOrders.vendorRequired"),
@@ -229,13 +231,15 @@ const PurchaseOrderForm = () => {
       return;
     }
 
-    await persistPO("Issued");
+    const ok = await persistPO("Issued");
+    if (!ok) return { ok: false };
     setIsLocked(true);
     toast({ title: t("purchaseOrders.issued") });
-  };
+    return { ok: true };
+  });
 
-  const persistPO = async (status: PurchaseOrder["status"]) => {
-    if (!selectedVendor) return;
+  const persistPO = async (status: PurchaseOrder["status"]): Promise<boolean> => {
+    if (!selectedVendor) return false;
     const payload = {
       poNumber,
       vendorId: selectedVendor.id,
@@ -255,13 +259,16 @@ const PurchaseOrderForm = () => {
       const res = await updatePurchaseOrder(existingPO.id, payload);
       if (res.ok === false) {
         toast({ title: res.error, variant: "destructive" });
-        return;
+        return false;
       }
+      return true;
     } else {
       const res = await createPurchaseOrder(payload);
       if (res.ok === false) {
         toast({ title: res.error, variant: "destructive" });
+        return false;
       }
+      return true;
     }
   };
 
@@ -325,14 +332,27 @@ const PurchaseOrderForm = () => {
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          <Button variant="outline" onClick={handleSaveDraft} disabled={isLocked}>
+          <SubmitButton
+            type="button"
+            variant="outline"
+            pending={saveDraftAction.isPending}
+            isSlow={saveDraftAction.isSlow}
+            onClick={() => void saveDraftAction.run()}
+            disabled={isLocked || issuePoAction.isPending}
+          >
             <Save className="me-2 h-4 w-4" />
             {t("purchaseOrders.saveDraft")}
-          </Button>
-          <Button onClick={handleIssuePO} disabled={isLocked}>
+          </SubmitButton>
+          <SubmitButton
+            type="button"
+            pending={issuePoAction.isPending}
+            isSlow={issuePoAction.isSlow}
+            onClick={() => void issuePoAction.run()}
+            disabled={isLocked || saveDraftAction.isPending}
+          >
             <Send className="me-2 h-4 w-4" />
             {t("purchaseOrders.issuePO")}
-          </Button>
+          </SubmitButton>
         </div>
       </div>
 

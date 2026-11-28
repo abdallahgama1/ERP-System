@@ -12,6 +12,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { EnterpriseDataTable, type EnterpriseColumn } from "@/components/EnterpriseDataTable";
 import { AttachmentsPanel } from "@/components/AttachmentsPanel";
 import { EmailDocumentDialog } from "@/components/EmailDocumentDialog";
@@ -211,7 +213,7 @@ export default function VendorBills() {
   const updateLine = (index: number, patch: Partial<DraftLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)));
 
-  const handleSubmit = async () => {
+  const createBillAction = useIdempotentAction(async () => {
     if (!vendorId) {
       toast({ title: "Select a vendor", variant: "destructive" });
       return;
@@ -236,13 +238,14 @@ export default function VendorBills() {
     });
     if (result.ok === false) {
       toast({ title: result.error, variant: "destructive" });
-      return;
+      return result;
     }
     toast({ title: `${result.bill.billNumber} created` });
     setDialogOpen(false);
     resetForm();
     if (result.bill.matchStatus !== "matched") setDetailBill(result.bill);
-  };
+    return { ok: true };
+  });
 
   const confirmDelete = async () => {
     if (!pendingDelete) return;
@@ -255,17 +258,18 @@ export default function VendorBills() {
     setPendingDelete(null);
   };
 
-  const confirmVoid = async () => {
+  const voidBillAction = useIdempotentAction(async () => {
     if (!pendingVoid) return;
     const res = await voidBill(pendingVoid.id, voidReason, user?.name || user?.email);
     if (res.ok === false) {
       toast({ title: res.error, variant: "destructive" });
-      return;
+      return res;
     }
     toast({ title: `${pendingVoid.billNumber} voided` });
     setPendingVoid(null);
     setVoidReason("");
-  };
+    return { ok: true };
+  });
 
   const totalOutstanding = bills
     .filter((b) => b.status !== "Cancelled" && b.status !== "Draft")
@@ -440,8 +444,8 @@ export default function VendorBills() {
         </CardContent>
       </Card>
 
-      <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+      <Dialog open={dialogOpen} onOpenChange={createBillAction.guardOpenChange((open) => { setDialogOpen(open); if (!open) resetForm(); })}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" locked={createBillAction.isPending}>
           <DialogHeader>
             <DialogTitle>New Vendor Bill</DialogTitle>
             <DialogDescription>
@@ -604,12 +608,18 @@ export default function VendorBills() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
+            <Button variant="outline" disabled={createBillAction.isPending} onClick={() => setDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSubmit} disabled={lines.length === 0}>
+            <SubmitButton
+              type="button"
+              pending={createBillAction.isPending}
+              isSlow={createBillAction.isSlow}
+              onClick={() => void createBillAction.run()}
+              disabled={lines.length === 0}
+            >
               Create Bill
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -724,8 +734,8 @@ export default function VendorBills() {
         itemName={pendingDelete?.billNumber}
       />
 
-      <Dialog open={!!pendingVoid} onOpenChange={(open) => !open && setPendingVoid(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog open={!!pendingVoid} onOpenChange={voidBillAction.guardOpenChange((open) => !open && setPendingVoid(null))}>
+        <DialogContent className="max-w-md" locked={voidBillAction.isPending}>
           <DialogHeader>
             <DialogTitle>Void {pendingVoid?.billNumber}</DialogTitle>
             <DialogDescription>
@@ -743,12 +753,19 @@ export default function VendorBills() {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPendingVoid(null)}>
+            <Button variant="outline" disabled={voidBillAction.isPending} onClick={() => setPendingVoid(null)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={confirmVoid} disabled={!voidReason.trim()}>
+            <SubmitButton
+              type="button"
+              variant="destructive"
+              pending={voidBillAction.isPending}
+              isSlow={voidBillAction.isSlow}
+              onClick={() => void voidBillAction.run()}
+              disabled={!voidReason.trim()}
+            >
               Confirm Void
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
