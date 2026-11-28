@@ -106,6 +106,8 @@ export const branches = pgTable(
   },
   (t) => [
     uniqueIndex("branches_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("branches_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.code}))`),
+    uniqueIndex("branches_company_name_norm_uq").on(t.companyId, sql`lower(btrim(${t.name}))`),
     index("branches_company_idx").on(t.companyId),
     index("branches_active_idx").on(t.isActive),
   ]
@@ -145,6 +147,7 @@ export const customRoles = pgTable(
   },
   (t) => [
     uniqueIndex("custom_roles_company_name_uq").on(t.companyId, t.name),
+    uniqueIndex("custom_roles_company_name_norm_uq").on(t.companyId, sql`lower(btrim(${t.name}))`),
     index("custom_roles_company_idx").on(t.companyId),
   ]
 );
@@ -382,7 +385,7 @@ export const auditLogs = pgTable(
     userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
     userName: text("user_name").notNull(),
     userRole: text("user_role"),
-    branchId: uuid("branch_id").references(() => branches.id, { onDelete: "set null" }),
+    branchId: uuid("branch_id"),
     action: text("action").notNull(),
     entityType: text("entity_type").notNull(),
     entityId: text("entity_id").notNull(),
@@ -452,21 +455,30 @@ export const idempotencyKeys = pgTable(
   "idempotency_keys",
   {
     id: uuid("id").defaultRandom().primaryKey(),
+    companyId: uuid("company_id")
+      .notNull()
+      .default(DEFAULT_COMPANY_ID)
+      .references(() => companies.id, { onDelete: "cascade" }),
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     key: text("key").notNull(),
     method: text("method").notNull(),
     path: text("path").notNull(),
+    requestHash: text("request_hash").notNull().default(""),
+    state: text("state").$type<"in_progress" | "completed">().notNull().default("completed"),
     posTerminalId: uuid("pos_terminal_id"),
-    statusCode: integer("status_code").notNull(),
-    responseBody: jsonb("response_body").$type<unknown>().notNull(),
+    statusCode: integer("status_code"),
+    responseBody: jsonb("response_body").$type<unknown>(),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
-    uniqueIndex("idempotency_user_req_uq").on(t.userId, t.method, t.path, t.key),
+    uniqueIndex("idempotency_company_user_req_uq").on(t.companyId, t.userId, t.method, t.path, t.key),
     index("idempotency_expires_idx").on(t.expiresAt),
+    index("idempotency_state_locked_idx").on(t.state, t.lockedUntil),
   ]
 );
 
@@ -616,6 +628,7 @@ export const chartOfAccounts = pgTable(
   },
   (t) => [
     uniqueIndex("coa_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("coa_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.code}))`),
     index("coa_type_idx").on(t.accountType),
     index("coa_company_type_idx").on(t.companyId, t.accountType),
   ]
@@ -695,7 +708,10 @@ export const taxCodes = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [uniqueIndex("tax_codes_company_code_uq").on(t.companyId, t.code)]
+  (t) => [
+    uniqueIndex("tax_codes_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("tax_codes_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.code}))`),
+  ]
 );
 
 export const taxonomyItems = pgTable(
@@ -716,7 +732,10 @@ export const taxonomyItems = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [uniqueIndex("taxonomy_company_kind_name_uq").on(t.companyId, t.kind, t.name)]
+  (t) => [
+    uniqueIndex("taxonomy_company_kind_name_uq").on(t.companyId, t.kind, t.name),
+    uniqueIndex("taxonomy_company_kind_name_norm_uq").on(t.companyId, t.kind, sql`lower(btrim(${t.name}))`),
+  ]
 );
 
 export const products = pgTable(
@@ -766,6 +785,10 @@ export const products = pgTable(
   },
   (t) => [
     uniqueIndex("products_company_sku_uq").on(t.companyId, t.sku),
+    uniqueIndex("products_company_sku_norm_uq").on(t.companyId, sql`lower(btrim(${t.sku}))`),
+    uniqueIndex("products_company_barcode_norm_uq")
+      .on(t.companyId, sql`lower(btrim(${t.barcode}))`)
+      .where(sql`${t.barcode} IS NOT NULL AND btrim(${t.barcode}) <> ''`),
     index("products_barcode_idx").on(t.barcode),
     index("products_category_idx").on(t.category),
     index("products_name_id_idx").on(t.name, t.id),
@@ -830,6 +853,7 @@ export const customers = pgTable(
   },
   (t) => [
     uniqueIndex("customers_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("customers_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.code}))`),
     index("customers_name_idx").on(t.name),
     index("customers_name_id_idx").on(t.name, t.id),
     index("customers_created_id_idx").on(t.createdAt, t.id),
@@ -861,6 +885,7 @@ export const vendors = pgTable(
   },
   (t) => [
     uniqueIndex("vendors_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("vendors_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.code}))`),
     index("vendors_name_idx").on(t.name),
     index("vendors_name_id_idx").on(t.name, t.id),
     index("vendors_created_id_idx").on(t.createdAt, t.id),
@@ -1768,6 +1793,8 @@ export const costCenters = pgTable(
   },
   (t) => [
     uniqueIndex("cost_centers_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("cost_centers_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.code}))`),
+    uniqueIndex("cost_centers_company_name_norm_uq").on(t.companyId, sql`lower(btrim(${t.name}))`),
     index("cost_centers_company_active_idx").on(t.companyId, t.isActive),
   ]
 );
@@ -2101,6 +2128,8 @@ export const posTerminals = pgTable(
   },
   (t) => [
     uniqueIndex("pos_terminals_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("pos_terminals_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.code}))`),
+    uniqueIndex("pos_terminals_company_name_norm_uq").on(t.companyId, sql`lower(btrim(${t.name}))`),
     index("pos_terminals_branch_idx").on(t.branchId),
   ]
 );
@@ -2343,6 +2372,11 @@ export const treasuryAccounts = pgTable(
   },
   (t) => [
     uniqueIndex("treasury_accounts_company_code_uq").on(t.companyId, t.code),
+    uniqueIndex("treasury_accounts_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.code}))`),
+    uniqueIndex("treasury_accounts_company_name_norm_uq").on(t.companyId, sql`lower(btrim(${t.name}))`),
+    uniqueIndex("treasury_accounts_company_iban_norm_uq")
+      .on(t.companyId, sql`lower(btrim(${t.iban}))`)
+      .where(sql`btrim(${t.iban}) <> ''`),
     uniqueIndex("treasury_accounts_company_gl_uq").on(t.companyId, t.glAccountId),
     index("treasury_accounts_company_type_idx").on(t.companyId, t.accountType),
   ]
@@ -2575,6 +2609,10 @@ export const fixedAssets = pgTable(
   },
   (t) => [
     uniqueIndex("fixed_assets_company_code_uq").on(t.companyId, t.assetCode),
+    uniqueIndex("fixed_assets_company_code_norm_uq").on(t.companyId, sql`lower(btrim(${t.assetCode}))`),
+    uniqueIndex("fixed_assets_company_serial_norm_uq")
+      .on(t.companyId, sql`lower(btrim(${t.serialNumber}))`)
+      .where(sql`btrim(${t.serialNumber}) <> ''`),
     index("fixed_assets_company_status_idx").on(t.companyId, t.status),
   ]
 );
