@@ -65,7 +65,24 @@ All HTTP requests receive a sanitized `x-request-id` correlation header echoed i
 
 ---
 
-## 3. MFA Encryption Key Rotation
+## 3. Admin Account Provisioning & MFA Encryption Key Rotation
+
+### Creating, Promoting, or Recovering an Admin (`npm run admin:create`)
+- **Fresh DB:** The very first account created on `/signup` automatically becomes `admin` with `'all'` branch scope.
+- **Create a new admin, promote an existing user, or reset an admin password without raw SQL:**
+  ```bash
+  # Create a new admin (auto-generates a strong password if --password is omitted)
+  npm run admin:create -- --email admin@company.com --name "Company Admin"
+
+  # Promote an existing user to admin (preserves their current password)
+  npm run admin:create -- --email existing@company.com
+
+  # Reset an admin's password and revoke active sessions
+  npm run admin:create -- --email admin@company.com --reset-password
+  ```
+  On a production VPS, pass `--env-file /opt/count-it-keep-it/.env`. All changes are recorded in the tamper-evident `audit_logs` hash chain.
+
+### MFA Encryption Key Rotation
 
 TOTP secrets in `user_mfa` are encrypted with AES-256-GCM and tagged with `key_version` ([mfa.service.ts](file:///c:/Users/mohamed/Desktop/count-it-keep-it/backend/src/services/mfa.service.ts), [rotate-mfa-key.mjs](file:///c:/Users/mohamed/Desktop/count-it-keep-it/scripts/rotate-mfa-key.mjs)).
 

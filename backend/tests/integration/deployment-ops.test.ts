@@ -872,4 +872,108 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
       await liveApp.close();
     }
   });
+
+  it("4. scripts/create-admin.mjs creates new admins, promotes existing users, resets passwords, preserves audit chain, and refuses Smoke Monitor", async () => {
+    const createAdminUrl = pathToFileURL(path.resolve(__dirname, "../../../scripts/create-admin.mjs")).href;
+    const { createOrPromoteAdmin } = (await import(createAdminUrl)) as {
+      createOrPromoteAdmin: (
+        database: AppDatabase,
+        opts: Record<string, unknown>
+      ) => Promise<{
+        userId: string;
+        email: string;
+        role: string;
+        branchScopeMode: string;
+        action: string;
+        passwordChanged: boolean;
+        password: string | null;
+      }>;
+    };
+
+    // 4a. Create a brand-new admin with auto-generated password
+    const created = await createOrPromoteAdmin(db, {
+      email: "cli-admin@test.local",
+      name: "CLI Admin",
+    });
+    expect(created.action).toBe("admin.created");
+    expect(created.role).toBe("admin");
+    expect(created.branchScopeMode).toBe("all");
+    expect(created.passwordChanged).toBe(true);
+    expect(created.password).toBeTruthy();
+
+    const cliAdminLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: created.email, password: created.password },
+    });
+    expect(cliAdminLogin.statusCode).toBe(200);
+    expect(cliAdminLogin.json().user.role).toBe("admin");
+    expect(cliAdminLogin.json().user.branchScopeMode).toBe("all");
+    const cliAdminHeaders = authHeaders(cliAdminLogin);
+
+    // 4b. Promote an existing standard user (keeping existing password)
+    const regSignup = await app.inject({
+      method: "POST",
+      url: "/api/auth/signup",
+      payload: { name: "Regular User", email: "regular-to-admin@test.local", password: "UserPassword123!" },
+    });
+    expect(regSignup.statusCode).toBe(201);
+    expect(regSignup.json().user.role).toBe("user");
+
+    const promoted = await createOrPromoteAdmin(db, { email: "regular-to-admin@test.local" });
+    expect(promoted.action).toBe("admin.promoted");
+    expect(promoted.passwordChanged).toBe(false);
+    expect(promoted.password).toBeNull();
+
+    const promotedLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "regular-to-admin@test.local", password: "UserPassword123!" },
+    });
+    expect(promotedLogin.statusCode).toBe(200);
+    expect(promotedLogin.json().user.role).toBe("admin");
+
+    // 4c. Reset admin password revokes prior session & accepts new password
+    const reset = await createOrPromoteAdmin(db, {
+      email: created.email,
+      resetPassword: true,
+    });
+    expect(reset.action).toBe("admin.password_reset");
+    expect(reset.passwordChanged).toBe(true);
+    expect(reset.password).not.toBe(created.password);
+
+    const oldSessionMe = await app.inject({
+      method: "GET",
+      url: "/api/auth/me",
+      headers: cliAdminHeaders,
+    });
+    expect(oldSessionMe.json().user).toBeNull();
+
+    const newLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: created.email, password: reset.password },
+    });
+    expect(newLogin.statusCode).toBe(200);
+    expect(newLogin.json().user.role).toBe("admin");
+
+    // 4d. Refuses to elevate the dedicated read-only Smoke Monitor service account
+    const createSmokeUrl = pathToFileURL(path.resolve(__dirname, "../../../scripts/create-smoke-user.mjs")).href;
+    const { provisionSmokeUser } = (await import(createSmokeUrl)) as {
+      provisionSmokeUser: (database: AppDatabase, opts?: Record<string, unknown>) => Promise<{ email: string }>;
+    };
+    const smoke = await provisionSmokeUser(db, { email: "smoke-protected@test.local" });
+    await expect(createOrPromoteAdmin(db, { email: smoke.email })).rejects.toThrow(
+      /Refusing to promote dedicated read-only/i
+    );
+
+    // 4e. Audit log hash chain remains 100% valid
+    const verifyRes = await app.inject({
+      method: "GET",
+      url: "/api/audit-logs/verify",
+      headers: authHeaders(newLogin),
+    });
+    expect(verifyRes.statusCode).toBe(200);
+    expect(verifyRes.json().valid).toBe(true);
+  });
 });

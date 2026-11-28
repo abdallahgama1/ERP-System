@@ -302,6 +302,16 @@ if [[ "$SKIP_BACKUP" == "false" && "$PRE_BACKUP_LOWER" != "false" ]]; then
   fi
 fi
 
+DEDUPE_SCRIPT="${REPO_ROOT}/scripts/deduplicate-records.mjs"
+if [[ -f "$DEDUPE_SCRIPT" ]] && command -v node >/dev/null 2>&1; then
+  echo "==> Running pre-migration natural-key duplicate check (ops:check-duplicates)..."
+  EFFECTIVE_CHECK_URL="${DIRECT_DATABASE_URL_VAL:-$DATABASE_URL_VAL}"
+  if ! DATABASE_URL="$EFFECTIVE_CHECK_URL" node "$DEDUPE_SCRIPT" --check; then
+    echo "Error: Pre-migration duplicate check failed. Clean up duplicate records with 'npm run ops:deduplicate' before deploying." >&2
+    exit 1
+  fi
+fi
+
 ROLLING_BACK=false
 rollback() {
   local reason="$1"

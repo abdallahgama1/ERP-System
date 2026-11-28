@@ -273,7 +273,9 @@ jobs:
             scripts/backup-offsite.mjs \
             scripts/monthly-restore-drill.mjs \
             scripts/verify-restored-db.ts \
+            scripts/create-admin.mjs \
             scripts/create-smoke-user.mjs \
+            scripts/deduplicate-records.mjs \
             scripts/smoke-test.mjs \
             "${VPS_USER}@${VPS_HOST}:${VPS_APP_DIR}/scripts/"
 
