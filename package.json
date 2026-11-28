@@ -23,6 +23,7 @@
     "demo:ledger": "node scripts/run-with-local-test-db.mjs \"node scripts/demo-ledger.mjs\"",
     "rehearse:cutover": "node scripts/rehearse-cutover.mjs",
     "drill:restore": "node scripts/monthly-restore-drill.mjs",
+    "smoke:create-user": "node scripts/create-smoke-user.mjs",
     "smoke-test": "node scripts/smoke-test.mjs",
     "eta:mock-signer": "node scripts/eta-mock-signer.mjs",
     "eta:preprod-smoke": "node scripts/eta-preprod-smoke.mjs",

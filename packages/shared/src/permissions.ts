@@ -171,6 +171,14 @@ export const DEFAULT_PERMISSION_MATRIX: RolePermissionMatrix = {
   },
 };
 
+export const SMOKE_MONITOR_ROLE_NAME = "Smoke Monitor" as const;
+
+export const SMOKE_MONITOR_PERMISSIONS: PermissionMap = createPermissionMap({
+  accounting: readOnlyAccess(),
+  audit: readOnlyAccess(),
+  settings: readOnlyAccess(),
+});
+
 export interface SystemRolePreset {
   name: string;
   description: string;

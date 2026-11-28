@@ -37,7 +37,7 @@ Options:
   --skip-backup                  Skip pre-deploy PostgreSQL backup
   --skip-public-check            Skip public https://SITE_ADDRESS/api/health/ready check
   --smoke-test                   Require running scripts/smoke-test.mjs (fails if creds missing)
-  --skip-smoke-test              Skip scripts/smoke-test.mjs even if SMOKE_ADMIN_* is set
+  --skip-smoke-test              Skip scripts/smoke-test.mjs even if SMOKE_USER_* is set
   --rollback                     Roll back to the previous known-good image tags from .last-good-images
   --timeout <seconds>            Compose health wait timeout in seconds (default: 60)
   -h, --help                     Show this help message
@@ -386,20 +386,31 @@ if [[ "$SKIP_PUBLIC_CHECK" == "false" ]]; then
   fi
 fi
 
-SMOKE_EMAIL_VAL="$(read_env_var "$ENV_FILE" "SMOKE_ADMIN_EMAIL")"
-SMOKE_PASS_VAL="$(read_env_var "$ENV_FILE" "SMOKE_ADMIN_PASSWORD")"
+SMOKE_EMAIL_VAL="$(read_env_var "$ENV_FILE" "SMOKE_USER_EMAIL")"
+SMOKE_PASS_VAL="$(read_env_var "$ENV_FILE" "SMOKE_USER_PASSWORD")"
+UPTIME_STATUS_TOKEN_VAL="$(read_env_var "$ENV_FILE" "UPTIME_STATUS_TOKEN")"
+SMOKE_MODE_VAL="production"
+if [[ "$OVERLAY_COMPOSE_FILE" == *"staging"* || "$PROJECT_NAME" == *"staging"* ]]; then
+  SMOKE_MODE_VAL="staging"
+fi
+if [[ -z "$SMOKE_EMAIL_VAL" && "$SMOKE_MODE_VAL" == "staging" ]]; then
+  SMOKE_EMAIL_VAL="$(read_env_var "$ENV_FILE" "SMOKE_ADMIN_EMAIL")"
+  SMOKE_PASS_VAL="$(read_env_var "$ENV_FILE" "SMOKE_ADMIN_PASSWORD")"
+fi
 SMOKE_SCRIPT="${REPO_ROOT}/scripts/smoke-test.mjs"
-if [[ "$RUN_SMOKE_TEST" == "true" || ( "$RUN_SMOKE_TEST" == "auto" && -n "$SMOKE_EMAIL_VAL" && -n "$SMOKE_PASS_VAL" ) ]]; then
+if [[ "$RUN_SMOKE_TEST" == "true" || ( "$RUN_SMOKE_TEST" == "auto" && ( ( -n "$SMOKE_EMAIL_VAL" && -n "$SMOKE_PASS_VAL" ) || -n "$UPTIME_STATUS_TOKEN_VAL" ) ) ]]; then
   if [[ ! -f "$SMOKE_SCRIPT" ]] || ! command -v node >/dev/null 2>&1; then
     rollback "smoke-test requested but node or scripts/smoke-test.mjs is unavailable"
   fi
-  if [[ -z "$SMOKE_EMAIL_VAL" || -z "$SMOKE_PASS_VAL" ]]; then
-    rollback "--smoke-test requested but SMOKE_ADMIN_EMAIL / SMOKE_ADMIN_PASSWORD are empty in $ENV_FILE"
+  if [[ "$RUN_SMOKE_TEST" == "true" && ( -z "$SMOKE_EMAIL_VAL" || -z "$SMOKE_PASS_VAL" ) ]]; then
+    rollback "--smoke-test requested but SMOKE_USER_EMAIL / SMOKE_USER_PASSWORD are empty in $ENV_FILE (provision with: npm run smoke:create-user)"
   fi
-  echo "==> Running post-deploy smoke test (health, ready, login, reconciliation, setup-health, audit chain)..."
+  echo "==> Running strictly read-only post-deploy smoke test (mode=${SMOKE_MODE_VAL}: health, ready, status, smoke-user login, reconciliation, setup-health, audit chain)..."
   if ! SMOKE_BASE_URL="https://${SITE_ADDRESS}" \
-       SMOKE_ADMIN_EMAIL="$SMOKE_EMAIL_VAL" \
-       SMOKE_ADMIN_PASSWORD="$SMOKE_PASS_VAL" \
+       SMOKE_MODE="$SMOKE_MODE_VAL" \
+       SMOKE_USER_EMAIL="$SMOKE_EMAIL_VAL" \
+       SMOKE_USER_PASSWORD="$SMOKE_PASS_VAL" \
+       UPTIME_STATUS_TOKEN="$UPTIME_STATUS_TOKEN_VAL" \
        node "$SMOKE_SCRIPT"; then
     rollback "post-deploy smoke test failed"
   fi

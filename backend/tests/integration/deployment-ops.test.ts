@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import dotenv from "dotenv";
+import { sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AppDatabase } from "../../src/db/index.ts";
@@ -282,12 +283,95 @@ describe("Off-Site AES-256-GCM Backup Encryption, S3 Sync & Retention (scripts/b
       } finally {
         client.destroy();
       }
+
+      // 5. Dead-man's-switch healthcheck pings on off-site upload success & failure + monthly restore drill failure
+      const pings: Array<{ method: string; url: string; body: string }> = [];
+      const pingServer = http.createServer(async (req, res) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        pings.push({
+          method: req.method ?? "",
+          url: req.url ?? "",
+          body: Buffer.concat(chunks).toString("utf8"),
+        });
+        res.writeHead(200);
+        res.end("OK");
+      });
+      await new Promise<void>((resolve) => pingServer.listen(0, "127.0.0.1", () => resolve()));
+      const pingAddr = pingServer.address();
+      const pingPort = typeof pingAddr === "object" && pingAddr ? pingAddr.port : 0;
+      const pingUrl = `http://127.0.0.1:${pingPort}/hc/backup-daily`;
+
+      try {
+        await offsite.uploadBackupSet({
+          dbFilePath: plainDump,
+          uploadsFilePath: plainUploads,
+          timestamp: "20261130T020000Z",
+          encryptionKey: keyHex,
+          s3Config,
+          healthcheckPingUrl: pingUrl,
+        });
+        expect(pings).toHaveLength(1);
+        expect(pings[0]?.url).toBe("/hc/backup-daily");
+        expect(pings[0]?.body).toContain("offsite backup ok");
+
+        await expect(
+          offsite.uploadBackupSet({
+            dbFilePath: plainDump,
+            timestamp: "20261130T020001Z",
+            encryptionKey: "not-a-valid-key",
+            s3Config,
+            healthcheckPingUrl: pingUrl,
+          })
+        ).rejects.toThrow(/BACKUP_ENCRYPTION_KEY/);
+        expect(pings).toHaveLength(2);
+        expect(pings[1]?.url).toBe("/hc/backup-daily/fail");
+        expect(pings[1]?.body).toContain("BACKUP_ENCRYPTION_KEY");
+
+        // Monthly restore drill pings /fail with error details when backup dir is empty
+        const emptyDrillDir = path.join(tmpDir, "empty-drill-dir");
+        await fsp.mkdir(emptyDrillDir, { recursive: true });
+        const drillUrl = pathToFileURL(path.resolve(__dirname, "../../../scripts/monthly-restore-drill.mjs")).href;
+        const { runMonthlyRestoreDrill } = (await import(drillUrl)) as {
+          runMonthlyRestoreDrill: (opts: Record<string, unknown>) => Promise<unknown>;
+        };
+        const drillPingUrl = `http://127.0.0.1:${pingPort}/hc/restore-drill`;
+        await expect(
+          runMonthlyRestoreDrill({
+            localDir: emptyDrillDir,
+            healthcheckPingUrl: drillPingUrl,
+          })
+        ).rejects.toThrow(/No erp_backup_/);
+        expect(pings).toHaveLength(3);
+        expect(pings[2]?.url).toBe("/hc/restore-drill/fail");
+        expect(pings[2]?.body).toContain("restore drill failed");
+      } finally {
+        await new Promise<void>((resolve, reject) => pingServer.close((e) => (e ? reject(e) : resolve())));
+      }
     } finally {
       await mockS3.close();
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
   });
 });
+
+async function snapshotPublicTableRowCounts(db: AppDatabase): Promise<Record<string, number>> {
+  const tableRows = await db.execute<{ tablename: string }>(sql`
+    SELECT tablename
+    FROM pg_tables
+    WHERE schemaname = 'public'
+      AND tablename NOT LIKE '__drizzle%'
+    ORDER BY tablename
+  `);
+  const counts: Record<string, number> = {};
+  for (const row of tableRows) {
+    const [res] = await db.execute<{ cnt: number }>(
+      sql.raw(`SELECT count(*)::int AS cnt FROM "public"."${row.tablename}"`)
+    );
+    counts[row.tablename] = Number(res?.cnt ?? 0);
+  }
+  return counts;
+}
 
 describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Test", () => {
   let app: FastifyInstance;
@@ -297,6 +381,7 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
   let prevBackupStatusFile: string | undefined;
   let prevBackupMaxAgeHours: string | undefined;
   let prevMetricsToken: string | undefined;
+  let prevUptimeStatusToken: string | undefined;
 
   beforeAll(async () => {
     const { buildApp } = await import("../../src/app.ts");
@@ -317,10 +402,12 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
     prevBackupStatusFile = process.env.BACKUP_STATUS_FILE;
     prevBackupMaxAgeHours = process.env.BACKUP_MAX_AGE_HOURS;
     prevMetricsToken = process.env.METRICS_TOKEN;
+    prevUptimeStatusToken = process.env.UPTIME_STATUS_TOKEN;
     tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "erp-freshness-test-"));
     process.env.BACKUP_STATUS_FILE = path.join(tmpDir, "last-backup-status.json");
     process.env.BACKUP_MAX_AGE_HOURS = "26";
     process.env.METRICS_TOKEN = "test-metrics-token-secret";
+    process.env.UPTIME_STATUS_TOKEN = "test-uptime-status-token-64-chars-secret-value";
 
     const { resetTestDatabase } = await import("../helpers/db-reset.ts");
     await resetTestDatabase(db);
@@ -340,6 +427,10 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
     else process.env.BACKUP_MAX_AGE_HOURS = prevBackupMaxAgeHours;
     if (prevMetricsToken === undefined) delete process.env.METRICS_TOKEN;
     else process.env.METRICS_TOKEN = prevMetricsToken;
+    if (prevUptimeStatusToken === undefined) delete process.env.UPTIME_STATUS_TOKEN;
+    else process.env.UPTIME_STATUS_TOKEN = prevUptimeStatusToken;
+    const { setStorageConfigOverrideForTests } = await import("../../src/services/storage.service.ts");
+    setStorageConfigOverrideForTests(null);
     await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   });
 
@@ -461,7 +552,125 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
     expect(metricsStale.body).toContain("erp_backup_freshness_ok 0");
   });
 
-  it("2. scripts/smoke-test.mjs passes live health, ready, login, reconciliation, setup-health, audit chain, and freshness", async () => {
+  it("2. GET /api/status enforces token auth, returns minimal booleans only, returns 503 on stale/missing backup or unhealthy storage, and writes zero DB rows", async () => {
+    const token = process.env.UPTIME_STATUS_TOKEN!;
+
+    // No token -> 401
+    const noTok = await app.inject({ method: "GET", url: "/api/status" });
+    expect(noTok.statusCode).toBe(401);
+    expect(noTok.headers["www-authenticate"]).toContain("Bearer");
+
+    // Wrong token -> 401
+    const wrongTok = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: "Bearer wrong-uptime-status-token-0000000000000000" },
+    });
+    expect(wrongTok.statusCode).toBe(401);
+
+    // Missing backup status file -> 503 with minimal 4-boolean payload
+    const missingBackup = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(missingBackup.statusCode).toBe(503);
+    expect(missingBackup.json()).toEqual({
+      ready: true,
+      database: true,
+      storage: true,
+      backupFresh: false,
+    });
+    expect(Object.keys(missingBackup.json()).sort()).toEqual(["backupFresh", "database", "ready", "storage"]);
+
+    // Fresh backup (1h old) -> 200 OK via Bearer and X-Status-Token, and ZERO rows written to ANY table
+    await fsp.writeFile(
+      process.env.BACKUP_STATUS_FILE!,
+      JSON.stringify({
+        status: "ok",
+        completedAt: new Date(Date.now() - 3600 * 1000).toISOString(),
+        dbFile: "erp_backup_fresh.dump",
+        dbSizeBytes: 2048,
+      })
+    );
+
+    const beforeCounts = await snapshotPublicTableRowCounts(db);
+    const freshBearer = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const freshHeader = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { "x-status-token": token },
+    });
+    const afterCounts = await snapshotPublicTableRowCounts(db);
+
+    expect(freshBearer.statusCode).toBe(200);
+    expect(freshBearer.json()).toEqual({
+      ready: true,
+      database: true,
+      storage: true,
+      backupFresh: true,
+    });
+    expect(freshHeader.statusCode).toBe(200);
+    expect(freshHeader.json()).toEqual(freshBearer.json());
+    expect(afterCounts).toEqual(beforeCounts);
+
+    // Stale backup (27h old > 26h) -> 503 with backupFresh=false
+    await fsp.writeFile(
+      process.env.BACKUP_STATUS_FILE!,
+      JSON.stringify({
+        status: "ok",
+        completedAt: new Date(Date.now() - 27 * 3600 * 1000).toISOString(),
+        dbFile: "erp_backup_stale.dump",
+        dbSizeBytes: 2048,
+      })
+    );
+    const staleStatus = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(staleStatus.statusCode).toBe(503);
+    expect(staleStatus.json()).toEqual({
+      ready: true,
+      database: true,
+      storage: true,
+      backupFresh: false,
+    });
+
+    // Fresh backup + unhealthy storage -> 503 with ready=false, storage=false
+    await fsp.writeFile(
+      process.env.BACKUP_STATUS_FILE!,
+      JSON.stringify({
+        status: "ok",
+        completedAt: new Date().toISOString(),
+        dbFile: "erp_backup_fresh2.dump",
+        dbSizeBytes: 2048,
+      })
+    );
+    const { setStorageConfigOverrideForTests } = await import("../../src/services/storage.service.ts");
+    // Create a blocking file where localDir expects a directory so storage health fails deterministically
+    const blockingFile = path.join(tmpDir, "not-a-dir");
+    await fsp.writeFile(blockingFile, "x");
+    setStorageConfigOverrideForTests({ driver: "local", localDir: blockingFile });
+    const badStorage = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(badStorage.statusCode).toBe(503);
+    expect(badStorage.json()).toEqual({
+      ready: false,
+      database: true,
+      storage: false,
+      backupFresh: true,
+    });
+  });
+
+  it("3. dedicated Smoke Monitor user is strictly read-only, MFA-safe, rejected for admin in production mode, and writes zero business/data rows during production smoke test", async () => {
     await fsp.writeFile(
       process.env.BACKUP_STATUS_FILE!,
       JSON.stringify({
@@ -472,6 +681,81 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
       })
     );
 
+    const createSmokeUrl = pathToFileURL(path.resolve(__dirname, "../../../scripts/create-smoke-user.mjs")).href;
+    const { provisionSmokeUser } = (await import(createSmokeUrl)) as {
+      provisionSmokeUser: (
+        database: AppDatabase,
+        opts?: Record<string, unknown>
+      ) => Promise<{
+        userId: string;
+        email: string;
+        role: string;
+        customRoleName: string;
+        password: string | null;
+      }>;
+    };
+
+    // Refuses to convert an existing admin email into a smoke user
+    await expect(provisionSmokeUser(db, { email: "ops-admin@test.local" })).rejects.toThrow(
+      /Refusing to convert existing admin/i
+    );
+
+    const smokeUser = await provisionSmokeUser(db, {
+      email: "smoke-monitor@test.local",
+      password: "SmokeOnlyStrongPassword-0123456789!",
+    });
+    expect(smokeUser.role).toBe("user");
+    expect(smokeUser.customRoleName).toBe("Smoke Monitor");
+
+    // Smoke user middleware blocks ALL mutating endpoints with 403 SMOKE_USER_READ_ONLY (writing 0 rows)
+    const smokeLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: smokeUser.email, password: "SmokeOnlyStrongPassword-0123456789!" },
+    });
+    expect(smokeLogin.statusCode).toBe(200);
+    const smokeHeaders = authHeaders(smokeLogin);
+
+    const beforeMutations = await snapshotPublicTableRowCounts(db);
+    for (const attempt of [
+      { method: "POST" as const, url: "/api/audit-logs", payload: { module: "system", action: "ui.report_viewed" } },
+      { method: "POST" as const, url: "/api/auth/mfa/enroll", payload: {} },
+      {
+        method: "POST" as const,
+        url: "/api/auth/change-password",
+        payload: { currentPassword: "SmokeOnlyStrongPassword-0123456789!", newPassword: "AnotherStrongPassword123!" },
+      },
+      { method: "PUT" as const, url: "/api/settings/company", payload: { companyName: "Hacked Co" } },
+      { method: "POST" as const, url: "/api/accounting/journal-entries", payload: {} },
+    ]) {
+      const denied = await app.inject({
+        method: attempt.method,
+        url: attempt.url,
+        headers: smokeHeaders,
+        payload: attempt.payload,
+      });
+      expect(denied.statusCode).toBe(403);
+      expect(denied.json().code).toBe("SMOKE_USER_READ_ONLY");
+    }
+
+    // All 4 authenticated read-only verification endpoints succeed and write 0 rows across 100% of tables
+    for (const pathUrl of [
+      "/api/accounting/reports/reconciliation",
+      "/api/accounting/setup-health",
+      "/api/audit-logs/verify",
+      "/api/admin/backups/freshness",
+    ]) {
+      const checkRes = await app.inject({ method: "GET", url: pathUrl, headers: smokeHeaders });
+      expect(checkRes.statusCode).toBe(200);
+    }
+    const afterReadOnlyChecks = await snapshotPublicTableRowCounts(db);
+    expect(afterReadOnlyChecks).toEqual(beforeMutations);
+
+    // Logout works for Smoke Monitor
+    const logoutRes = await app.inject({ method: "POST", url: "/api/auth/logout", headers: smokeHeaders });
+    expect(logoutRes.statusCode).toBe(200);
+
+    // Run scripts/smoke-test.mjs over real HTTP
     const { buildApp } = await import("../../src/app.ts");
     const liveApp = await buildApp({ logger: false, enableRateLimit: false });
     const address = await liveApp.listen({ port: 0, host: "127.0.0.1" });
@@ -480,24 +764,110 @@ describeWithDb("Production Ops: Backup Freshness API, Metrics Gauges & Smoke Tes
       const { runSmokeTest } = (await import(smokeUrl)) as {
         runSmokeTest: (opts: Record<string, unknown>) => Promise<{
           ok: boolean;
+          mode: string;
+          readOnly: boolean;
+          uptimeStatus: { status: number; ready: boolean; backupFresh: boolean };
+          auth: { role: string; customRoleName: string; mfaEnabled: boolean };
           reconciliation: { allReconciled: boolean; controls: number };
           setupHealth: { healthy: boolean };
           auditChain: { valid: boolean };
           backupFreshness: { ok: boolean; status: string };
         }>;
       };
+
+      // 3a. Production mode refuses admin account
+      await expect(
+        runSmokeTest({
+          baseUrl: address,
+          mode: "production",
+          email: "ops-admin@test.local",
+          password: "StrongPassword123!",
+        })
+      ).rejects.toThrow(/refuses privileged or non-smoke account/i);
+
+      // 3b. MFA-enabled admin returns explicit MFA guidance instead of silent 401
+      const { userMfa, users } = await import("../../drizzle/schema.ts");
+      const { eq } = await import("drizzle-orm");
+      const [adminRow] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, "ops-admin@test.local"))
+        .limit(1);
+      await db.insert(userMfa).values({
+        userId: adminRow!.id,
+        totpSecretEncrypted: "iv:tag:ciphertext",
+        isEnabled: true,
+        keyVersion: 1,
+      });
+      await expect(
+        runSmokeTest({
+          baseUrl: address,
+          mode: "staging",
+          email: "ops-admin@test.local",
+          password: "StrongPassword123!",
+        })
+      ).rejects.toThrow(/mfaRequired=true.*smoke:create-user/i);
+
+      // 3c. Full production smoke run with dedicated Smoke Monitor user writes ZERO rows to all non-auth tables
+      const beforeSmoke = await snapshotPublicTableRowCounts(db);
       const summary = await runSmokeTest({
         baseUrl: address,
-        email: "ops-admin@test.local",
-        password: "StrongPassword123!",
+        mode: "production",
+        email: smokeUser.email,
+        password: "SmokeOnlyStrongPassword-0123456789!",
+        statusToken: process.env.UPTIME_STATUS_TOKEN!,
         requireFreshBackup: true,
       });
+      const afterSmoke = await snapshotPublicTableRowCounts(db);
+
       expect(summary.ok).toBe(true);
+      expect(summary.mode).toBe("production");
+      expect(summary.readOnly).toBe(true);
+      expect(summary.uptimeStatus).toEqual({
+        status: 200,
+        ready: true,
+        database: true,
+        storage: true,
+        backupFresh: true,
+      });
+      expect(summary.auth.role).toBe("user");
+      expect(summary.auth.customRoleName).toBe("Smoke Monitor");
+      expect(summary.auth.mfaEnabled).toBe(false);
       expect(summary.reconciliation.allReconciled).toBe(true);
       expect(summary.reconciliation.controls).toBe(8);
       expect(summary.setupHealth.healthy).toBe(true);
       expect(summary.auditChain.valid).toBe(true);
       expect(summary.backupFreshness.ok).toBe(true);
+
+      // Every single table in public schema except login's ephemeral session & login audit row has delta === 0
+      const authLoginOnlyTables = new Set(["user_sessions", "audit_logs"]);
+      for (const [tableName, beforeCount] of Object.entries(beforeSmoke)) {
+        if (authLoginOnlyTables.has(tableName)) continue;
+        expect(afterSmoke[tableName], `Expected 0 rows written to table '${tableName}'`).toBe(beforeCount);
+      }
+
+      // And 0 active (unrevoked) sessions remain for the smoke user after logout
+      const [activeSmokeSessions] = await db.execute<{ cnt: number }>(sql`
+        SELECT count(*)::int AS cnt
+        FROM public.user_sessions
+        WHERE user_id = ${smokeUser.userId} AND revoked_at IS NULL
+      `);
+      expect(Number(activeSmokeSessions?.cnt ?? -1)).toBe(0);
+
+      // 3d. Token-only production smoke run (no login) writes 0 rows across 100% of tables including sessions & audit_logs
+      const beforeTokenOnly = await snapshotPublicTableRowCounts(db);
+      const tokenOnlySummary = await runSmokeTest({
+        baseUrl: address,
+        mode: "production",
+        email: "",
+        password: "",
+        statusToken: process.env.UPTIME_STATUS_TOKEN!,
+        requireFreshBackup: true,
+      });
+      const afterTokenOnly = await snapshotPublicTableRowCounts(db);
+      expect(tokenOnlySummary.ok).toBe(true);
+      expect(tokenOnlySummary.uptimeStatus.status).toBe(200);
+      expect(afterTokenOnly).toEqual(beforeTokenOnly);
     } finally {
       await liveApp.close();
     }

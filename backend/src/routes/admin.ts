@@ -22,7 +22,7 @@ import { generateOpaqueToken, hashToken } from "../auth/sessions.ts";
 import { AppError, writeAuditLog } from "../db/helpers.ts";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
-import { requirePermission, requireRole } from "../middleware/auth.ts";
+import { requireAdminOrSmokeMonitor, requirePermission, requireRole } from "../middleware/auth.ts";
 import {
   createCustomRole,
   deleteCustomRole,
@@ -904,7 +904,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  app.get("/api/admin/backups/freshness", { preHandler: requireRole("admin") }, async (req, reply) => {
+  app.get("/api/admin/backups/freshness", { preHandler: requireAdminOrSmokeMonitor() }, async (req, reply) => {
     const query = req.query as { strict?: string };
     const strict = query.strict === "true" || query.strict === "1";
     const result = await getBackupFreshness();

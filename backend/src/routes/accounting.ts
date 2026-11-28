@@ -17,7 +17,7 @@ import {
 } from "@erp/shared";
 import { getDb } from "../db/index.ts";
 import { eventBroadcaster } from "../events/broadcaster.ts";
-import { assertBranchAccess, requireAuth, requirePermission, requireRole } from "../middleware/auth.ts";
+import { assertBranchAccess, requireAdminOrSmokeMonitor, requireAuth, requirePermission, requireRole } from "../middleware/auth.ts";
 import {
   getAccountLedger,
   getBalanceSheet,
@@ -133,7 +133,7 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     return { mapping };
   });
 
-  app.get("/api/accounting/setup-health", { preHandler: requireRole("admin") }, async (req) => {
+  app.get("/api/accounting/setup-health", { preHandler: requireAdminOrSmokeMonitor() }, async (req) => {
     return getAccountingSetupHealth(getDb(), req.authUser!);
   });
 
@@ -291,7 +291,7 @@ export async function accountingRoutes(app: FastifyInstance): Promise<void> {
     return getVatReturnSummary(getDb(), req.authUser!, q);
   });
 
-  app.get("/api/accounting/reports/reconciliation", { preHandler: requireRole("admin") }, async (req) => {
+  app.get("/api/accounting/reports/reconciliation", { preHandler: requireAdminOrSmokeMonitor() }, async (req) => {
     const q = req.query as { asOfDate?: string; branchId?: string };
     if (q.branchId) assertBranchAccess(req.authUser!, q.branchId);
     return getSubledgerReconciliation(getDb(), req.authUser!, q);

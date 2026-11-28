@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.ts";
 import {
@@ -143,6 +145,121 @@ describe("Observability: /health, /ready storage checks, structured request logs
     } finally {
       if (origDsn === undefined) delete process.env.SENTRY_DSN;
       else process.env.SENTRY_DSN = origDsn;
+    }
+  });
+
+  it("enforces token authentication, 404 when unconfigured, and per-IP rate limiting on GET /api/status", async () => {
+    const origToken = process.env.UPTIME_STATUS_TOKEN;
+    const origMax = process.env.UPTIME_STATUS_RATE_LIMIT_MAX;
+    const origWin = process.env.UPTIME_STATUS_RATE_LIMIT_WINDOW_MS;
+    try {
+      delete process.env.UPTIME_STATUS_TOKEN;
+      process.env.UPTIME_STATUS_RATE_LIMIT_MAX = "3";
+      process.env.UPTIME_STATUS_RATE_LIMIT_WINDOW_MS = "60000";
+
+      const app = await buildApp({ logger: false, enableRateLimit: true });
+      try {
+        // Unconfigured -> 404
+        const unconfigured = await app.inject({ method: "GET", url: "/api/status" });
+        expect(unconfigured.statusCode).toBe(404);
+
+        // Configure token -> missing/invalid token returns 401 and counts toward rate limit
+        process.env.UPTIME_STATUS_TOKEN = "unit-test-status-token-0123456789";
+
+        const noToken = await app.inject({ method: "GET", url: "/api/status" });
+        expect(noToken.statusCode).toBe(401);
+        expect(noToken.headers["www-authenticate"]).toContain("Bearer");
+
+        const badToken = await app.inject({
+          method: "GET",
+          url: "/api/status",
+          headers: { authorization: "Bearer wrong-token-00000000000000000000" },
+        });
+        expect(badToken.statusCode).toBe(401);
+
+        // 4th request within window triggers 429 rate limit (1 unconfigured + 2 unauthorized = 3)
+        const rateLimited = await app.inject({
+          method: "GET",
+          url: "/api/status",
+          headers: { authorization: "Bearer unit-test-status-token-0123456789" },
+        });
+        expect(rateLimited.statusCode).toBe(429);
+      } finally {
+        await app.close();
+      }
+    } finally {
+      if (origToken === undefined) delete process.env.UPTIME_STATUS_TOKEN;
+      else process.env.UPTIME_STATUS_TOKEN = origToken;
+      if (origMax === undefined) delete process.env.UPTIME_STATUS_RATE_LIMIT_MAX;
+      else process.env.UPTIME_STATUS_RATE_LIMIT_MAX = origMax;
+      if (origWin === undefined) delete process.env.UPTIME_STATUS_RATE_LIMIT_WINDOW_MS;
+      else process.env.UPTIME_STATUS_RATE_LIMIT_WINDOW_MS = origWin;
+    }
+  });
+
+  it("pings healthchecks.io-compatible URL on success and /fail with redacted errors on failure", async () => {
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const helperUrl = pathToFileURL(path.resolve(__dirname, "../../../scripts/lib/healthcheck-ping.mjs")).href;
+    const { pingHealthcheck, normalizeHealthcheckUrl, redactSensitiveText } = (await import(helperUrl)) as {
+      pingHealthcheck: (opts: {
+        url: string;
+        ok: boolean;
+        body?: string;
+        retries?: number;
+      }) => Promise<{ skipped: boolean; sent: boolean; ok: boolean; targetUrl: string | null; status: number | null }>;
+      normalizeHealthcheckUrl: (raw: string) => string | null;
+      redactSensitiveText: (raw: string) => string;
+    };
+
+    expect(normalizeHealthcheckUrl("https://hc-ping.com/abc-123/")).toBe("https://hc-ping.com/abc-123");
+    expect(normalizeHealthcheckUrl("ftp://invalid.example.com")).toBeNull();
+    expect(redactSensitiveText("pg_dump postgresql://erp:SuperSecret@db:5432/erp failed")).not.toContain(
+      "SuperSecret"
+    );
+
+    const received: Array<{ method: string; url: string; body: string }> = [];
+    const server = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      received.push({
+        method: req.method ?? "",
+        url: req.url ?? "",
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+      res.writeHead(200);
+      res.end("OK");
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const basePingUrl = `http://127.0.0.1:${port}/ping/test-uuid`;
+
+    try {
+      const skipped = await pingHealthcheck({ url: "", ok: true, body: "noop" });
+      expect(skipped.skipped).toBe(true);
+
+      const okRes = await pingHealthcheck({ url: `${basePingUrl}/`, ok: true, body: "backup ok: 123 bytes" });
+      expect(okRes.sent).toBe(true);
+      expect(okRes.targetUrl).toBe(basePingUrl);
+
+      const failRes = await pingHealthcheck({
+        url: basePingUrl,
+        ok: false,
+        body: "pg_dump failed for postgresql://erp:TopSecret99@host:5432/erp with Bearer tok-secret-xyz",
+      });
+      expect(failRes.sent).toBe(true);
+      expect(failRes.targetUrl).toBe(`${basePingUrl}/fail`);
+
+      expect(received).toHaveLength(2);
+      expect(received[0]).toEqual({ method: "POST", url: "/ping/test-uuid", body: "backup ok: 123 bytes" });
+      expect(received[1]?.method).toBe("POST");
+      expect(received[1]?.url).toBe("/ping/test-uuid/fail");
+      expect(received[1]?.body).not.toContain("TopSecret99");
+      expect(received[1]?.body).not.toContain("tok-secret-xyz");
+      expect(received[1]?.body).toContain("[REDACTED]");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
     }
   });
 });
