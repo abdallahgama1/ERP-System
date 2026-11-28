@@ -308,8 +308,8 @@ export function usePurchasingScope(options: PurchasingScopeOptions = {}) {
 
   const addVendor = useCallback(
     async (
-      data: Omit<Vendor, "id" | "createdAt" | "updatedAt" | "payablesBalance">
-    ): Promise<{ ok: true; vendor: Vendor } | { ok: false; error: string }> => {
+      data: Omit<Vendor, "id" | "createdAt" | "updatedAt" | "payablesBalance"> & { confirmDuplicate?: boolean }
+    ): Promise<{ ok: true; vendor: Vendor } | { ok: false; error: string; code?: string }> => {
       try {
         const res = await apiRequest<{ vendor: ApiVendor }>("/api/vendors", {
           method: "POST",
@@ -320,6 +320,7 @@ export function usePurchasingScope(options: PurchasingScopeOptions = {}) {
             phone: data.phone ?? "",
             address: data.billingAddress ?? "",
             taxNumber: data.taxNumber ?? "",
+            ...(data.confirmDuplicate ? { confirmDuplicate: true } : {}),
             currency: data.currency,
             paymentTermsDays: daysFromTerms(data.paymentTerms),
           },
@@ -338,7 +339,8 @@ export function usePurchasingScope(options: PurchasingScopeOptions = {}) {
           },
         };
       } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : "Failed to add vendor" };
+        const code = err && typeof err === "object" && "code" in err ? String((err as { code?: string }).code ?? "") : undefined;
+        return { ok: false, error: err instanceof Error ? err.message : "Failed to add vendor", code };
       }
     },
     [refreshPurchases]
@@ -347,8 +349,8 @@ export function usePurchasingScope(options: PurchasingScopeOptions = {}) {
   const updateVendor = useCallback(
     async (
       id: string,
-      data: Partial<Omit<Vendor, "id" | "createdAt">>
-    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      data: Partial<Omit<Vendor, "id" | "createdAt">> & { confirmDuplicate?: boolean }
+    ): Promise<{ ok: true } | { ok: false; error: string; code?: string }> => {
       try {
         await apiRequest(`/api/vendors/${id}`, {
           method: "PUT",
@@ -359,6 +361,7 @@ export function usePurchasingScope(options: PurchasingScopeOptions = {}) {
             ...(data.phone !== undefined ? { phone: data.phone } : {}),
             ...(data.billingAddress !== undefined ? { address: data.billingAddress } : {}),
             ...(data.taxNumber !== undefined ? { taxNumber: data.taxNumber } : {}),
+            ...(data.confirmDuplicate ? { confirmDuplicate: true } : {}),
             ...(data.currency !== undefined ? { currency: data.currency } : {}),
             ...(data.paymentTerms !== undefined ? { paymentTermsDays: daysFromTerms(data.paymentTerms) } : {}),
           },
@@ -366,7 +369,8 @@ export function usePurchasingScope(options: PurchasingScopeOptions = {}) {
         await refreshPurchases();
         return { ok: true };
       } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : "Failed to update vendor" };
+        const code = err && typeof err === "object" && "code" in err ? String((err as { code?: string }).code ?? "") : undefined;
+        return { ok: false, error: err instanceof Error ? err.message : "Failed to update vendor", code };
       }
     },
     [refreshPurchases]

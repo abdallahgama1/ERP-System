@@ -1,7 +1,6 @@
 import { useTranslation } from "react-i18next";
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -9,11 +8,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 
 interface ConfirmDeleteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<unknown>;
   title?: string;
   description?: string;
   itemName?: string;
@@ -28,10 +29,19 @@ export function ConfirmDeleteDialog({
   itemName,
 }: ConfirmDeleteDialogProps) {
   const { t } = useTranslation();
+  const confirmAction = useIdempotentAction(async () => {
+    await onConfirm();
+  });
+
+  const handleOpenChange = confirmAction.guardOpenChange(onOpenChange);
 
   return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
-      <AlertDialogContent>
+    <AlertDialog open={open} onOpenChange={handleOpenChange}>
+      <AlertDialogContent
+        onEscapeKeyDown={(e) => {
+          if (confirmAction.isPending) e.preventDefault();
+        }}
+      >
         <AlertDialogHeader>
           <AlertDialogTitle>
             {title || t("confirmDelete.title")}
@@ -41,13 +51,18 @@ export function ConfirmDeleteDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={onConfirm}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          <AlertDialogCancel disabled={confirmAction.isPending}>
+            {t("common.cancel")}
+          </AlertDialogCancel>
+          <SubmitButton
+            type="button"
+            variant="destructive"
+            pending={confirmAction.isPending}
+            isSlow={confirmAction.isSlow}
+            onClick={() => void confirmAction.run()}
           >
             {t("common.delete")}
-          </AlertDialogAction>
+          </SubmitButton>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

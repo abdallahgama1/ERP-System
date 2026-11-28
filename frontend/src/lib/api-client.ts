@@ -14,12 +14,16 @@ export class ApiError extends Error {
   public readonly response: { status: number; data: ApiErrorPayload };
 
   constructor(status: number, payload: ApiErrorPayload) {
-    super(payload.message ?? `Request failed (${status})`);
+    const details = payload.details as { messageEn?: string; messageAr?: string } | undefined;
+    const isAr = typeof document !== "undefined" && (document.documentElement.lang || "").startsWith("ar");
+    const localized =
+      (isAr ? details?.messageAr : details?.messageEn) ?? payload.message ?? `Request failed (${status})`;
+    super(localized);
     this.name = "ApiError";
     this.status = status;
     this.code = payload.code ?? "API_ERROR";
     this.details = payload.details;
-    this.response = { status, data: payload };
+    this.response = { status, data: { ...payload, message: localized } };
   }
 }
 
@@ -60,6 +64,72 @@ async function parseErrorResponse(response: Response): Promise<ApiError> {
   return new ApiError(response.status, payload);
 }
 
+export function generateIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// Scoped synchronous idempotency key slot so wrapper helpers (e.g. useInventoryScope.addBranch)
+// automatically inherit the user-action key started by useIdempotentAction/useIdempotentSubmit
+// without needing every intermediate signature to be rewritten.
+let activeActionIdempotencyKey: string | null = null;
+
+export function runWithIdempotencyKey<T>(key: string, fn: () => T): T {
+  const prev = activeActionIdempotencyKey;
+  activeActionIdempotencyKey = key;
+  try {
+    return fn();
+  } finally {
+    activeActionIdempotencyKey = prev;
+  }
+}
+
+export function getActiveIdempotencyKey(): string | null {
+  return activeActionIdempotencyKey;
+}
+
+export function formatApiErrorMessage(
+  error: unknown,
+  t?: (key: string, fallback?: string) => string,
+  language?: string
+): string {
+  if (error instanceof ApiError) {
+    const details = error.details as { messageEn?: string; messageAr?: string } | undefined;
+    const isAr = (language ?? (typeof document !== "undefined" ? document.documentElement.lang : "")).startsWith("ar");
+    if (isAr && details?.messageAr) return details.messageAr;
+    if (!isAr && details?.messageEn) return details.messageEn;
+    if (t && error.code) {
+      const translated = t(`errors.${error.code}`, "");
+      if (translated && translated !== `errors.${error.code}`) return translated;
+    }
+    return error.message;
+  }
+  if (error instanceof Error) return error.message;
+  return String(error ?? "Request failed");
+}
+
+function shouldAttachAutoIdempotencyKey(method: string, path: string): boolean {
+  if (method.toUpperCase() !== "POST") return false;
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  if (normalized.startsWith("/api/auth/")) return false;
+  if (normalized.startsWith("/api/pos/override/")) return false;
+  if (normalized === "/api/pos/manager-override") return false;
+  if (normalized.startsWith("/api/pos/terminal/")) return false;
+  if (normalized.startsWith("/api/notifications/")) return false;
+  return true;
+}
+
 export async function apiRequest<T>(
   path: string,
   options: {
@@ -67,14 +137,26 @@ export async function apiRequest<T>(
     body?: unknown;
     headers?: Record<string, string>;
     signal?: AbortSignal;
+    idempotencyKey?: string;
   } = {}
 ): Promise<T> {
   const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  const method = (options.method ?? (options.body !== undefined ? "POST" : "GET")).toUpperCase();
 
   const headers: Record<string, string> = {
     ...(options.body !== undefined && !isFormData ? { "Content-Type": "application/json" } : {}),
     ...(options.headers ?? {}),
   };
+
+  const hasExplicitHeader = Object.keys(headers).some((k) => k.toLowerCase() === "idempotency-key");
+  if (!hasExplicitHeader) {
+    const resolvedKey =
+      options.idempotencyKey ??
+      (shouldAttachAutoIdempotencyKey(method, path) ? activeActionIdempotencyKey ?? generateIdempotencyKey() : undefined);
+    if (resolvedKey) {
+      headers["Idempotency-Key"] = resolvedKey;
+    }
+  }
 
   const body: BodyInit | undefined =
     options.body === undefined
@@ -84,7 +166,7 @@ export async function apiRequest<T>(
         : JSON.stringify(options.body);
 
   const response = await fetch(buildApiUrl(path), {
-    method: options.method ?? (options.body !== undefined ? "POST" : "GET"),
+    method,
     headers,
     credentials: "include",
     body,
@@ -117,6 +199,7 @@ export async function apiMultipartRequest<T>(
     method?: "POST" | "PUT" | "PATCH";
     headers?: Record<string, string>;
     signal?: AbortSignal;
+    idempotencyKey?: string;
   } = {}
 ): Promise<T> {
   return apiRequest<T>(path, {
@@ -124,6 +207,7 @@ export async function apiMultipartRequest<T>(
     body: formData,
     headers: options.headers,
     signal: options.signal,
+    idempotencyKey: options.idempotencyKey,
   });
 }
 

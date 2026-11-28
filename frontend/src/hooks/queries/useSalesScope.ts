@@ -36,7 +36,9 @@ export interface SalesScopeOptions {
   products?: boolean;
 }
 
-type CustomerInput = Omit<Customer, "id" | "createdAt" | "updatedAt">;
+type CustomerInput = Omit<Customer, "id" | "createdAt" | "updatedAt"> & {
+  confirmDuplicate?: boolean;
+};
 
 export type SalesOrderInput = Omit<
   SalesOrder,
@@ -352,6 +354,7 @@ export function useSalesScope(options: SalesScopeOptions = {}) {
             shippingAddress: data.shippingAddress ?? "",
             taxNumber: data.taxNumber ?? "",
             ...(data.etaReceiverType ? { etaReceiverType: data.etaReceiverType } : {}),
+            ...(data.confirmDuplicate ? { confirmDuplicate: true } : {}),
             currency: data.currency,
             paymentTermsDays: daysFromTerms(data.paymentTerms),
             creditLimit: data.creditLimit ?? null,
@@ -361,6 +364,9 @@ export function useSalesScope(options: SalesScopeOptions = {}) {
         await refreshSales();
         return null;
       } catch (err) {
+        if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "DUPLICATE_TAX_NUMBER_WARNING") {
+          return `DUPLICATE_TAX_NUMBER_WARNING:${err instanceof Error ? err.message : "Duplicate tax number"}`;
+        }
         return err instanceof Error ? err.message : "Failed to add customer";
       }
     },
@@ -381,6 +387,7 @@ export function useSalesScope(options: SalesScopeOptions = {}) {
             shippingAddress: data.shippingAddress ?? "",
             taxNumber: data.taxNumber ?? "",
             ...(data.etaReceiverType ? { etaReceiverType: data.etaReceiverType } : {}),
+            ...(data.confirmDuplicate ? { confirmDuplicate: true } : {}),
             currency: data.currency,
             paymentTermsDays: daysFromTerms(data.paymentTerms),
             creditLimit: data.creditLimit ?? null,
@@ -390,6 +397,9 @@ export function useSalesScope(options: SalesScopeOptions = {}) {
         await refreshSales();
         return null;
       } catch (err) {
+        if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "DUPLICATE_TAX_NUMBER_WARNING") {
+          return `DUPLICATE_TAX_NUMBER_WARNING:${err instanceof Error ? err.message : "Duplicate tax number"}`;
+        }
         return err instanceof Error ? err.message : "Failed to update customer";
       }
     },
