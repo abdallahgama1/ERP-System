@@ -85,6 +85,44 @@ function getStatusBadgeVariant(status: EinvoiceSubmissionStatus): "default" | "s
   }
 }
 
+function extractEtaValidationLines(responsePayload: Record<string, unknown> | null | undefined): string[] {
+  if (!responsePayload || typeof responsePayload !== "object") return [];
+  const rejected = Array.isArray(responsePayload.rejectedDocuments)
+    ? responsePayload.rejectedDocuments
+    : [];
+  const lines: string[] = [];
+  for (const doc of rejected) {
+    if (!doc || typeof doc !== "object") continue;
+    const err = (doc as Record<string, unknown>).error as Record<string, unknown> | undefined;
+    const details = Array.isArray(err?.details) ? err.details : [];
+    if (details.length > 0) {
+      for (const d of details) {
+        if (!d || typeof d !== "object") continue;
+        const item = d as Record<string, unknown>;
+        const code = typeof item.code === "string" && item.code.trim() ? `[${item.code.trim()}] ` : "";
+        const loc =
+          (typeof item.propertyPath === "string" && item.propertyPath.trim()) ||
+          (typeof item.target === "string" && item.target.trim()) ||
+          "";
+        const msg =
+          (typeof item.message === "string" && item.message.trim()) ||
+          (typeof err?.message === "string" ? err.message.trim() : "");
+        if (msg) lines.push(`${code}${loc ? `${loc}: ` : ""}${msg}`);
+      }
+    } else if (typeof err?.message === "string" && err.message.trim()) {
+      lines.push(err.message.trim());
+    }
+  }
+  return lines;
+}
+
+function formatRetryTimestamp(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString();
+}
+
 export default function EInvoiceQueue() {
   const { t } = useTranslation();
   const { toast } = useToast();
@@ -203,9 +241,38 @@ export default function EInvoiceQueue() {
     },
   });
 
+  const retryAllMutation = useMutation({
+    mutationFn: () =>
+      apiRequest<{
+        queued: number;
+        processed: number;
+        etaConfigured: boolean;
+        message: string;
+      }>("/api/einvoicing/submissions/retry", {
+        method: "POST",
+        body: { resetAttempts: true },
+      }),
+    onSuccess: (res) => {
+      invalidateQueue();
+      toast({
+        title: t("einvoicing.retryQueuedToast", "Submissions Queued for Retry"),
+        description: res.message,
+      });
+    },
+    onError: (err) => {
+      toast({
+        title: err instanceof Error ? err.message : t("common.error"),
+        variant: "destructive",
+      });
+    },
+  });
+
   const submissions = data?.items ?? data?.submissions ?? [];
   const summary = data?.summary ?? DEFAULT_SUMMARY;
   const pageInfo = data?.pageInfo;
+  const effectiveDetailError = resolvedDetail?.lastError ?? selectedItem?.lastError ?? null;
+  const effectiveDetailNextRetry = resolvedDetail?.nextRetryAt ?? selectedItem?.nextRetryAt ?? null;
+  const structuredEtaErrors = extractEtaValidationLines(resolvedDetail?.responsePayloadJson);
 
   return (
     <div className="space-y-6">
@@ -224,6 +291,21 @@ export default function EInvoiceQueue() {
         </div>
 
         <div className="flex items-center gap-2">
+          {(summary.failed > 0 || summary.rejected > 0) && (
+            <Button
+              variant="outline"
+              data-testid="retry-all-failed-btn"
+              disabled={retryAllMutation.isPending}
+              onClick={() => retryAllMutation.mutate()}
+            >
+              {retryAllMutation.isPending ? (
+                <Loader2 className="h-4 w-4 me-2 animate-spin" />
+              ) : (
+                <RotateCcw className="h-4 w-4 me-2" />
+              )}
+              {t("einvoicing.retryAll", "Retry Failed & Rejected")}
+            </Button>
+          )}
           <Button
             variant="default"
             disabled={processNowMutation.isPending}
@@ -384,6 +466,7 @@ export default function EInvoiceQueue() {
                     <TableHead>Document UUID</TableHead>
                     <TableHead className="text-end">Total</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead>{t("einvoicing.etaErrorAndRetry", "ETA Error / Next Retry")}</TableHead>
                     <TableHead>Attempts</TableHead>
                     <TableHead className="text-end">{t("common.actions", "Actions")}</TableHead>
                   </TableRow>
@@ -445,12 +528,28 @@ export default function EInvoiceQueue() {
                         <Badge variant={getStatusBadgeVariant(item.status)}>
                           {item.status}
                         </Badge>
-                        {item.lastError && (
+                      </TableCell>
+                      <TableCell className="max-w-[300px]">
+                        {item.lastError ? (
                           <div
-                            className="text-xs text-destructive max-w-[200px] truncate mt-1"
+                            data-testid="submission-error-text"
+                            className="text-xs text-destructive whitespace-normal break-words leading-snug"
                             title={item.lastError}
                           >
                             {item.lastError}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                        {item.nextRetryAt && item.status !== "accepted" && item.status !== "rejected" && (
+                          <div
+                            data-testid="submission-next-retry"
+                            className="text-[11px] text-muted-foreground font-mono mt-1 flex items-center gap-1"
+                          >
+                            <Clock className="h-3 w-3 shrink-0" />
+                            <span>
+                              {t("einvoicing.nextRetry", "Next retry")}: {formatRetryTimestamp(item.nextRetryAt)}
+                            </span>
                           </div>
                         )}
                       </TableCell>
@@ -553,11 +652,44 @@ export default function EInvoiceQueue() {
                   {resolvedDetail?.submissionUuid ?? selectedItem?.submissionUuid ?? "—"}
                 </span>
               </div>
+              <div>
+                <span className="text-muted-foreground">{t("einvoicing.nextRetry", "Next retry")}:</span>{" "}
+                <span className="font-mono text-xs">
+                  {formatRetryTimestamp(effectiveDetailNextRetry) ?? "—"}
+                </span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Attempts:</span>{" "}
+                <span className="font-mono text-xs">
+                  {resolvedDetail?.attempts ?? selectedItem?.attempts ?? 0}
+                </span>
+              </div>
             </div>
 
-            {selectedItem?.lastError && (
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
-                <strong>Last Error:</strong> {selectedItem.lastError}
+            {(effectiveDetailError || structuredEtaErrors.length > 0) && (
+              <div
+                data-testid="detail-eta-error"
+                className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive space-y-2"
+              >
+                {effectiveDetailError && (
+                  <div className="break-words">
+                    <strong>{t("einvoicing.etaErrorLabel", "ETA Error")}:</strong> {effectiveDetailError}
+                  </div>
+                )}
+                {structuredEtaErrors.length > 0 && (
+                  <div data-testid="detail-eta-validation-errors">
+                    <div className="font-semibold mb-1">
+                      {t("einvoicing.etaValidationDetails", "ETA Validation Details")}:
+                    </div>
+                    <ul className="list-disc ps-4 space-y-0.5 font-mono">
+                      {structuredEtaErrors.map((line, idx) => (
+                        <li key={idx} className="break-words">
+                          {line}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
 

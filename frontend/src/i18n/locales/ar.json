@@ -1618,7 +1618,11 @@
     "payloadDialogTitle": "تفاصيل حزمة الإيصال الإلكتروني",
     "requestPayload": "بيانات الإرسال القياسية (ETA v1.2)",
     "responsePayload": "استجابة بوابة مصلحة الضرائب",
-    "noResponseYet": "لا توجد استجابة مسجلة بعد (محفوظ محلياً)."
+    "noResponseYet": "لا توجد استجابة مسجلة بعد (محفوظ محلياً).",
+    "etaErrorAndRetry": "خطأ مصلحة الضرائب / إعادة المحاولة",
+    "nextRetry": "المحاولة التالية",
+    "etaErrorLabel": "خطأ مصلحة الضرائب",
+    "etaValidationDetails": "تفاصيل أخطاء التحقق من مصلحة الضرائب"
   },
   "commandPalette": {
     "triggerLabel": "ابحث أو انتقل إلى...",

@@ -1624,7 +1624,11 @@
     "payloadDialogTitle": "E-Receipt Submission Payload",
     "requestPayload": "Canonical Request Payload (ETA v1.2)",
     "responsePayload": "ETA Gateway Response Payload",
-    "noResponseYet": "No remote response recorded yet (queued locally)."
+    "noResponseYet": "No remote response recorded yet (queued locally).",
+    "etaErrorAndRetry": "ETA Error / Next Retry",
+    "nextRetry": "Next retry",
+    "etaErrorLabel": "ETA Error",
+    "etaValidationDetails": "ETA Validation Details"
   },
   "commandPalette": {
     "triggerLabel": "Search or jump to...",
