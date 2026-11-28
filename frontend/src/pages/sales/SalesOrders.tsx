@@ -13,6 +13,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks, useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { useBranch } from "@/contexts/BranchContext";
 import { useSalesScope } from "@/hooks/queries/useSalesScope";
 import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
@@ -117,16 +119,19 @@ export default function SalesOrders() {
     setFulfillId(id);
   };
 
-  const submitFulfill = async () => {
+  const rowLocks = useActionLocks();
+
+  const fulfillOrderAction = useIdempotentAction(async () => {
     if (!fulfillOrder) return;
     const res = await fulfillSalesOrder(fulfillOrder.id, Object.entries(shipQty).map(([itemId, qty]) => ({ itemId, qty })));
     if (res.ok === false) {
       toast({ title: res.error, variant: "destructive" });
-      return;
+      return res;
     }
     toast({ title: t("salesOrders.fulfilled") });
     setFulfillId(null);
-  };
+    return { ok: true };
+  });
 
   const formatDate = (d: string) => new Date(d).toLocaleDateString();
 
@@ -232,18 +237,23 @@ export default function SalesOrders() {
                                 </Button>
                               )}
                               {canEdit && (
-                                <Button
+                                <SubmitButton
+                                  type="button"
                                   variant="ghost"
                                   size="icon"
                                   title={t("salesOrders.confirm")}
-                                  onClick={async () => {
-                                    const res = await confirmSalesOrder(o.id);
-                                    if (res.ok === false) toast({ title: res.error, variant: "destructive" });
-                                    else toast({ title: t("salesOrders.confirmed") });
-                                  }}
+                                  pending={rowLocks.isPending(`confirm:${o.id}`)}
+                                  onClick={() =>
+                                    void rowLocks.runLocked(`confirm:${o.id}`, async () => {
+                                      const res = await confirmSalesOrder(o.id);
+                                      if (res.ok === false) toast({ title: res.error, variant: "destructive" });
+                                      else toast({ title: t("salesOrders.confirmed") });
+                                      return res;
+                                    })
+                                  }
                                 >
                                   <CheckCircle className="h-4 w-4" />
-                                </Button>
+                                </SubmitButton>
                               )}
                               {canDelete && (
                                 <Button variant="ghost" size="icon" title={t("common.delete")} onClick={() => setDeleteId(o.id)}>
@@ -258,17 +268,22 @@ export default function SalesOrders() {
                             </Button>
                           )}
                           {canDelete && o.status === "Confirmed" && (
-                            <Button
+                            <SubmitButton
+                              type="button"
                               variant="ghost"
                               size="icon"
                               title={t("salesOrders.cancel")}
-                              onClick={async () => {
-                                const res = await cancelSalesOrder(o.id);
-                                if (res.ok === false) toast({ title: res.error, variant: "destructive" });
-                              }}
+                              pending={rowLocks.isPending(`cancel:${o.id}`)}
+                              onClick={() =>
+                                void rowLocks.runLocked(`cancel:${o.id}`, async () => {
+                                  const res = await cancelSalesOrder(o.id);
+                                  if (res.ok === false) toast({ title: res.error, variant: "destructive" });
+                                  return res;
+                                })
+                              }
                             >
                               <XCircle className="h-4 w-4 text-destructive" />
-                            </Button>
+                            </SubmitButton>
                           )}
                         </div>
                       </TableCell>
@@ -282,8 +297,8 @@ export default function SalesOrders() {
         </Card>
       )}
 
-      <Dialog open={fulfillId !== null} onOpenChange={(open) => !open && setFulfillId(null)}>
-        <DialogContent className="max-w-2xl">
+      <Dialog open={fulfillId !== null} onOpenChange={fulfillOrderAction.guardOpenChange((open) => !open && setFulfillId(null))}>
+        <DialogContent className="max-w-2xl" locked={fulfillOrderAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("salesOrders.fulfillTitle", { number: fulfillOrder?.soNumber ?? "" })}</DialogTitle>
             <DialogDescription>
@@ -326,10 +341,17 @@ export default function SalesOrders() {
             })}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setFulfillId(null)}>
+            <Button variant="outline" disabled={fulfillOrderAction.isPending} onClick={() => setFulfillId(null)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={submitFulfill}>{t("salesOrders.confirmShipment")}</Button>
+            <SubmitButton
+              type="button"
+              pending={fulfillOrderAction.isPending}
+              isSlow={fulfillOrderAction.isSlow}
+              onClick={() => void fulfillOrderAction.run()}
+            >
+              {t("salesOrders.confirmShipment")}
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

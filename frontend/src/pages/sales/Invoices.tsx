@@ -13,6 +13,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks, useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { ProductSelector } from "@/components/purchases/ProductSelector";
 import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
 import { EnterpriseDataTable, type EnterpriseColumn } from "@/components/EnterpriseDataTable";
@@ -230,7 +232,9 @@ export default function Invoices() {
   const subtotal = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
   const totalTax = lines.reduce((s, l) => s + (l.quantity * l.unitPrice * l.taxPercent) / 100, 0);
 
-  const handleSubmit = async () => {
+  const rowLocks = useActionLocks();
+
+  const createInvoiceAction = useIdempotentAction(async () => {
     const customer = customers.find(c => c.id === customerId);
     if (!customer) {
       toast({ title: t("invoices.selectCustomer", "Select a customer"), variant: "destructive" });
@@ -250,18 +254,33 @@ export default function Invoices() {
     });
     if (result.ok === false) {
       toast({ title: result.error, variant: "destructive" });
-      return;
+      return result;
     }
     toast({ title: `${result.invoice.invoiceNumber} ${t("invoices.created", "created")}` });
     setDialogOpen(false);
     resetForm();
-  };
+    return { ok: true };
+  });
 
-  const act = async (promise: Promise<{ ok: true } | { ok: false; error: string }>, okTitle: string) => {
-    const res = await promise;
-    if (res.ok === false) toast({ title: res.error, variant: "destructive" });
-    else toast({ title: okTitle });
-  };
+  const recordPaymentAction = useIdempotentAction(async () => {
+    if (!payFor) return;
+    const res = await recordInvoicePayment(payFor.id, Number(payAmount));
+    if (res.ok === false) {
+      toast({ title: res.error, variant: "destructive" });
+      return res;
+    }
+    toast({ title: t("invoices.paymentRecorded", "Payment recorded") });
+    setPayFor(null);
+    return { ok: true };
+  });
+
+  const act = (lockId: string, fn: () => Promise<{ ok: true } | { ok: false; error: string }>, okTitle: string) =>
+    rowLocks.runLocked(lockId, async () => {
+      const res = await fn();
+      if (res.ok === false) toast({ title: res.error, variant: "destructive" });
+      else toast({ title: okTitle });
+      return res;
+    });
 
   const outstanding = invoices
     .filter(i => i.status !== "Draft" && i.status !== "Cancelled")
@@ -385,14 +404,16 @@ export default function Invoices() {
                         <Mail className="h-4 w-4" />
                       </Button>
                       {canEdit && inv.status === "Draft" && (
-                        <Button
+                        <SubmitButton
+                          type="button"
                           variant="ghost"
                           size="icon"
                           aria-label={`Send ${inv.invoiceNumber}`}
-                          onClick={() => act(sendInvoice(inv.id), `${inv.invoiceNumber} sent`)}
+                          pending={rowLocks.isPending(`send:${inv.id}`)}
+                          onClick={() => void act(`send:${inv.id}`, () => sendInvoice(inv.id), `${inv.invoiceNumber} sent`)}
                         >
                           <Send className="h-4 w-4" />
-                        </Button>
+                        </SubmitButton>
                       )}
                       {canEdit && inv.status !== "Draft" && inv.status !== "Paid" && inv.status !== "Cancelled" && (
                         <Button
@@ -408,14 +429,16 @@ export default function Invoices() {
                         </Button>
                       )}
                       {canEdit && inv.status !== "Cancelled" && inv.amountPaid === 0 && (
-                        <Button
+                        <SubmitButton
+                          type="button"
                           variant="ghost"
                           size="icon"
                           aria-label={`Cancel ${inv.invoiceNumber}`}
-                          onClick={() => act(cancelInvoice(inv.id), `${inv.invoiceNumber} cancelled`)}
+                          pending={rowLocks.isPending(`cancel:${inv.id}`)}
+                          onClick={() => void act(`cancel:${inv.id}`, () => cancelInvoice(inv.id), `${inv.invoiceNumber} cancelled`)}
                         >
                           <Ban className="h-4 w-4" />
-                        </Button>
+                        </SubmitButton>
                       )}
                       {canDelete && inv.status === "Draft" && (
                         <Button
@@ -478,8 +501,8 @@ export default function Invoices() {
       </Card>
 
       {/* Create dialog */}
-      <Dialog open={dialogOpen} onOpenChange={open => { setDialogOpen(open); if (!open) resetForm(); }}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+      <Dialog open={dialogOpen} onOpenChange={createInvoiceAction.guardOpenChange(open => { setDialogOpen(open); if (!open) resetForm(); })}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" locked={createInvoiceAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("invoices.new", "New Invoice")}</DialogTitle>
             <DialogDescription>
@@ -624,8 +647,15 @@ export default function Invoices() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>{t("common.cancel")}</Button>
-            <Button onClick={handleSubmit}>{t("common.save")}</Button>
+            <Button variant="outline" disabled={createInvoiceAction.isPending} onClick={() => setDialogOpen(false)}>{t("common.cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={createInvoiceAction.isPending}
+              isSlow={createInvoiceAction.isSlow}
+              onClick={() => void createInvoiceAction.run()}
+            >
+              {t("common.save")}
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -730,8 +760,8 @@ export default function Invoices() {
       </Dialog>
 
       {/* Payment dialog */}
-      <Dialog open={!!payFor} onOpenChange={open => !open && setPayFor(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog open={!!payFor} onOpenChange={recordPaymentAction.guardOpenChange(open => !open && setPayFor(null))}>
+        <DialogContent className="max-w-md" locked={recordPaymentAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("invoices.recordPayment", "Record Payment")}</DialogTitle>
             <DialogDescription>
@@ -744,18 +774,15 @@ export default function Invoices() {
               onChange={e => setPayAmount(e.target.value)} />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPayFor(null)}>{t("common.cancel")}</Button>
-            <Button
-              onClick={async () => {
-                if (!payFor) return;
-                const res = await recordInvoicePayment(payFor.id, Number(payAmount));
-                if (res.ok === false) { toast({ title: res.error, variant: "destructive" }); return; }
-                toast({ title: t("invoices.paymentRecorded", "Payment recorded") });
-                setPayFor(null);
-              }}
+            <Button variant="outline" disabled={recordPaymentAction.isPending} onClick={() => setPayFor(null)}>{t("common.cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={recordPaymentAction.isPending}
+              isSlow={recordPaymentAction.isSlow}
+              onClick={() => void recordPaymentAction.run()}
             >
               {t("common.save")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

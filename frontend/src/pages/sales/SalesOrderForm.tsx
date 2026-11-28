@@ -16,6 +16,8 @@ import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { CustomerCombobox } from "@/components/sales/CustomerCombobox";
 import { ProductSelector } from "@/components/purchases/ProductSelector";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import type { SalesOrderItem } from "@/types";
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -80,33 +82,34 @@ const SalesOrderForm = () => {
     termsAndConditions: terms || undefined,
   });
 
-  const save = async (confirmAfter: boolean) => {
+  const saveOrderAction = useIdempotentAction(async (confirmAfter: boolean) => {
     const payload = buildPayload();
     if (existing) {
       const res = await updateSalesOrder(existing.id, payload);
       if (res.ok === false) {
         toast({ title: res.error, variant: "destructive" });
-        return;
+        return res;
       }
       if (confirmAfter) {
         const c = await confirmSalesOrder(existing.id);
         if (c.ok === false) {
           toast({ title: c.error, variant: "destructive" });
-          return;
+          return c;
         }
       }
       toast({ title: t("salesOrders.saved") });
       navigate("/sales/orders");
-      return;
+      return { ok: true };
     }
     const res = await createSalesOrder({ ...payload, status: confirmAfter ? "Confirmed" : "Draft" });
     if (res.ok === false) {
       toast({ title: res.error, variant: "destructive" });
-      return;
+      return res;
     }
     toast({ title: t("salesOrders.saved") });
     navigate("/sales/orders");
-  };
+    return { ok: true };
+  });
 
   return (
     <div className="space-y-6">
@@ -318,14 +321,25 @@ const SalesOrderForm = () => {
 
       {!readOnly && (
         <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={() => save(false)}>
+          <SubmitButton
+            type="button"
+            variant="outline"
+            pending={saveOrderAction.isPending}
+            isSlow={saveOrderAction.isSlow}
+            onClick={() => void saveOrderAction.run(false)}
+          >
             <Save className="me-2 h-4 w-4" />
             {t("salesOrders.saveDraft")}
-          </Button>
-          <Button onClick={() => save(true)}>
+          </SubmitButton>
+          <SubmitButton
+            type="button"
+            pending={saveOrderAction.isPending}
+            isSlow={saveOrderAction.isSlow}
+            onClick={() => void saveOrderAction.run(true)}
+          >
             <CheckCircle className="me-2 h-4 w-4" />
             {t("salesOrders.saveAndConfirm")}
-          </Button>
+          </SubmitButton>
         </div>
       )}
     </div>

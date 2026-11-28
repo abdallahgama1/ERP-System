@@ -11,6 +11,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks, useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { useSalesScope } from "@/hooks/queries/useSalesScope";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
@@ -62,7 +64,9 @@ export default function RetainerInvoices() {
 
   const resetForm = () => { setCustomerId(""); setRetainerDate(today()); setAmount(""); setNotes(""); };
 
-  const submit = async () => {
+  const rowLocks = useActionLocks();
+
+  const createRetainerAction = useIdempotentAction(async () => {
     const res = await createRetainer({
       customerId,
       retainerDate,
@@ -70,17 +74,50 @@ export default function RetainerInvoices() {
       notes: notes || undefined,
       createdBy: user?.name,
     });
-    if (res.ok === false) return toast({ title: res.error, variant: "destructive" });
+    if (res.ok === false) {
+      toast({ title: res.error, variant: "destructive" });
+      return res;
+    }
     toast({ title: `${res.retainer.retainerNumber} ${t("sales.retainers.created", "created")}` });
     setOpen(false);
     resetForm();
-  };
+    return { ok: true };
+  });
 
-  const guard = async (promise: Promise<{ ok: true } | { ok: false; error: string }>, message: string) => {
-    const res = await promise;
-    if (res.ok === false) return toast({ title: res.error, variant: "destructive" });
-    toast({ title: message });
-  };
+  const payRetainerAction = useIdempotentAction(async () => {
+    if (!payFor) return;
+    const res = await recordRetainerPayment(payFor.id, parseFloat(payAmount) || 0);
+    if (res.ok === false) {
+      toast({ title: res.error, variant: "destructive" });
+      return res;
+    }
+    toast({ title: t("sales.retainers.paymentRecorded", "Payment recorded") });
+    setPayFor(null); setPayAmount("");
+    return { ok: true };
+  });
+
+  const applyRetainerAction = useIdempotentAction(async () => {
+    if (!applyFor) return;
+    const res = await applyRetainerToInvoice(applyFor.id, applyInvoiceId, parseFloat(applyAmount) || 0);
+    if (res.ok === false) {
+      toast({ title: res.error, variant: "destructive" });
+      return res;
+    }
+    toast({ title: t("sales.retainers.applied", "Applied") });
+    setApplyFor(null); setApplyInvoiceId(""); setApplyAmount("");
+    return { ok: true };
+  });
+
+  const guard = (lockId: string, fn: () => Promise<{ ok: true } | { ok: false; error: string }>, message: string) =>
+    rowLocks.runLocked(lockId, async () => {
+      const res = await fn();
+      if (res.ok === false) {
+        toast({ title: res.error, variant: "destructive" });
+        return res;
+      }
+      toast({ title: message });
+      return { ok: true };
+    });
 
   const applyTargets = useMemo(
     () => (applyFor ? invoices.filter(i => i.customerId === applyFor.customerId && i.status !== "Draft" && i.status !== "Cancelled" && invoiceBalance(i) > 0) : []),
@@ -168,9 +205,16 @@ export default function RetainerInvoices() {
                     <TableCell className="text-end">
                       <div className="flex justify-end gap-1 flex-wrap">
                         {canEdit && r.status === "Draft" && (
-                          <Button variant="outline" size="sm" onClick={() => guard(sendRetainer(r.id), t("sales.retainers.sent", "Retainer sent"))}>
+                          <SubmitButton
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            hideSlowText
+                            pending={rowLocks.isPending(`send:${r.id}`)}
+                            onClick={() => void guard(`send:${r.id}`, () => sendRetainer(r.id), t("sales.retainers.sent", "Retainer sent"))}
+                          >
                             <Send className="h-3.5 w-3.5 me-1" />{t("sales.retainers.send", "Send")}
-                          </Button>
+                          </SubmitButton>
                         )}
                         {canEdit && r.status !== "Draft" && r.status !== "Cancelled" && r.amountPaid < r.amount - 0.005 && (
                           <Button variant="outline" size="sm" onClick={() => { setPayFor(r); setPayAmount((r.amount - r.amountPaid).toFixed(2)); }}>
@@ -183,9 +227,16 @@ export default function RetainerInvoices() {
                           </Button>
                         )}
                         {canEdit && r.status !== "Cancelled" && r.amountPaid === 0 && r.amountApplied === 0 && (
-                          <Button variant="ghost" size="sm" onClick={() => guard(cancelRetainer(r.id), t("sales.retainers.cancelled", "Retainer cancelled"))}>
+                          <SubmitButton
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            hideSlowText
+                            pending={rowLocks.isPending(`cancel:${r.id}`)}
+                            onClick={() => void guard(`cancel:${r.id}`, () => cancelRetainer(r.id), t("sales.retainers.cancelled", "Retainer cancelled"))}
+                          >
                             <Ban className="h-3.5 w-3.5" />
-                          </Button>
+                          </SubmitButton>
                         )}
                         {canDelete && r.status === "Draft" && r.amountPaid === 0 && r.amountApplied === 0 && (
                           <Button variant="ghost" size="sm" onClick={() => setPendingDelete(r)}>
@@ -202,8 +253,8 @@ export default function RetainerInvoices() {
         </CardContent>
       </Card>
 
-      <Dialog open={open} onOpenChange={o => { setOpen(o); if (!o) resetForm(); }}>
-        <DialogContent>
+      <Dialog open={open} onOpenChange={createRetainerAction.guardOpenChange(o => { setOpen(o); if (!o) resetForm(); })}>
+        <DialogContent locked={createRetainerAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("sales.retainers.new", "New Retainer")}</DialogTitle>
             <DialogDescription>
@@ -236,14 +287,22 @@ export default function RetainerInvoices() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>{t("common.cancel", "Cancel")}</Button>
-            <Button onClick={submit} disabled={!customerId || !(parseFloat(amount) > 0)}>{t("common.save", "Save")}</Button>
+            <Button variant="outline" disabled={createRetainerAction.isPending} onClick={() => setOpen(false)}>{t("common.cancel", "Cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={createRetainerAction.isPending}
+              isSlow={createRetainerAction.isSlow}
+              onClick={() => void createRetainerAction.run()}
+              disabled={!customerId || !(parseFloat(amount) > 0)}
+            >
+              {t("common.save", "Save")}
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!payFor} onOpenChange={o => { if (!o) { setPayFor(null); setPayAmount(""); } }}>
-        <DialogContent>
+      <Dialog open={!!payFor} onOpenChange={payRetainerAction.guardOpenChange(o => { if (!o) { setPayFor(null); setPayAmount(""); } })}>
+        <DialogContent locked={payRetainerAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("sales.retainers.recordPayment", "Record payment")}</DialogTitle>
             <DialogDescription>{payFor?.retainerNumber}</DialogDescription>
@@ -253,24 +312,21 @@ export default function RetainerInvoices() {
             <Input type="number" min={0} step="0.01" value={payAmount} onChange={e => setPayAmount(e.target.value)} />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPayFor(null)}>{t("common.cancel", "Cancel")}</Button>
-            <Button
-              onClick={async () => {
-                if (!payFor) return;
-                const res = await recordRetainerPayment(payFor.id, parseFloat(payAmount) || 0);
-                if (res.ok === false) return toast({ title: res.error, variant: "destructive" });
-                toast({ title: t("sales.retainers.paymentRecorded", "Payment recorded") });
-                setPayFor(null); setPayAmount("");
-              }}
+            <Button variant="outline" disabled={payRetainerAction.isPending} onClick={() => setPayFor(null)}>{t("common.cancel", "Cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={payRetainerAction.isPending}
+              isSlow={payRetainerAction.isSlow}
+              onClick={() => void payRetainerAction.run()}
             >
               {t("common.save", "Save")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!applyFor} onOpenChange={o => { if (!o) { setApplyFor(null); setApplyInvoiceId(""); setApplyAmount(""); } }}>
-        <DialogContent>
+      <Dialog open={!!applyFor} onOpenChange={applyRetainerAction.guardOpenChange(o => { if (!o) { setApplyFor(null); setApplyInvoiceId(""); setApplyAmount(""); } })}>
+        <DialogContent locked={applyRetainerAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("sales.retainers.applyToInvoice", "Apply to invoice")}</DialogTitle>
             <DialogDescription>
@@ -295,19 +351,16 @@ export default function RetainerInvoices() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setApplyFor(null)}>{t("common.cancel", "Cancel")}</Button>
-            <Button
+            <Button variant="outline" disabled={applyRetainerAction.isPending} onClick={() => setApplyFor(null)}>{t("common.cancel", "Cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={applyRetainerAction.isPending}
+              isSlow={applyRetainerAction.isSlow}
               disabled={!applyInvoiceId}
-              onClick={async () => {
-                if (!applyFor) return;
-                const res = await applyRetainerToInvoice(applyFor.id, applyInvoiceId, parseFloat(applyAmount) || 0);
-                if (res.ok === false) return toast({ title: res.error, variant: "destructive" });
-                toast({ title: t("sales.retainers.applied", "Applied") });
-                setApplyFor(null); setApplyInvoiceId(""); setApplyAmount("");
-              }}
+              onClick={() => void applyRetainerAction.run()}
             >
               {t("common.save", "Save")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

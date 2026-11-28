@@ -17,6 +17,8 @@ import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { useToast } from "@/hooks/use-toast";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import type { SalesReturn, SalesReturnDisposition, SalesReturnReason } from "@/types";
 
 const REASONS: SalesReturnReason[] = ["damaged", "wrong_item", "expired", "not_needed", "other"];
@@ -83,7 +85,7 @@ export default function SalesReturns() {
     setReason("damaged"); setNotes(""); setLines([]);
   };
 
-  const submit = async () => {
+  const createReturnAction = useIdempotentAction(async () => {
     const result = await createSalesReturn({
       customerId,
       invoiceId: invoiceId || undefined,
@@ -104,28 +106,30 @@ export default function SalesReturns() {
     });
     if (result.ok === false) {
       toast({ title: result.error, variant: "destructive" });
-      return;
+      return result;
     }
     toast({ title: `${result.salesReturn.returnNumber} ${t("sales.salesReturns.created", "created")}` });
     setOpen(false);
     resetForm();
-  };
+    return { ok: true };
+  });
 
   const applyTargets = useMemo(
     () => (applyFor ? invoices.filter(i => i.customerId === applyFor.customerId && i.status !== "Draft" && i.status !== "Cancelled" && invoiceBalance(i) > 0) : []),
     [applyFor, invoices, invoiceBalance],
   );
 
-  const submitApply = async () => {
+  const applyCreditAction = useIdempotentAction(async () => {
     if (!applyFor) return;
     const res = await applyCreditNoteToInvoice(applyFor.id, applyInvoiceId, parseFloat(applyAmount) || 0);
     if (res.ok === false) {
       toast({ title: res.error, variant: "destructive" });
-      return;
+      return res;
     }
     toast({ title: t("sales.salesReturns.creditApplied", "Credit applied") });
     setApplyFor(null); setApplyInvoiceId(""); setApplyAmount("");
-  };
+    return { ok: true };
+  });
 
   const totalCredit = salesReturns.reduce((s, r) => s + r.creditTotal, 0);
   const remainingCredit = salesReturns.reduce((s, r) => s + creditNoteBalance(r), 0);
@@ -222,8 +226,8 @@ export default function SalesReturns() {
         </CardContent>
       </Card>
 
-      <Dialog open={open} onOpenChange={o => { setOpen(o); if (!o) resetForm(); }}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+      <Dialog open={open} onOpenChange={createReturnAction.guardOpenChange(o => { setOpen(o); if (!o) resetForm(); })}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" locked={createReturnAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("sales.salesReturns.new", "New Return")}</DialogTitle>
             <DialogDescription>
@@ -337,16 +341,22 @@ export default function SalesReturns() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>{t("common.cancel", "Cancel")}</Button>
-            <Button onClick={submit} disabled={!customerId || !branchId || creditPreview <= 0}>
+            <Button variant="outline" disabled={createReturnAction.isPending} onClick={() => setOpen(false)}>{t("common.cancel", "Cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={createReturnAction.isPending}
+              isSlow={createReturnAction.isSlow}
+              onClick={() => void createReturnAction.run()}
+              disabled={!customerId || !branchId || creditPreview <= 0}
+            >
               {t("common.save", "Save")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!applyFor} onOpenChange={o => { if (!o) { setApplyFor(null); setApplyInvoiceId(""); setApplyAmount(""); } }}>
-        <DialogContent>
+      <Dialog open={!!applyFor} onOpenChange={applyCreditAction.guardOpenChange(o => { if (!o) { setApplyFor(null); setApplyInvoiceId(""); setApplyAmount(""); } })}>
+        <DialogContent locked={applyCreditAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("sales.salesReturns.applyCredit", "Apply credit")}</DialogTitle>
             <DialogDescription>
@@ -371,8 +381,16 @@ export default function SalesReturns() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setApplyFor(null)}>{t("common.cancel", "Cancel")}</Button>
-            <Button onClick={submitApply} disabled={!applyInvoiceId}>{t("common.save", "Save")}</Button>
+            <Button variant="outline" disabled={applyCreditAction.isPending} onClick={() => setApplyFor(null)}>{t("common.cancel", "Cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={applyCreditAction.isPending}
+              isSlow={applyCreditAction.isSlow}
+              onClick={() => void applyCreditAction.run()}
+              disabled={!applyInvoiceId}
+            >
+              {t("common.save", "Save")}
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
