@@ -10,6 +10,7 @@
  *   TEST_DATABASE_URL="postgresql://..." node scripts/demo-ledger.mjs
  */
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,10 +78,14 @@ function authHeaders(res) {
 const fmt = (n) => Number(n ?? 0).toFixed(2);
 
 async function injectJson(app, method, url, headers, payload) {
+  const effectiveHeaders =
+    method === "POST" && !url.startsWith("/api/auth/")
+      ? { "idempotency-key": randomUUID(), ...headers }
+      : headers;
   const res = await app.inject({
     method,
     url,
-    headers,
+    headers: effectiveHeaders,
     ...(payload !== undefined ? { payload } : {}),
   });
   if (res.statusCode >= 400) {

@@ -5,9 +5,13 @@ import { RecentReceiptsDrawer } from "@/components/pos/RecentReceiptsDrawer";
 
 const apiRequestMock = vi.fn();
 
-vi.mock("@/lib/api-client", () => ({
-  apiRequest: (...args: unknown[]) => apiRequestMock(...args),
-}));
+vi.mock("@/lib/api-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api-client")>();
+  return {
+    ...actual,
+    apiRequest: (...args: unknown[]) => apiRequestMock(...args),
+  };
+});
 
 describe("POS RecentReceiptsDrawer & PosReturnDialog", () => {
   beforeEach(() => {

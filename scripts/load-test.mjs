@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -119,6 +120,10 @@ async function main() {
       cookie: sessionCookie,
       "content-type": "application/json",
     };
+    const postHeaders = () => ({
+      ...authHeaders,
+      "idempotency-key": randomUUID(),
+    });
 
     // 2. Fetch HQ branch
     const branchesRes = await fetch(`${address}/api/branches`, { headers: authHeaders });
@@ -130,7 +135,7 @@ async function main() {
     // 3. Seed test product with EXACTLY 5 units in stock (qtyOnHand = 5)
     const prodRes = await fetch(`${address}/api/products`, {
       method: "POST",
-      headers: authHeaders,
+      headers: postHeaders(),
       body: JSON.stringify({
         sku: `LOAD-SKU-${runTag}`,
         barcode: `62299${Date.now().toString().slice(-8)}`,
@@ -149,7 +154,7 @@ async function main() {
     // Seed a customer & sales order for paginated read benchmark
     const custRes = await fetch(`${address}/api/customers`, {
       method: "POST",
-      headers: authHeaders,
+      headers: postHeaders(),
       body: JSON.stringify({ name: `Load Customer ${runTag}` }),
     });
     assert.equal(custRes.status, 201);
@@ -157,7 +162,7 @@ async function main() {
 
     const soRes = await fetch(`${address}/api/sales-orders`, {
       method: "POST",
-      headers: authHeaders,
+      headers: postHeaders(),
       body: JSON.stringify({
         customerId,
         branchId: hqBranchId,
@@ -170,7 +175,7 @@ async function main() {
     // 4. Seed POS terminal and open shift
     const termRes = await fetch(`${address}/api/pos/terminals`, {
       method: "POST",
-      headers: authHeaders,
+      headers: postHeaders(),
       body: JSON.stringify({
         branchId: hqBranchId,
         code: `LD-${runTag.slice(-4)}`,
@@ -183,7 +188,7 @@ async function main() {
 
     const shiftRes = await fetch(`${address}/api/pos/shifts/open`, {
       method: "POST",
-      headers: authHeaders,
+      headers: postHeaders(),
       body: JSON.stringify({
         terminalId,
         openingFloat: 500,
@@ -235,7 +240,7 @@ async function main() {
         const t0 = performance.now();
         const res = await fetch(`${address}/api/pos/checkout`, {
           method: "POST",
-          headers: authHeaders,
+          headers: postHeaders(),
           body: JSON.stringify({
             terminalId,
             shiftId,

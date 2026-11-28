@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { expect, type APIResponse, type Page } from "@playwright/test";
 
 export const BASE_URL = "http://127.0.0.1:4173";
@@ -5,7 +6,7 @@ export const BASE_URL = "http://127.0.0.1:4173";
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export function csrfHeaders(origin = BASE_URL): Record<string, string> {
-  return { Origin: origin };
+  return { Origin: origin, "Idempotency-Key": randomUUID() };
 }
 
 export interface AdminSignupOptions {
@@ -50,8 +51,12 @@ export async function apiRequest(
   headers?: Record<string, string>
 ): Promise<APIResponse> {
   const isMutating = method !== "GET";
+  const hasExplicitKey = Object.keys(headers ?? {}).some((k) => k.toLowerCase() === "idempotency-key");
+  const baseHeaders = isMutating
+    ? { Origin: BASE_URL, ...(method === "POST" && !hasExplicitKey ? { "Idempotency-Key": randomUUID() } : {}) }
+    : {};
   const mergedHeaders = isMutating
-    ? { ...csrfHeaders(), ...(headers ?? {}) }
+    ? { ...baseHeaders, ...(headers ?? {}) }
     : headers;
 
   const options: {
