@@ -15,6 +15,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -27,7 +29,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Copy, KeyRound, Laptop, Loader2, LogOut, Mail, RefreshCw, Shield, ShieldCheck, User } from "lucide-react";
+import { Copy, KeyRound, Laptop, LogOut, Mail, RefreshCw, Shield, ShieldCheck, User } from "lucide-react";
 
 export default function Profile() {
   const { t } = useTranslation();
@@ -39,6 +41,7 @@ export default function Profile() {
   const sessionsQuery = useActiveSessionsQuery();
   const revokeSession = useRevokeSessionMutation();
   const revokeOtherSessions = useRevokeOtherSessionsMutation();
+  const rowLocks = useActionLocks();
 
   const [enrollment, setEnrollment] = useState<MfaEnrollResponseDto | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -356,25 +359,20 @@ export default function Profile() {
                     />
                   </div>
                   <div className="flex gap-2">
-                    <Button type="submit" size="sm" disabled={verifyEnrollMfa.isPending}>
-                      {verifyEnrollMfa.isPending && <Loader2 className="h-4 w-4 me-2 animate-spin" />}
+                    <SubmitButton type="submit" size="sm" pending={verifyEnrollMfa.isPending}>
                       {t("mfa.verifyAndEnable", "Verify & Enable")}
-                    </Button>
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setEnrollment(null)}>
+                    </SubmitButton>
+                    <Button type="button" variant="ghost" size="sm" disabled={verifyEnrollMfa.isPending} onClick={() => setEnrollment(null)}>
                       {t("common.cancel")}
                     </Button>
                   </div>
                 </form>
               </div>
             ) : (
-              <Button type="button" onClick={() => void handleStartEnroll()} disabled={enrollMfa.isPending}>
-                {enrollMfa.isPending ? (
-                  <Loader2 className="h-4 w-4 me-2 animate-spin" />
-                ) : (
-                  <KeyRound className="h-4 w-4 me-2" />
-                )}
+              <SubmitButton type="button" onClick={() => void handleStartEnroll()} pending={enrollMfa.isPending}>
+                <KeyRound className="h-4 w-4 me-2" />
                 {t("mfa.setup2fa", "Enable Two-Factor Auth")}
-              </Button>
+              </SubmitButton>
             )}
 
             {recoveryCodesDisplay && recoveryCodesDisplay.length > 0 && (
@@ -420,16 +418,17 @@ export default function Profile() {
                 {t("sessionsMgmt.description", "Manage devices and browsers currently signed into your account.")}
               </CardDescription>
             </div>
-            <Button
+            <SubmitButton
               type="button"
               variant="outline"
               size="sm"
-              disabled={otherSessionsCount === 0 || revokeOtherSessions.isPending}
+              pending={revokeOtherSessions.isPending}
+              disabled={otherSessionsCount === 0}
               onClick={() => void handleRevokeOthers()}
             >
               <LogOut className="h-4 w-4 me-2" />
               {t("sessionsMgmt.revokeAllOthers", "Revoke All Other Sessions")}
-            </Button>
+            </SubmitButton>
           </CardHeader>
           <CardContent className="overflow-x-auto">
             <Table>
@@ -480,16 +479,21 @@ export default function Profile() {
                         {formatDistanceToNow(new Date(sess.createdAt), { addSuffix: true })}
                       </TableCell>
                       <TableCell className="text-end">
-                        <Button
+                        <SubmitButton
                           type="button"
                           variant="ghost"
                           size="sm"
+                          hideSlowText
                           className="text-destructive hover:text-destructive"
-                          disabled={revokeSession.isPending}
-                          onClick={() => void handleRevokeSession(sess.id, sess.isCurrent)}
+                          pending={rowLocks.isPending(`revoke:${sess.id}`)}
+                          onClick={() =>
+                            void rowLocks.runLocked(`revoke:${sess.id}`, () =>
+                              handleRevokeSession(sess.id, sess.isCurrent)
+                            )
+                          }
                         >
                           {t("sessionsMgmt.revoke", "Revoke")}
-                        </Button>
+                        </SubmitButton>
                       </TableCell>
                     </TableRow>
                   ))
@@ -501,8 +505,8 @@ export default function Profile() {
       </div>
 
       {/* Disable 2FA Dialog */}
-      <Dialog open={disableDialogOpen} onOpenChange={setDisableDialogOpen}>
-        <DialogContent>
+      <Dialog open={disableDialogOpen} onOpenChange={(o) => { if (!o && disableMfa.isPending) return; setDisableDialogOpen(o); }}>
+        <DialogContent locked={disableMfa.isPending}>
           <DialogHeader>
             <DialogTitle>{t("mfa.disable2fa", "Disable Two-Factor Authentication")}</DialogTitle>
             <DialogDescription>
@@ -521,20 +525,20 @@ export default function Profile() {
               />
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setDisableDialogOpen(false)}>
+              <Button type="button" variant="outline" disabled={disableMfa.isPending} onClick={() => setDisableDialogOpen(false)}>
                 {t("common.cancel")}
               </Button>
-              <Button type="submit" variant="destructive" disabled={disableMfa.isPending}>
+              <SubmitButton type="submit" variant="destructive" pending={disableMfa.isPending}>
                 {t("mfa.disable2fa", "Disable 2FA")}
-              </Button>
+              </SubmitButton>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
 
       {/* Regenerate Recovery Codes Dialog */}
-      <Dialog open={regenDialogOpen} onOpenChange={setRegenDialogOpen}>
-        <DialogContent>
+      <Dialog open={regenDialogOpen} onOpenChange={(o) => { if (!o && regenerateRecoveryCodes.isPending) return; setRegenDialogOpen(o); }}>
+        <DialogContent locked={regenerateRecoveryCodes.isPending}>
           <DialogHeader>
             <DialogTitle>{t("mfa.regenerateRecoveryCodes", "Regenerate Recovery Codes")}</DialogTitle>
             <DialogDescription>
@@ -556,12 +560,12 @@ export default function Profile() {
               />
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setRegenDialogOpen(false)}>
+              <Button type="button" variant="outline" disabled={regenerateRecoveryCodes.isPending} onClick={() => setRegenDialogOpen(false)}>
                 {t("common.cancel")}
               </Button>
-              <Button type="submit" disabled={regenerateRecoveryCodes.isPending}>
+              <SubmitButton type="submit" pending={regenerateRecoveryCodes.isPending}>
                 {t("mfa.regenerate", "Regenerate")}
-              </Button>
+              </SubmitButton>
             </DialogFooter>
           </form>
         </DialogContent>

@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { SubmitButton } from "@/components/ui/submit-button";
-import { useActionLocks } from "@/hooks/useIdempotentSubmit";
+import { useActionLocks, useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -67,13 +67,11 @@ export default function Users() {
   const [newRole, setNewRole] = useState<AppRole>("user");
   const [newScopeMode, setNewScopeMode] = useState<"all" | "selected">("selected");
   const [newBranchIds, setNewBranchIds] = useState<string[]>([]);
-  const [creating, setCreating] = useState(false);
 
   const [branchDialogUser, setBranchDialogUser] = useState<UserRecord | null>(null);
   const [editScopeMode, setEditScopeMode] = useState<"all" | "selected">("selected");
   const [editBranchIds, setEditBranchIds] = useState<string[]>([]);
   const [editDefaultBranchId, setEditDefaultBranchId] = useState<string>("");
-  const [savingBranches, setSavingBranches] = useState(false);
 
   const [resetUrlDialog, setResetUrlDialog] = useState<{ email: string; url: string } | null>(null);
   const rowLocks = useActionLocks();
@@ -154,39 +152,41 @@ export default function Users() {
     }
   };
 
+  const createUserAction = useIdempotentAction(async () => {
+    const res = await apiRequest<{ user: UserRecord }>("/api/users", {
+      method: "POST",
+      body: {
+        name: newName.trim(),
+        email: newEmail.trim(),
+        password: newPassword,
+        role: newRole,
+        branchScopeMode: newRole === "admin" ? "all" : newScopeMode,
+        branchIds: newScopeMode === "all" ? [] : newBranchIds,
+        defaultBranchId: newBranchIds[0] ?? null,
+      },
+    });
+    setUsers((prev) => [res.user, ...prev]);
+    setCreateOpen(false);
+    setNewName("");
+    setNewEmail("");
+    setNewPassword("");
+    setNewRole("user");
+    setNewScopeMode("selected");
+    setNewBranchIds([]);
+    toast.success(t("users.userCreated", "User account created"));
+  });
+
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (createUserAction.isPending) return;
     if (newPassword.length < 8) {
       toast.error(t("settings.passwordMinLength"));
       return;
     }
-    setCreating(true);
     try {
-      const res = await apiRequest<{ user: UserRecord }>("/api/users", {
-        method: "POST",
-        body: {
-          name: newName.trim(),
-          email: newEmail.trim(),
-          password: newPassword,
-          role: newRole,
-          branchScopeMode: newRole === "admin" ? "all" : newScopeMode,
-          branchIds: newScopeMode === "all" ? [] : newBranchIds,
-          defaultBranchId: newBranchIds[0] ?? null,
-        },
-      });
-      setUsers((prev) => [res.user, ...prev]);
-      setCreateOpen(false);
-      setNewName("");
-      setNewEmail("");
-      setNewPassword("");
-      setNewRole("user");
-      setNewScopeMode("selected");
-      setNewBranchIds([]);
-      toast.success(t("users.userCreated", "User account created"));
+      await createUserAction.run();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("common.error"));
-    } finally {
-      setCreating(false);
     }
   };
 
@@ -197,28 +197,30 @@ export default function Users() {
     setEditDefaultBranchId(u.defaultBranchId ?? "");
   };
 
-  const handleSaveBranches = async () => {
+  const saveBranchesAction = useIdempotentAction(async () => {
     if (!branchDialogUser) return;
-    setSavingBranches(true);
+    await apiRequest(`/api/users/${branchDialogUser.id}/branches`, {
+      method: "PUT",
+      body: {
+        branchScopeMode: branchDialogUser.role === "admin" ? "all" : editScopeMode,
+        branchIds: editScopeMode === "all" ? [] : editBranchIds,
+        defaultBranchId: editDefaultBranchId || null,
+      },
+    });
+    await fetchUsers();
+    if (branchDialogUser.id === currentUser?.id) {
+      await refreshUser();
+    }
+    setBranchDialogUser(null);
+    toast.success(t("users.branchesUpdated", "Branch access updated"));
+  });
+
+  const handleSaveBranches = async () => {
+    if (!branchDialogUser || saveBranchesAction.isPending) return;
     try {
-      await apiRequest(`/api/users/${branchDialogUser.id}/branches`, {
-        method: "PUT",
-        body: {
-          branchScopeMode: branchDialogUser.role === "admin" ? "all" : editScopeMode,
-          branchIds: editScopeMode === "all" ? [] : editBranchIds,
-          defaultBranchId: editDefaultBranchId || null,
-        },
-      });
-      await fetchUsers();
-      if (branchDialogUser.id === currentUser?.id) {
-        await refreshUser();
-      }
-      setBranchDialogUser(null);
-      toast.success(t("users.branchesUpdated", "Branch access updated"));
+      await saveBranchesAction.run();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("common.error"));
-    } finally {
-      setSavingBranches(false);
     }
   };
 
@@ -433,8 +435,8 @@ export default function Users() {
         </CardContent>
       </Card>
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog open={createOpen} onOpenChange={(o) => { if (!o && createUserAction.isPending) return; setCreateOpen(o); }}>
+        <DialogContent locked={createUserAction.isPending} className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t("users.addUser", "Add User")}</DialogTitle>
             <DialogDescription>
@@ -517,19 +519,19 @@ export default function Users() {
               </div>
             )}
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>
+              <Button type="button" variant="outline" disabled={createUserAction.isPending} onClick={() => setCreateOpen(false)}>
                 {t("common.cancel")}
               </Button>
-              <Button type="submit" disabled={creating}>
-                {creating ? t("common.saving", "Saving...") : t("users.addUser", "Add User")}
-              </Button>
+              <SubmitButton type="submit" pending={createUserAction.isPending}>
+                {t("users.addUser", "Add User")}
+              </SubmitButton>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(branchDialogUser)} onOpenChange={(open) => !open && setBranchDialogUser(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog open={Boolean(branchDialogUser)} onOpenChange={(open) => { if (!open && !saveBranchesAction.isPending) setBranchDialogUser(null); }}>
+        <DialogContent locked={saveBranchesAction.isPending} className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t("users.assignBranches", "Assign Branches")}</DialogTitle>
             <DialogDescription>
@@ -597,12 +599,12 @@ export default function Users() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setBranchDialogUser(null)}>
+            <Button variant="outline" disabled={saveBranchesAction.isPending} onClick={() => setBranchDialogUser(null)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={handleSaveBranches} disabled={savingBranches}>
-              {savingBranches ? t("common.saving", "Saving...") : t("common.save", "Save")}
-            </Button>
+            <SubmitButton type="button" onClick={() => void handleSaveBranches()} pending={saveBranchesAction.isPending}>
+              {t("common.save", "Save")}
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

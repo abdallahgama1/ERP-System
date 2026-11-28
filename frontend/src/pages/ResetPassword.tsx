@@ -5,6 +5,8 @@ import { toast } from "sonner";
 import { apiRequest } from "@/lib/api-client";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -16,10 +18,19 @@ export default function ResetPassword() {
 
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [saving, setSaving] = useState(false);
+
+  const resetAction = useIdempotentAction(async () => {
+    await apiRequest<{ ok: boolean }>("/api/auth/reset-password", {
+      method: "POST",
+      body: { token: tokenFromUrl, newPassword: password },
+    });
+    toast.success(t("settings.passwordUpdated"));
+    navigate("/login");
+  });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (resetAction.isPending) return;
     if (!tokenFromUrl) {
       toast.error(t("auth.resetMissingToken", "Password reset token is missing from the URL."));
       return;
@@ -33,18 +44,10 @@ export default function ResetPassword() {
       return;
     }
 
-    setSaving(true);
     try {
-      await apiRequest<{ ok: boolean }>("/api/auth/reset-password", {
-        method: "POST",
-        body: { token: tokenFromUrl, newPassword: password },
-      });
-      toast.success(t("settings.passwordUpdated"));
-      navigate("/login");
+      await resetAction.run();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("common.error"));
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -87,9 +90,9 @@ export default function ResetPassword() {
                   required
                 />
               </div>
-              <Button type="submit" className="w-full" disabled={saving}>
-                {saving ? t("common.saving", "Saving...") : t("settings.updatePassword")}
-              </Button>
+              <SubmitButton type="submit" className="w-full" pending={resetAction.isPending}>
+                {t("settings.updatePassword")}
+              </SubmitButton>
             </form>
           ) : (
             <Button asChild variant="outline" className="w-full">

@@ -7,6 +7,7 @@ import { usePermissions } from "@/contexts/PermissionsContext";
 import { useCompaniesQuery, useCompanyMutations } from "@/hooks/queries/useCompaniesQueries";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -108,11 +109,12 @@ export function CompaniesTab() {
                               {t("companies.active", "Active")}
                             </Badge>
                           ) : (
-                            <Button
+                            <SubmitButton
                               type="button"
                               size="sm"
                               variant="outline"
-                              disabled={switchCompany.isPending}
+                              hideSlowText
+                              pending={switchCompany.isPending}
                               onClick={() =>
                                 void switchCompany
                                   .mutateAsync(c.id)
@@ -123,7 +125,7 @@ export function CompaniesTab() {
                               }
                             >
                               {t("companies.switch", "Switch")}
-                            </Button>
+                            </SubmitButton>
                           )}
                         </TableCell>
                       </TableRow>
@@ -188,10 +190,10 @@ export function CompaniesTab() {
                   </Select>
                 </div>
               </div>
-              <Button type="submit" disabled={createCompany.isPending}>
+              <SubmitButton type="submit" pending={createCompany.isPending}>
                 <Plus className="h-4 w-4 me-2" />
                 {t("companies.createButton", "Create Company")}
-              </Button>
+              </SubmitButton>
             </form>
           )}
         </CardContent>

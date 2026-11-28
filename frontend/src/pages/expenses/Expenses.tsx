@@ -363,8 +363,8 @@ export default function Expenses() {
       </Card>
 
       {/* New Expense / Claim Dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-3xl">
+      <Dialog open={createOpen} onOpenChange={(o) => { if (!o && createClaim.isPending) return; setCreateOpen(o); }}>
+        <DialogContent locked={createClaim.isPending} className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>{t("expenses.new", "New Operating Expense / Petty Cash Claim")}</DialogTitle>
             <DialogDescription>
@@ -559,26 +559,27 @@ export default function Expenses() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+            <Button variant="outline" disabled={createClaim.isPending} onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
               variant="secondary"
               onClick={() => void handleCreateClaim(false)}
-              disabled={createClaim.isPending}
+              pending={createClaim.isPending}
             >
               Save Draft
-            </Button>
-            <Button onClick={() => void handleCreateClaim(true)} disabled={createClaim.isPending}>
+            </SubmitButton>
+            <SubmitButton type="button" onClick={() => void handleCreateClaim(true)} pending={createClaim.isPending}>
               Submit for Approval
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Pay Approved Reimbursement Dialog */}
-      <Dialog open={Boolean(payTarget)} onOpenChange={(o) => !o && setPayTarget(null)}>
-        <DialogContent>
+      <Dialog open={Boolean(payTarget)} onOpenChange={(o) => { if (!o && !payClaim.isPending) setPayTarget(null); }}>
+        <DialogContent locked={payClaim.isPending}>
           <DialogHeader>
             <DialogTitle>Settle Approved Expense Claim</DialogTitle>
             <DialogDescription>
@@ -615,12 +616,12 @@ export default function Expenses() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPayTarget(null)}>
+            <Button variant="outline" disabled={payClaim.isPending} onClick={() => setPayTarget(null)}>
               Cancel
             </Button>
-            <Button onClick={handleSettleClaim} disabled={payClaim.isPending}>
+            <SubmitButton type="button" onClick={() => void handleSettleClaim()} pending={payClaim.isPending}>
               Confirm Payment
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

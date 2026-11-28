@@ -11,6 +11,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -68,7 +70,24 @@ export function ShiftReconciliationDialog({
   const [movementReason, setMovementReason] = useState("");
   const [countedCash, setCountedCash] = useState("");
   const [closeNotes, setCloseNotes] = useState("");
-  const [busy, setBusy] = useState(false);
+
+  const openShiftAction = useIdempotentAction(async () => {
+    await onOpenShift(Math.max(0, Number(openingFloat) || 0), openNotes.trim());
+    setOpenNotes("");
+    onOpenChange(false);
+  });
+  const closeShiftAction = useIdempotentAction(async () => {
+    await onCloseShift(Math.max(0, Number(countedCash) || 0), closeNotes.trim());
+    setCountedCash("");
+    setCloseNotes("");
+    onOpenChange(false);
+  });
+  const cashMovementAction = useIdempotentAction(async () => {
+    await onCashMovement(movementType, Number(movementAmount), movementReason.trim());
+    setMovementAmount("");
+    setMovementReason("");
+  });
+  const busy = openShiftAction.isPending || closeShiftAction.isPending || cashMovementAction.isPending;
 
   const fmt = (n: number) => formatMoney(n, currency || "USD");
   const parsedCounted = Number(countedCash);
@@ -78,8 +97,8 @@ export function ShiftReconciliationDialog({
       : null;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+    <Dialog open={open} onOpenChange={(next) => { if (!next && busy) return; onOpenChange(next); }}>
+      <DialogContent locked={busy} className="max-w-lg">
         {!activeShift ? (
           <>
             <DialogHeader>
@@ -117,21 +136,14 @@ export function ShiftReconciliationDialog({
               <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
                 {t("common.cancel")}
               </Button>
-              <Button
+              <SubmitButton
+                type="button"
+                pending={openShiftAction.isPending}
                 disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await onOpenShift(Math.max(0, Number(openingFloat) || 0), openNotes.trim());
-                    setOpenNotes("");
-                    onOpenChange(false);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
+                onClick={() => void openShiftAction.run()}
               >
                 {t("pos.startShift", "Open Shift")}
-              </Button>
+              </SubmitButton>
             </DialogFooter>
           </>
         ) : (
@@ -207,25 +219,17 @@ export function ShiftReconciliationDialog({
                     onChange={(e) => setCloseNotes(e.target.value)}
                   />
                 </div>
-                <Button
+                <SubmitButton
+                  type="button"
                   className="w-full gap-2"
                   variant="destructive"
+                  pending={closeShiftAction.isPending}
                   disabled={busy || countedCash === ""}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      await onCloseShift(Math.max(0, Number(countedCash) || 0), closeNotes.trim());
-                      setCountedCash("");
-                      setCloseNotes("");
-                      onOpenChange(false);
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
+                  onClick={() => void closeShiftAction.run()}
                 >
                   <Lock className="h-4 w-4" />
                   {t("pos.confirmCloseShift", "Close Shift & Post Variance")}
-                </Button>
+                </SubmitButton>
               </TabsContent>
 
               <TabsContent value="movement" className="space-y-4 pt-3">
@@ -262,19 +266,12 @@ export function ShiftReconciliationDialog({
                     placeholder="Mid-day cash drop"
                   />
                 </div>
-                <Button
+                <SubmitButton
+                  type="button"
                   className="w-full gap-2"
+                  pending={cashMovementAction.isPending}
                   disabled={busy || !movementAmount || !movementReason.trim()}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      await onCashMovement(movementType, Number(movementAmount), movementReason.trim());
-                      setMovementAmount("");
-                      setMovementReason("");
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
+                  onClick={() => void cashMovementAction.run()}
                 >
                   {movementType === "pay_in" ? (
                     <ArrowDownCircle className="h-4 w-4" />
@@ -282,7 +279,7 @@ export function ShiftReconciliationDialog({
                     <ArrowUpCircle className="h-4 w-4" />
                   )}
                   {t("pos.recordCashMovement", "Record Cash Movement")}
-                </Button>
+                </SubmitButton>
               </TabsContent>
             </Tabs>
           </>

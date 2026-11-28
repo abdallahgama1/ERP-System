@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { LucideIcon, Plus, Search, Edit, Trash2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -263,8 +264,8 @@ export function TaxonomyManager({
         </CardContent>
       </Card>
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog open={dialogOpen} onOpenChange={(o) => { if (!o && isSaving) return; setDialogOpen(o); }}>
+        <DialogContent locked={isSaving} className="max-w-md">
           <DialogHeader>
             <DialogTitle>
               {editing ? t("taxonomy.editEntry", "Edit entry") : t("taxonomy.addEntry", "Add entry")}
@@ -303,12 +304,12 @@ export function TaxonomyManager({
               />
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
+              <Button type="button" variant="outline" disabled={isSaving} onClick={() => setDialogOpen(false)}>
                 {t("common.cancel", "Cancel")}
               </Button>
-              <Button type="submit" disabled={isSaving}>
+              <SubmitButton type="submit" pending={isSaving}>
                 {t("common.save", "Save")}
-              </Button>
+              </SubmitButton>
             </DialogFooter>
           </form>
         </DialogContent>

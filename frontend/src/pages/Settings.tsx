@@ -32,7 +32,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CompaniesTab } from "@/components/settings/CompaniesTab";
 import { PrintTemplatesTab } from "@/components/settings/PrintTemplatesTab";
 import { SubmitButton } from "@/components/ui/submit-button";
-import { useActionLocks } from "@/hooks/useIdempotentSubmit";
+import { useActionLocks, useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { toast } from "sonner";
 import {
   Sun,
@@ -63,7 +63,6 @@ export default function Settings() {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPasswords, setShowPasswords] = useState(false);
-  const [updatingPassword, setUpdatingPassword] = useState(false);
 
   const isAdmin = role === "admin";
   const { data: taxCodes = [] } = useTaxCodesQuery(Boolean(user));
@@ -81,7 +80,6 @@ export default function Settings() {
   const [companyNameInput, setCompanyNameInput] = useState("");
   const [taxNumber, setTaxNumber] = useState("");
   const [einvoicingMode, setEinvoicingMode] = useState<"none" | "zatca_qr" | "zatca_phase2" | "eta_egypt">("none");
-  const [savingCompany, setSavingCompany] = useState(false);
 
   const [tcCode, setTcCode] = useState("");
   const [tcName, setTcName] = useState("");
@@ -113,25 +111,27 @@ export default function Settings() {
     { code: "EGP", name: "Egyptian Pound", symbol: "E£", decimals: 2, isBase: false, isActive: true },
   ];
 
+  const saveCompanyProfileAction = useIdempotentAction(async () => {
+    if (!isAdmin) return;
+    await apiRequest("/api/settings/company", {
+      method: "PUT",
+      body: {
+        companyName: companyNameInput.trim() || undefined,
+        legalName: legalName.trim(),
+        taxRegistrationNumber: taxNumber.trim(),
+        einvoicingMode,
+      },
+    });
+    await reloadCompanySettings();
+    toast.success(t("settings.accounting.profileSaved", "Company tax & e-invoicing profile updated"));
+  });
+
   const handleSaveCompanyProfile = async () => {
     if (!isAdmin) return;
-    setSavingCompany(true);
     try {
-      await apiRequest("/api/settings/company", {
-        method: "PUT",
-        body: {
-          companyName: companyNameInput.trim() || undefined,
-          legalName: legalName.trim(),
-          taxRegistrationNumber: taxNumber.trim(),
-          einvoicingMode,
-        },
-      });
-      await reloadCompanySettings();
-      toast.success(t("settings.accounting.profileSaved", "Company tax & e-invoicing profile updated"));
+      await saveCompanyProfileAction.run();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("common.error"));
-    } finally {
-      setSavingCompany(false);
     }
   };
 
@@ -216,7 +216,21 @@ export default function Settings() {
     }
   };
 
+  const passwordChangeAction = useIdempotentAction(async () => {
+    await apiRequest<{ ok: boolean }>("/api/auth/change-password", {
+      method: "POST",
+      body: { currentPassword, newPassword },
+    });
+
+    record("settings", "Updated account password", { entity: "user", entityId: user?.id });
+    toast.success(t("settings.passwordUpdated"));
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+  });
+
   const handlePasswordChange = async () => {
+    if (passwordChangeAction.isPending) return;
     if (!currentPassword || !newPassword || !confirmPassword) {
       toast.error(t("settings.fillAllPasswordFields"));
       return;
@@ -230,22 +244,10 @@ export default function Settings() {
       return;
     }
 
-    setUpdatingPassword(true);
     try {
-      await apiRequest<{ ok: boolean }>("/api/auth/change-password", {
-        method: "POST",
-        body: { currentPassword, newPassword },
-      });
-
-      record("settings", "Updated account password", { entity: "user", entityId: user?.id });
-      toast.success(t("settings.passwordUpdated"));
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
+      await passwordChangeAction.run();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("common.error"));
-    } finally {
-      setUpdatingPassword(false);
     }
   };
 
@@ -440,13 +442,14 @@ export default function Settings() {
                 />
               </div>
             </div>
-            <Button
+            <SubmitButton
+              type="button"
               onClick={() => void handlePasswordChange()}
-              disabled={updatingPassword}
+              pending={passwordChangeAction.isPending}
               className="w-full sm:w-auto"
             >
               {t("settings.updatePassword")}
-            </Button>
+            </SubmitButton>
           </div>
 
           <Separator />
@@ -608,9 +611,9 @@ export default function Settings() {
                 </Select>
               </div>
             </div>
-            <Button onClick={() => void handleSaveCompanyProfile()} disabled={savingCompany}>
+            <SubmitButton type="button" onClick={() => void handleSaveCompanyProfile()} pending={saveCompanyProfileAction.isPending}>
               {t("common.save")}
-            </Button>
+            </SubmitButton>
           </CardContent>
         </Card>
       )}
@@ -723,10 +726,10 @@ export default function Settings() {
                   <Switch checked={tcInclusive} onCheckedChange={setTcInclusive} /> Tax Inclusive
                 </label>
               </div>
-              <Button variant="outline" onClick={() => void handleAddTaxCode()} disabled={createTaxCode.isPending}>
+              <SubmitButton type="button" variant="outline" onClick={() => void handleAddTaxCode()} pending={createTaxCode.isPending}>
                 <Plus className="h-4 w-4 me-1" />
                 {t("settings.accounting.addTaxCode", "Add Tax Code")}
-              </Button>
+              </SubmitButton>
             </div>
           </CardContent>
         </Card>
@@ -762,9 +765,9 @@ export default function Settings() {
                 <label className="flex items-center gap-1.5 text-xs cursor-pointer">
                   <Switch checked={ccyBase} onCheckedChange={setCcyBase} /> Base
                 </label>
-                <Button variant="outline" size="sm" onClick={() => void handleUpsertCurrency()} disabled={upsertCurrency.isPending}>
+                <SubmitButton type="button" variant="outline" size="sm" onClick={() => void handleUpsertCurrency()} pending={upsertCurrency.isPending}>
                   Save
-                </Button>
+                </SubmitButton>
               </div>
             </div>
 
@@ -783,9 +786,9 @@ export default function Settings() {
                 <Label htmlFor="fx-rate">Rate</Label>
                 <Input id="fx-rate" type="number" min={0.0001} step="0.0001" value={fxRate} onChange={(e) => setFxRate(e.target.value)} />
               </div>
-              <Button variant="outline" onClick={() => void handleAddRate()} disabled={createExchangeRate.isPending}>
+              <SubmitButton type="button" variant="outline" onClick={() => void handleAddRate()} pending={createExchangeRate.isPending}>
                 <Plus className="h-4 w-4 me-1" /> Record FX Rate
-              </Button>
+              </SubmitButton>
             </div>
 
             {(currencyData?.exchangeRates?.length ?? 0) > 0 && (

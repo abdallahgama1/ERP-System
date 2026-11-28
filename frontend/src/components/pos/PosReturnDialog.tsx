@@ -11,6 +11,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -82,7 +84,40 @@ export function PosReturnDialog({
   const [refundMethod, setRefundMethod] = useState<PosPaymentMethod>("cash");
   const [reason, setReason] = useState("");
   const [managerPin, setManagerPin] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+
+  const submitAction = useIdempotentAction(async () => {
+    if (!receipt) return;
+    const res = await apiRequest<{
+      posReturn?: CreatedPosReturnDto;
+      returnRecord?: CreatedPosReturnDto;
+    }>("/api/pos/returns", {
+      method: "POST",
+      body: {
+        originalInvoiceId: receipt.id,
+        terminalId,
+        shiftId,
+        refundMethod,
+        restockItems,
+        reason: reason.trim(),
+        ...(managerPin.trim() ? { managerOverridePin: managerPin.trim() } : {}),
+        lines: selectedLines.map(({ line, qty }) => ({
+          originalInvoiceLineId: line.id,
+          productId: line.productId!,
+          quantity: qty,
+        })),
+      },
+    });
+    const created = res.posReturn ?? res.returnRecord;
+    if (created) {
+      toast({
+        title: `${t("pos.returnProcessed", "Return processed")}: ${created.returnNumber}`,
+        description: `${t("pos.refunded", "Refunded")} ${fmt(created.totalAmount)}`,
+      });
+      onSuccess?.(created);
+    }
+    onOpenChange(false);
+  });
+  const submitting = submitAction.isPending;
 
   useEffect(() => {
     if (receipt && open) {
@@ -99,6 +134,7 @@ export function PosReturnDialog({
       setRefundMethod("cash");
       setReason("");
       setManagerPin("");
+      submitAction.resetKey();
     }
   }, [open, receipt]);
 
@@ -123,6 +159,7 @@ export function PosReturnDialog({
   }, 0);
 
   const handleSubmit = async () => {
+    if (submitting) return;
     if (selectedLines.length === 0) {
       toast({
         title: t("pos.returnNoLines", "Select at least one item quantity to return"),
@@ -138,50 +175,19 @@ export function PosReturnDialog({
       return;
     }
 
-    setSubmitting(true);
     try {
-      const res = await apiRequest<{
-        posReturn?: CreatedPosReturnDto;
-        returnRecord?: CreatedPosReturnDto;
-      }>("/api/pos/returns", {
-        method: "POST",
-        body: {
-          originalInvoiceId: receipt.id,
-          terminalId,
-          shiftId,
-          refundMethod,
-          restockItems,
-          reason: reason.trim(),
-          ...(managerPin.trim() ? { managerOverridePin: managerPin.trim() } : {}),
-          lines: selectedLines.map(({ line, qty }) => ({
-            originalInvoiceLineId: line.id,
-            productId: line.productId!,
-            quantity: qty,
-          })),
-        },
-      });
-      const created = res.posReturn ?? res.returnRecord;
-      if (created) {
-        toast({
-          title: `${t("pos.returnProcessed", "Return processed")}: ${created.returnNumber}`,
-          description: `${t("pos.refunded", "Refunded")} ${fmt(created.totalAmount)}`,
-        });
-        onSuccess?.(created);
-      }
-      onOpenChange(false);
+      await submitAction.run();
     } catch (err) {
       toast({
         title: err instanceof Error ? err.message : t("common.error", "Failed to process return"),
         variant: "destructive",
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+    <Dialog open={open} onOpenChange={(next) => { if (!next && submitting) return; onOpenChange(next); }}>
+      <DialogContent locked={submitting} className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <RotateCcw className="h-5 w-5 text-primary" />
@@ -312,9 +318,9 @@ export function PosReturnDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
             {t("common.cancel", "Cancel")}
           </Button>
-          <Button onClick={() => void handleSubmit()} disabled={submitting}>
+          <SubmitButton type="button" onClick={() => void handleSubmit()} pending={submitting}>
             {t("pos.processReturn", "Process Return")}
-          </Button>
+          </SubmitButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

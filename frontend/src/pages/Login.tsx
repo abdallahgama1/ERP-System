@@ -5,6 +5,8 @@ import { ShieldCheck } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiRequest } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,73 +16,76 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [mfaCode, setMfaCode] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [isVerifyingMfa, setIsVerifyingMfa] = useState(false);
   const [forgotMode, setForgotMode] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
-  const [isSendingReset, setIsSendingReset] = useState(false);
   const { login, mfaRequired, verifyMfaLogin, clearMfaChallenge } = useAuth();
   const navigate = useNavigate();
   const { t } = useTranslation();
 
+  const loginAction = useIdempotentAction(async () => {
+    const result = await login(email, password);
+    if (result.mfaRequired) {
+      setMfaCode("");
+      return;
+    }
+    toast.success(t("auth.welcomeBack"));
+    navigate("/");
+  });
+
+  const verifyMfaAction = useIdempotentAction(async (cleaned: string) => {
+    await verifyMfaLogin(cleaned);
+    toast.success(t("auth.welcomeBack"));
+    navigate("/");
+  });
+
+  const forgotAction = useIdempotentAction(async (targetEmail: string) => {
+    await apiRequest<{ ok: boolean; message: string }>("/api/auth/forgot-password", {
+      method: "POST",
+      body: { email: targetEmail },
+    });
+    toast.success(
+      t(
+        "auth.resetLinkRequested",
+        "If an active account matches this email, a reset link was generated. Contact an administrator if you need a direct link."
+      )
+    );
+    setForgotMode(false);
+    setResetEmail("");
+  });
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
+    if (loginAction.isPending) return;
     try {
-      const result = await login(email, password);
-      if (result.mfaRequired) {
-        setMfaCode("");
-        return;
-      }
-      toast.success(t("auth.welcomeBack"));
-      navigate("/");
+      await loginAction.run();
     } catch (error: unknown) {
       const apiMsg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
       const errMsg = error instanceof Error ? error.message : "";
       toast.error(apiMsg || errMsg || t("auth.loginFailed"));
-    } finally {
-      setIsLoading(false);
     }
   };
 
   const handleVerifyMfa = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (verifyMfaAction.isPending) return;
     const cleaned = mfaCode.trim();
     if (!cleaned) return;
-    setIsVerifyingMfa(true);
     try {
-      await verifyMfaLogin(cleaned);
-      toast.success(t("auth.welcomeBack"));
-      navigate("/");
+      await verifyMfaAction.run(cleaned);
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : "";
       toast.error(errMsg || t("mfa.invalidCode", "Invalid verification or recovery code"));
-    } finally {
-      setIsVerifyingMfa(false);
     }
   };
 
   const handleForgot = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (forgotAction.isPending) return;
     if (!resetEmail.trim()) return;
-    setIsSendingReset(true);
     try {
-      await apiRequest<{ ok: boolean; message: string }>("/api/auth/forgot-password", {
-        method: "POST",
-        body: { email: resetEmail.trim() },
-      });
-      toast.success(
-        t(
-          "auth.resetLinkRequested",
-          "If an active account matches this email, a reset link was generated. Contact an administrator if you need a direct link."
-        )
-      );
-      setForgotMode(false);
-      setResetEmail("");
+      await forgotAction.run(resetEmail.trim());
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("common.error"));
-    } finally {
-      setIsSendingReset(false);
     }
   };
 
@@ -124,15 +129,19 @@ export default function Login() {
                   required
                 />
               </div>
-              <Button type="submit" className="w-full" disabled={isVerifyingMfa}>
-                {isVerifyingMfa
-                  ? t("mfa.verifying", "Verifying...")
-                  : t("mfa.verifyAndContinue", "Verify & Continue")}
-              </Button>
+              <SubmitButton
+                type="submit"
+                className="w-full"
+                pending={verifyMfaAction.isPending}
+                pendingText={t("mfa.verifying", "Verifying...")}
+              >
+                {t("mfa.verifyAndContinue", "Verify & Continue")}
+              </SubmitButton>
               <Button
                 type="button"
                 variant="ghost"
                 className="w-full"
+                disabled={verifyMfaAction.isPending}
                 onClick={() => {
                   clearMfaChallenge();
                   setMfaCode("");
@@ -154,13 +163,19 @@ export default function Login() {
                   required
                 />
               </div>
-              <Button type="submit" className="w-full" disabled={isSendingReset}>
-                {isSendingReset ? t("auth.signingIn") : t("auth.sendResetLink")}
-              </Button>
+              <SubmitButton
+                type="submit"
+                className="w-full"
+                pending={forgotAction.isPending}
+                pendingText={t("auth.signingIn")}
+              >
+                {t("auth.sendResetLink")}
+              </SubmitButton>
               <Button
                 type="button"
                 variant="ghost"
                 className="w-full"
+                disabled={forgotAction.isPending}
                 onClick={() => setForgotMode(false)}
               >
                 {t("auth.signIn")}
@@ -199,9 +214,14 @@ export default function Login() {
                     required
                   />
                 </div>
-                <Button type="submit" className="w-full" disabled={isLoading}>
-                  {isLoading ? t("auth.signingIn") : t("auth.signIn")}
-                </Button>
+                <SubmitButton
+                  type="submit"
+                  className="w-full"
+                  pending={loginAction.isPending}
+                  pendingText={t("auth.signingIn")}
+                >
+                  {t("auth.signIn")}
+                </SubmitButton>
               </form>
               <div className="mt-4 text-center text-sm">
                 {t("auth.noAccount")}{" "}

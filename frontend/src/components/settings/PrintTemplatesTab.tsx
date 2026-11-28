@@ -14,6 +14,7 @@ import {
 } from "@/hooks/queries/usePrintTemplatesQueries";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -305,15 +306,15 @@ export function PrintTemplatesTab() {
                   <Switch checked={isDefault} onCheckedChange={setIsDefault} />
                   {t("printTemplates.setAsDefault", "Set as default template for this document type")}
                 </label>
-                <Button
+                <SubmitButton
                   type="submit"
-                  disabled={createPrintTemplate.isPending || updatePrintTemplate.isPending}
+                  pending={createPrintTemplate.isPending || updatePrintTemplate.isPending}
                 >
                   <Plus className="h-4 w-4 me-2" />
                   {editingId
                     ? t("common.save", "Save Template")
                     : t("printTemplates.saveNew", "Create Print Template")}
-                </Button>
+                </SubmitButton>
               </div>
             </form>
           )}
@@ -323,7 +324,7 @@ export function PrintTemplatesTab() {
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
-        onConfirm={() => void handleConfirmDelete()}
+        onConfirm={handleConfirmDelete}
         title={t("printTemplates.deleteTitle", "Delete Print Template")}
         itemName={deleteTarget?.name}
       />

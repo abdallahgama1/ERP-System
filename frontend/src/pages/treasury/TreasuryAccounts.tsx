@@ -619,8 +619,8 @@ export default function TreasuryAccounts() {
       </Tabs>
 
       {/* New Treasury Account Dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
+      <Dialog open={createOpen} onOpenChange={(o) => { if (!o && createAccount.isPending) return; setCreateOpen(o); }}>
+        <DialogContent locked={createAccount.isPending}>
           <DialogHeader>
             <DialogTitle>{t("treasury.newAccount", "New Bank Account or Cashbox")}</DialogTitle>
             <DialogDescription>
@@ -713,19 +713,19 @@ export default function TreasuryAccounts() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+            <Button variant="outline" disabled={createAccount.isPending} onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleCreateAccount} disabled={createAccount.isPending}>
+            <SubmitButton type="button" onClick={() => void handleCreateAccount()} pending={createAccount.isPending}>
               Create Account
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Inter-Account Transfer Dialog */}
-      <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
-        <DialogContent>
+      <Dialog open={transferOpen} onOpenChange={(o) => { if (!o && createTransfer.isPending) return; setTransferOpen(o); }}>
+        <DialogContent locked={createTransfer.isPending}>
           <DialogHeader>
             <DialogTitle>Inter-Account Treasury Transfer</DialogTitle>
             <DialogDescription>
@@ -802,19 +802,19 @@ export default function TreasuryAccounts() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setTransferOpen(false)}>
+            <Button variant="outline" disabled={createTransfer.isPending} onClick={() => setTransferOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleTransfer} disabled={createTransfer.isPending}>
+            <SubmitButton type="button" onClick={() => void handleTransfer()} pending={createTransfer.isPending}>
               Post Transfer
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Import Bank Statement CSV Dialog */}
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="max-w-xl">
+      <Dialog open={importOpen} onOpenChange={(o) => { if (!o && importCsv.isPending) return; setImportOpen(o); }}>
+        <DialogContent locked={importCsv.isPending} className="max-w-xl">
           <DialogHeader>
             <DialogTitle>Import Bank Statement CSV</DialogTitle>
             <DialogDescription>
@@ -845,19 +845,19 @@ export default function TreasuryAccounts() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setImportOpen(false)}>
+            <Button variant="outline" disabled={importCsv.isPending} onClick={() => setImportOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleImportCsv} disabled={importCsv.isPending}>
+            <SubmitButton type="button" onClick={() => void handleImportCsv()} pending={importCsv.isPending}>
               Import Statement
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Reconcile Statement Line Dialog */}
-      <Dialog open={Boolean(reconTarget)} onOpenChange={(o) => !o && setReconTarget(null)}>
-        <DialogContent className="max-w-lg">
+      <Dialog open={Boolean(reconTarget)} onOpenChange={(o) => { if (!o && !reconcileLine.isPending) setReconTarget(null); }}>
+        <DialogContent locked={reconcileLine.isPending} className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Reconcile Bank Statement Line</DialogTitle>
             <DialogDescription>
@@ -941,12 +941,12 @@ export default function TreasuryAccounts() {
           </Tabs>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setReconTarget(null)}>
+            <Button variant="outline" disabled={reconcileLine.isPending} onClick={() => setReconTarget(null)}>
               Cancel
             </Button>
-            <Button onClick={handleConfirmReconcile} disabled={reconcileLine.isPending}>
+            <SubmitButton type="button" onClick={() => void handleConfirmReconcile()} pending={reconcileLine.isPending}>
               Confirm Reconciliation
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

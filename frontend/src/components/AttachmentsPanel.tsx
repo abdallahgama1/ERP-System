@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Download, FileText, Loader2, Paperclip, Trash2, Upload } from "lucide-react";
+import { Download, FileText, Paperclip, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import {
   ATTACHMENT_ALLOWED_MIME_TYPES,
@@ -18,6 +18,7 @@ import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -169,24 +170,17 @@ export function AttachmentsPanel({
               onChange={(e) => void handleFileChange(e)}
               data-testid="attachment-file-input"
             />
-            <Button
+            <SubmitButton
               type="button"
               size="sm"
               variant="outline"
-              disabled={uploadAttachment.isPending}
+              pending={uploadAttachment.isPending}
+              pendingText={t("attachments.uploading", "Uploading...")}
               onClick={() => fileInputRef.current?.click()}
             >
-              {uploadAttachment.isPending ? (
-                <Loader2 className="h-4 w-4 me-1.5 animate-spin" />
-              ) : (
-                <Upload className="h-4 w-4 me-1.5" />
-              )}
-              <span>
-                {uploadAttachment.isPending
-                  ? t("attachments.uploading", "Uploading...")
-                  : t("attachments.upload", "Upload File")}
-              </span>
-            </Button>
+              <Upload className="h-4 w-4 me-1.5" />
+              {t("attachments.upload", "Upload File")}
+            </SubmitButton>
           </div>
         )}
       </CardHeader>
@@ -258,7 +252,7 @@ export function AttachmentsPanel({
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
-        onConfirm={() => void handleConfirmDelete()}
+        onConfirm={handleConfirmDelete}
         title={t("attachments.deleteConfirmTitle", "Delete Attachment")}
         itemName={deleteTarget?.fileName}
       />

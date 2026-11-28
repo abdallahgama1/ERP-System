@@ -3,6 +3,8 @@ import { useNavigate, Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,13 +15,24 @@ export default function Signup() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
   const { signup } = useAuth();
   const navigate = useNavigate();
   const { t } = useTranslation();
 
+  const signupAction = useIdempotentAction(async () => {
+    const { needsConfirmation } = await signup(name, email, password);
+    if (needsConfirmation) {
+      toast.success(t("auth.confirmEmailSent"));
+      navigate("/login");
+    } else {
+      toast.success(t("auth.accountCreated"));
+      navigate("/");
+    }
+  });
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (signupAction.isPending) return;
 
     if (password.length < 8) {
       toast.error(t("settings.passwordMinLength", "Password must be at least 8 characters."));
@@ -31,22 +44,12 @@ export default function Signup() {
       return;
     }
 
-    setIsLoading(true);
     try {
-      const { needsConfirmation } = await signup(name, email, password);
-      if (needsConfirmation) {
-        toast.success(t("auth.confirmEmailSent"));
-        navigate("/login");
-      } else {
-        toast.success(t("auth.accountCreated"));
-        navigate("/");
-      }
+      await signupAction.run();
     } catch (error: unknown) {
       const apiMsg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
       const errMsg = error instanceof Error ? error.message : "";
       toast.error(apiMsg || errMsg || t("auth.signupFailed"));
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -103,9 +106,14 @@ export default function Signup() {
                 required
               />
             </div>
-            <Button type="submit" className="w-full" disabled={isLoading}>
-              {isLoading ? t("auth.creatingAccount") : t("auth.signUp")}
-            </Button>
+            <SubmitButton
+              type="submit"
+              className="w-full"
+              pending={signupAction.isPending}
+              pendingText={t("auth.creatingAccount")}
+            >
+              {t("auth.signUp")}
+            </SubmitButton>
           </form>
           <div className="mt-4 text-center text-sm">
             {t("auth.haveAccount")}{" "}

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Delete, KeyRound, Lock, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
@@ -36,7 +38,13 @@ export function PinLockOverlay({
   const [pin, setPin] = useState("");
   const [selectedUserId, setSelectedUserId] = useState<string>("auto");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+
+  const unlockAction = useIdempotentAction(async () => {
+    setError(null);
+    await onUnlock(pin, selectedUserId === "auto" ? undefined : selectedUserId);
+    setPin("");
+  });
+  const busy = unlockAction.isPending;
 
   if (!open) return null;
 
@@ -56,20 +64,16 @@ export function PinLockOverlay({
   };
 
   const handleSubmit = async () => {
+    if (busy) return;
     if (pin.length < 4) {
       setError(t("pos.pinMinLength", "Enter a 4 to 6 digit PIN"));
       return;
     }
-    setBusy(true);
-    setError(null);
     try {
-      await onUnlock(pin, selectedUserId === "auto" ? undefined : selectedUserId);
-      setPin("");
+      await unlockAction.run();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("pos.invalidPin", "Invalid cashier PIN"));
       setPin("");
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -147,15 +151,16 @@ export function PinLockOverlay({
                 {t("common.cancel")}
               </Button>
             )}
-            <Button
+            <SubmitButton
               type="button"
               className="flex-1 gap-2"
-              disabled={busy || pin.length < 4}
+              pending={busy}
+              disabled={pin.length < 4}
               onClick={() => void handleSubmit()}
             >
               <ShieldCheck className="h-4 w-4" />
               {t("pos.unlock", "Unlock")}
-            </Button>
+            </SubmitButton>
           </div>
         </CardContent>
       </Card>

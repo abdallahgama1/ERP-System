@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Mail } from "lucide-react";
+import { Mail } from "lucide-react";
 import { toast } from "sonner";
 import {
   emailDocumentSchema,
@@ -14,6 +14,7 @@ import {
 } from "@/hooks/queries/usePrintTemplatesQueries";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -157,8 +158,8 @@ export function EmailDocumentDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+    <Dialog open={open} onOpenChange={(next) => { if (!next && emailMutation.isPending) return; onOpenChange(next); }}>
+      <DialogContent locked={emailMutation.isPending} className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Mail className="h-5 w-5" />
@@ -277,17 +278,16 @@ export function EmailDocumentDialog({
           )}
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="outline" disabled={emailMutation.isPending} onClick={() => onOpenChange(false)}>
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button type="submit" disabled={emailMutation.isPending}>
-              {emailMutation.isPending && <Loader2 className="h-4 w-4 me-1.5 animate-spin" />}
-              <span>
-                {emailMutation.isPending
-                  ? t("emailDocument.sending", "Sending...")
-                  : t("emailDocument.send", "Send Email")}
-              </span>
-            </Button>
+            <SubmitButton
+              type="submit"
+              pending={emailMutation.isPending}
+              pendingText={t("emailDocument.sending", "Sending...")}
+            >
+              {t("emailDocument.send", "Send Email")}
+            </SubmitButton>
           </DialogFooter>
         </form>
       </DialogContent>
