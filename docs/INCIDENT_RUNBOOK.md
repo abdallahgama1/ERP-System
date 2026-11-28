@@ -93,8 +93,8 @@ docker compose -f docker-compose.prod.yml logs --tail=100 backend caddy
    ```bash
    docker compose -f docker-compose.prod.yml up -d --wait backend
    SMOKE_BASE_URL="https://${SITE_ADDRESS}" \
-     SMOKE_ADMIN_EMAIL="<admin-email>" \
-     SMOKE_ADMIN_PASSWORD="<admin-password>" \
+     SMOKE_USER_EMAIL="<smoke-monitor-email>" \
+     SMOKE_USER_PASSWORD="<smoke-monitor-password>" \
      node scripts/smoke-test.mjs
    ```
    Confirm `reconciliation.allReconciled === true` (8/8 controls), `setupHealth.healthy === true`, and `auditChain.valid === true`.
@@ -224,8 +224,8 @@ curl -fsS https://${SITE_ADDRESS}/api/health/ready
 5. **Verify health, login, reconciliation (8/8), setup health, and audit hash chain:**
    ```bash
    SMOKE_BASE_URL="https://${SITE_ADDRESS}" \
-     SMOKE_ADMIN_EMAIL="<admin-email>" \
-     SMOKE_ADMIN_PASSWORD="<admin-password>" \
+     SMOKE_USER_EMAIL="<smoke-monitor-email>" \
+     SMOKE_USER_PASSWORD="<smoke-monitor-password>" \
      node scripts/smoke-test.mjs
    ```
 

@@ -9,6 +9,7 @@ This document is the single consolidated operations reference for running **Coun
 - [GO_LIVE.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/GO_LIVE.md) — Go-live cutover plan, CSV import order, re-import semantics, and rollback runbook.
 - [UAT_SCRIPT.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/UAT_SCRIPT.md) — Step-by-step full-day user acceptance testing script in EGP for pre-go-live rehearsal.
 - [INCIDENT_RUNBOOK.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/INCIDENT_RUNBOOK.md) — Production outage, DB corruption, key leak, bad migration, and disaster-recovery restore playbooks.
+- [MONITORING.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/MONITORING.md) — Zero-Prometheus monitoring & alerting setup (UptimeRobot/Better Stack on `/api/status`, Healthchecks.io dead-man's-switch pings, disk space, TLS expiry, Sentry alerts, read-only smoke user, and alert routing).
 - [ETA_GO_LIVE.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/ETA_GO_LIVE.md) — ETA Egypt CAdES-BES signer bridge HTTP contract, local mock signer, `eta:preprod-smoke`, retry backoff, and preprod-to-live checklist.
 
 ---
@@ -19,6 +20,7 @@ This document is the single consolidated operations reference for running **Coun
 | :--- | :--- | :--- | :--- | :--- |
 | `GET /health` (alias `/api/health/live`) | Liveness probe | Process event loop is responsive (`uptimeSeconds`) | `200 OK` `{ "ok": true, "status": "ok" }` | Load balancers, uptime monitors |
 | `GET /ready` (aliases `/api/health/ready`, `/api/health`) | Readiness probe | PostgreSQL `SELECT 1` **and** attachment storage reachability (`STORAGE_LOCAL_DIR` read/write or S3 `HeadBucket`) | `200 OK` when both DB and storage pass; `503 Service Unavailable` when either fails | `backend/Dockerfile`, `docker-compose.yml`, `docker-compose.prod.yml` healthchecks |
+| `GET /api/status` | External uptime & backup monitor | Requires `Authorization: Bearer <UPTIME_STATUS_TOKEN>` or `X-Status-Token` (constant-time compare, rate-limited; `404` when unset, `401` on mismatch); checks DB, storage, and backup freshness (`<= BACKUP_MAX_AGE_HOURS`) | Minimal 4-boolean JSON `{ "ready", "database", "storage", "backupFresh" }` (zero data); `200 OK` when ready & backup fresh, `503` otherwise | External uptime monitors (UptimeRobot, Better Stack) & `smoke-test.mjs` |
 | `GET /api/metrics` | Prometheus metrics | Requires `Authorization: Bearer <METRICS_TOKEN>` (`404` when unset, `401` on mismatch) | Prometheus text format | Prometheus / Grafana |
 | `GET /api/audit-logs/verify` | Tamper-evidence check | Admin-only; verifies SHA-256 hash chain across `audit_logs` | `200 OK` `{ "valid": true, ... }` | Security audits & post-restore drills |
 | `GET /api/accounting/setup-health` | GL mapping health | Admin-only; verifies all 28 `DEFAULT_COA` control mappings exist, are active, and have valid `account_type` | `200 OK` `{ "healthy": true, "issues": [] }` | Post-upgrade / onboarding checks |
@@ -158,6 +160,11 @@ TOTP secrets in `user_mfa` are encrypted with AES-256-GCM and tagged with `key_v
 | Variable | Default | Required (Prod) | Purpose |
 | :--- | :--- | :--- | :--- |
 | `METRICS_TOKEN` | `""` | Recommended | Bearer token protecting `/api/metrics` (`404` when unset) |
+| `UPTIME_STATUS_TOKEN` | `""` | Recommended | Constant-time bearer / `X-Status-Token` secret protecting `GET /api/status` (`404` when unset) |
+| `UPTIME_STATUS_RATE_LIMIT_MAX` / `WINDOW_MS` | `60` / `60000` | No | Per-IP rate limit applied to `GET /api/status` |
+| `HEALTHCHECK_PING_URL` | `""` | Recommended | Healthchecks.io-compatible dead-man's-switch URL pinged by `backup-db.sh` (and standalone `backup-offsite.mjs`) on success and `<URL>/fail` on failure |
+| `BACKUP_OFFSITE_HEALTHCHECK_PING_URL` | `""` | Optional | Optional separate Healthchecks.io ping URL for `backup-offsite.mjs` |
+| `RESTORE_DRILL_HEALTHCHECK_PING_URL` | `""` | Recommended | Dedicated monthly Healthchecks.io ping URL for `monthly-restore-drill.mjs` (falls back to `HEALTHCHECK_PING_URL`) |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` / `SENTRY_TRACES_SAMPLE_RATE` | `""` / `NODE_ENV` / `0` | No | Backend Sentry DSN, environment tag, and trace sampling rate (`0..1`) |
 | `VITE_API_BASE_URL` / `VITE_SENTRY_DSN` / `VITE_SENTRY_ENVIRONMENT` | `""` / `""` / `production` | No | Frontend build-time API origin override and Sentry config |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | `""` / `587` / `false` / `""` / `""` / no-reply | If emailing docs | Outbound SMTP for document emailing and password resets |
@@ -171,5 +178,52 @@ TOTP secrets in `user_mfa` are encrypted with AES-256-GCM and tagged with `key_v
 | `BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY` | `""` | If `BACKUP_S3_BUCKET` set | Off-site backup bucket credentials |
 | `BACKUP_ENCRYPTION_KEY` | `""` | **Yes** if off-site | Customer-held 32-byte key (64 hex or base64) for client-side AES-256-GCM encryption of off-site backups |
 | `BACKUP_OFFSITE_RETENTION_DAYS` / `BACKUP_OFFSITE_MIN_KEEP` / `BACKUP_OFFSITE_REQUIRED` | `30` / `7` / `false` | No | Off-site S3 retention policy and strict off-site requirement toggle |
-| `SMOKE_ADMIN_EMAIL` / `SMOKE_ADMIN_PASSWORD` | `""` | Optional | Admin credentials used by `scripts/smoke-test.mjs` and post-deploy smoke verification in `scripts/deploy.sh` |
+| `SMOKE_USER_EMAIL` / `SMOKE_USER_PASSWORD` | `""` | Recommended | Dedicated least-privilege read-only `Smoke Monitor` credentials provisioned via `npm run smoke:create-user` (used by `scripts/smoke-test.mjs` and `scripts/deploy.sh`) |
 | `TEST_DATABASE_URL` / `USE_REMOTE_TEST_DB` / `TEST_PG_PORT` / `RESTORE_TEST_ADMIN_URL` | Local Docker PG 18 (`5439`) | Test/CI only | Test runner DB overrides (`scripts/run-with-local-test-db.mjs`, `test-backup-restore.mjs`) |
+
+---
+
+## 7. Production Secrets & Key Management Checklist
+
+### 7.1 VPS `.env` File Permissions & Ownership
+
+Enforce strict least-privilege filesystem permissions on every environment and backup file on the VPS:
+
+- [ ] `/opt/count-it-keep-it/.env` — mode **`0600`**, owned by **`deploy:deploy`** (`chown deploy:deploy /opt/count-it-keep-it/.env && chmod 600 /opt/count-it-keep-it/.env`)
+- [ ] `/opt/count-it-keep-it/.env.staging` (if staging coexists on host) — mode **`0600`**, owned by **`deploy:deploy`**
+- [ ] `/opt/count-it-keep-it/.env.last-good-images` — mode **`0600`**, owned by **`deploy:deploy`**
+- [ ] `/var/backups/count-it-keep-it` — mode **`0700`** (individual `.dump` and `.tar.gz` artifacts written under `umask 077`, mode `0600`; only `last-backup-status.json` is `0644` so the non-root backend container can read freshness status)
+- [ ] No populated `.env*` file is ever committed to git, pasted into chat/tickets, or copied to world-readable `/tmp`
+
+Verify permissions on the VPS in one command:
+```bash
+stat -c '%a %U:%G %n' \
+  /opt/count-it-keep-it/.env \
+  /opt/count-it-keep-it/.env.staging \
+  /opt/count-it-keep-it/.env.last-good-images \
+  /var/backups/count-it-keep-it 2>/dev/null || true
+```
+Expected: `600 deploy:deploy` on every `.env*` file and `700` on `/var/backups/count-it-keep-it`.
+
+### 7.2 Offline Key Custody, Rotation Schedule & Rotation Procedure
+
+> [!CAUTION]
+> **`BACKUP_ENCRYPTION_KEY` and `MFA_ENCRYPTION_KEY` must NEVER exist only on the VPS.** If the VPS disk fails and `BACKUP_ENCRYPTION_KEY` is lost, every off-site `.enc` backup in S3/R2/MinIO is permanently unrecoverable.
+
+| Secret / Key | Offline Custody Location | Rotation Cadence | Step-by-Step Rotation Procedure |
+| :--- | :--- | :--- | :--- |
+| **`DATABASE_URL` / `DIRECT_DATABASE_URL`** (DB password) | Company Password Manager (Ops Vault, 2FA-protected) | Every **180 days** (or immediately on staff departure/leak) | 1. Create a new DB role/password in Neon/RDS (or `ALTER USER erp WITH PASSWORD '...'` for local DB). 2. Update `DATABASE_URL` and `DIRECT_DATABASE_URL` in `.env` (`chmod 600`). 3. Restart `backend` (`docker compose -f docker-compose.prod.yml up -d backend`) and verify `GET /ready`. 4. Revoke old DB password and update Ops Vault. |
+| **`AUTH_COOKIE_SECRET`** | Company Password Manager (Ops Vault) | Every **180 days** (immediately on leak) | 1. Generate `openssl rand -hex 32`. 2. Update `AUTH_COOKIE_SECRET` in `.env`. 3. Restart `backend`. 4. (If leaked) Revoke all active sessions in PostgreSQL: `UPDATE user_sessions SET revoked_at = NOW() WHERE revoked_at IS NULL;` — users simply log back in cleanly. |
+| **`MFA_ENCRYPTION_KEY`** (+ `_KEY_VERSION`, `_PREVIOUS_KEYS`) | Company Password Manager (Ops Vault) **+** sealed break-glass paper copy in company safe | Every **365 days** (zero-downtime supported) | 1. Generate `openssl rand -hex 32`. 2. Move current key into `MFA_ENCRYPTION_PREVIOUS_KEYS="1:<old-hex>"`, set new `MFA_ENCRYPTION_KEY`, and increment `MFA_ENCRYPTION_KEY_VERSION=2`. 3. Restart `backend`. 4. Run `npm run mfa:rotate-key -- --dry-run` then `npm run mfa:rotate-key`. 5. Confirm all `user_mfa` rows use v2, clear `MFA_ENCRYPTION_PREVIOUS_KEYS`, restart `backend`, and update offline copies. |
+| **`BACKUP_ENCRYPTION_KEY`** | Company Password Manager (Ops Vault) **+** sealed break-glass paper copy in company safe (labelled with effective date!) | Every **365 days** (keep retired key archived offline until old `.enc` backups age out!) | 1. Archive the **previous** `BACKUP_ENCRYPTION_KEY` with its date range in the Ops Vault + safe (needed to decrypt older backups still inside the 30-day off-site retention window). 2. Generate `openssl rand -hex 32` and set `BACKUP_ENCRYPTION_KEY` in `.env`. 3. Trigger an immediate backup (`sudo systemctl start count-it-keep-it-backup.service`). 4. Run `npm run drill:restore` to confirm the new key encrypts and decrypts cleanly end-to-end. |
+| **`BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY`** | Company Password Manager (Ops Vault) | Every **90–180 days** | 1. Create a new bucket-scoped API key in Cloudflare R2 / AWS IAM / MinIO. 2. Update both keys in `.env` and restart `backend` (and `backup-scheduler` if used). 3. Run `sudo systemctl start count-it-keep-it-backup.service` and confirm off-site upload succeeds. 4. Revoke the old S3 key. |
+| **`S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`** (attachments, if `STORAGE_DRIVER=s3`) | Company Password Manager (Ops Vault) | Every **90–180 days** | 1. Issue replacement bucket-scoped credentials. 2. Update `.env` and restart `backend`. 3. Verify `GET /ready` (`"storage": "ok"`) and test uploading/downloading a sample attachment. 4. Revoke old credentials. |
+| **`UPTIME_STATUS_TOKEN`** | Company Password Manager (Ops Vault) | Every **180 days** | 1. Generate `openssl rand -hex 32`. 2. Update `UPTIME_STATUS_TOKEN` in `.env` and restart `backend`. 3. Update the `Authorization: Bearer ...` header in Better Stack / UptimeRobot immediately and confirm HTTP `200`. |
+| **`METRICS_TOKEN`** | Company Password Manager (Ops Vault) | Every **180 days** | 1. Generate `openssl rand -hex 24`. 2. Update `METRICS_TOKEN` in `.env` and restart `backend`. 3. Update Prometheus scrape config (if used). |
+| **`SMOKE_USER_PASSWORD`** | Company Password Manager (Ops Vault) | Every **90 days** | 1. Run `npm run smoke:create-user -- --env-file /opt/count-it-keep-it/.env --rotate-password` (revokes prior smoke sessions and prints a new 32-byte random password). 2. Update `SMOKE_USER_PASSWORD` in `.env` (`chmod 600`). 3. Verify with `SMOKE_BASE_URL=https://<SITE_ADDRESS> npm run smoke-test`. |
+| **`SMTP_PASS`** | Company Password Manager (Ops Vault) | Every **180 days** | 1. Create a new SMTP app password / API key in your mail provider. 2. Update `SMTP_PASS` in `.env` and restart `backend`. 3. Revoke the old SMTP credential. |
+| **`ETA_CLIENT_SECRET` & `ETA_SIGNER_TOKEN`** | Company Password Manager (Finance/Ops Vault) + USB token PIN in physical company safe | Every **180 days** (or per ETA portal expiry) | 1. Rotate client secret in ETA Taxpayer Portal (and/or generate a new `openssl rand -hex 32` bearer token for the signer bridge). 2. Update `.env` on VPS (and signer host config) and restart `backend`. 3. Verify signer `/health` and queue processing in `/admin/einvoicing`. |
+| **`VPS_SSH_KEY` (GitHub Actions CD deploy key)** | Company Password Manager (Ops Vault) + GitHub Environment Secret | Every **180 days** | 1. Generate `ssh-keygen -t ed25519 -C "erp-cd-deploy"`. 2. Append new `.pub` key to `/home/deploy/.ssh/authorized_keys` on the VPS. 3. Replace `VPS_SSH_KEY` in GitHub Actions Environment Secrets. 4. Test a `workflow_dispatch` deploy, then remove the old public key from `authorized_keys`. |
+| **`HEALTHCHECK_PING_URL` / `SENTRY_DSN`** | Company Password Manager (Ops Vault) | On leak only | Rotate the check UUID in Healthchecks.io or DSN key in Sentry, update `.env`, and restart the affected service/timer. |
+
+For emergency leaked-key containment playbooks (including session revocation and forensic log inspection), see [INCIDENT_RUNBOOK.md §3](./INCIDENT_RUNBOOK.md).
