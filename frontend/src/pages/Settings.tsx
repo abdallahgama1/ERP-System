@@ -31,6 +31,8 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CompaniesTab } from "@/components/settings/CompaniesTab";
 import { PrintTemplatesTab } from "@/components/settings/PrintTemplatesTab";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 import { toast } from "sonner";
 import {
   Sun,
@@ -73,6 +75,7 @@ export default function Settings() {
     upsertCurrency,
     createExchangeRate,
   } = useAccountingMutations();
+  const rowLocks = useActionLocks();
 
   const [legalName, setLegalName] = useState("");
   const [companyNameInput, setCompanyNameInput] = useState("");
@@ -653,14 +656,18 @@ export default function Settings() {
                     </TableCell>
                     <TableCell>
                       {!tc.isDefault && (
-                        <Button
+                        <SubmitButton
+                          type="button"
                           variant="ghost"
                           size="icon"
-                          onClick={() => void deleteTaxCode.mutateAsync(tc.id)}
+                          pending={rowLocks.isPending(`del-tc:${tc.id}`)}
+                          onClick={() =>
+                            void rowLocks.runLocked(`del-tc:${tc.id}`, () => deleteTaxCode.mutateAsync(tc.id))
+                          }
                           aria-label={`Delete ${tc.code}`}
                         >
                           <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
+                        </SubmitButton>
                       )}
                     </TableCell>
                   </TableRow>

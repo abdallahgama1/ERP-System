@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -105,8 +106,8 @@ export function SplitTenderDialog({
   const fmt = (n: number) => formatMoney(n, currency || "USD");
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+    <Dialog open={open} onOpenChange={(next) => { if (!next && isSubmitting) return; onOpenChange(next); }}>
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto" locked={isSubmitting}>
         <DialogHeader>
           <DialogTitle>{t("pos.collectPayment", "Collect Payment")}</DialogTitle>
           <DialogDescription>
@@ -259,8 +260,10 @@ export function SplitTenderDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
             {t("common.cancel")}
           </Button>
-          <Button
-            disabled={!summary.canSubmit || isSubmitting}
+          <SubmitButton
+            type="button"
+            pending={isSubmitting}
+            disabled={!summary.canSubmit}
             onClick={() =>
               void onConfirm(
                 tenders.map((item) => ({
@@ -272,8 +275,8 @@ export function SplitTenderDialog({
               )
             }
           >
-            {isSubmitting ? t("common.loading") : t("pos.completeSale", "Complete Sale")}
-          </Button>
+            {t("pos.completeSale", "Complete Sale")}
+          </SubmitButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

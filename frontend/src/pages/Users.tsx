@@ -7,6 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -74,6 +76,7 @@ export default function Users() {
   const [savingBranches, setSavingBranches] = useState(false);
 
   const [resetUrlDialog, setResetUrlDialog] = useState<{ email: string; url: string } | null>(null);
+  const rowLocks = useActionLocks();
 
   const { user: currentUser, refreshUser } = useAuth();
   const { role: currentRole, can } = usePermissions();
@@ -405,10 +408,17 @@ export default function Users() {
                                 {t("users.assignBranches", "Branches")}
                               </Button>
                               {isAdmin && (
-                                <Button variant="ghost" size="sm" onClick={() => handleIssueResetToken(u)}>
+                                <SubmitButton
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  hideSlowText
+                                  pending={rowLocks.isPending(`reset:${u.id}`)}
+                                  onClick={() => void rowLocks.runLocked(`reset:${u.id}`, () => handleIssueResetToken(u))}
+                                >
                                   <KeyRound className="h-3.5 w-3.5 me-1" />
                                   {t("users.resetLink", "Reset Link")}
-                                </Button>
+                                </SubmitButton>
                               )}
                             </div>
                           </TableCell>

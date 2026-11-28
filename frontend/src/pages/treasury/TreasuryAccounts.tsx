@@ -41,6 +41,8 @@ import {
   useTreasuryReconciliationQuery,
   useTreasuryTransfersQuery,
 } from "@/hooks/queries/useTreasuryQueries";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 
 export default function TreasuryAccounts() {
   const { t } = useTranslation();
@@ -61,6 +63,7 @@ export default function TreasuryAccounts() {
     unreconcileLine,
     ignoreLine,
   } = useTreasuryMutations();
+  const rowLocks = useActionLocks();
 
   const canCreate = can("treasury", "create");
   const canEdit = can("treasury", "edit");
@@ -510,33 +513,54 @@ export default function TreasuryAccounts() {
                                 <Button size="sm" onClick={() => openReconcileModal(line)}>
                                   Match / Post
                                 </Button>
-                                <Button
+                                <SubmitButton
+                                  type="button"
                                   size="sm"
                                   variant="ghost"
                                   title="Ignore line"
-                                  onClick={() => ignoreLine.mutate({ lineId: line.id, ignored: true })}
+                                  hideSlowText
+                                  pending={rowLocks.isPending(`ignore:${line.id}`)}
+                                  onClick={() =>
+                                    void rowLocks.runLocked(`ignore:${line.id}`, () =>
+                                      ignoreLine.mutateAsync({ lineId: line.id, ignored: true })
+                                    )
+                                  }
                                 >
                                   <EyeOff className="h-4 w-4" />
-                                </Button>
+                                </SubmitButton>
                               </>
                             )}
                             {canEdit && line.status === "reconciled" && (
-                              <Button
+                              <SubmitButton
+                                type="button"
                                 size="sm"
                                 variant="ghost"
-                                onClick={() => unreconcileLine.mutate(line.id)}
+                                hideSlowText
+                                pending={rowLocks.isPending(`unmatch:${line.id}`)}
+                                onClick={() =>
+                                  void rowLocks.runLocked(`unmatch:${line.id}`, () =>
+                                    unreconcileLine.mutateAsync(line.id)
+                                  )
+                                }
                               >
                                 <RotateCcw className="h-4 w-4 me-1" /> Unmatch
-                              </Button>
+                              </SubmitButton>
                             )}
                             {canEdit && line.status === "ignored" && (
-                              <Button
+                              <SubmitButton
+                                type="button"
                                 size="sm"
                                 variant="ghost"
-                                onClick={() => ignoreLine.mutate({ lineId: line.id, ignored: false })}
+                                hideSlowText
+                                pending={rowLocks.isPending(`restore:${line.id}`)}
+                                onClick={() =>
+                                  void rowLocks.runLocked(`restore:${line.id}`, () =>
+                                    ignoreLine.mutateAsync({ lineId: line.id, ignored: false })
+                                  )
+                                }
                               >
                                 Restore
-                              </Button>
+                              </SubmitButton>
                             )}
                           </TableCell>
                         </TableRow>

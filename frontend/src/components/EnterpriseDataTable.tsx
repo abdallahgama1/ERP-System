@@ -19,6 +19,8 @@ import { useSavedViewMutations, useSavedViewsQuery } from "@/hooks/queries/useSa
 import { TablePagination } from "@/components/TablePagination";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
@@ -127,6 +129,7 @@ export function EnterpriseDataTable<T>({
   testId,
 }: EnterpriseDataTableProps<T>) {
   const { t } = useTranslation();
+  const viewLocks = useActionLocks();
 
   // Column visibility state
   const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(() => {
@@ -347,19 +350,22 @@ export function EnterpriseDataTable<T>({
                             </Badge>
                           )}
                         </div>
-                        <Button
+                        <SubmitButton
                           type="button"
                           variant="ghost"
                           size="icon"
+                          pending={viewLocks.isPending(`del-view:${view.id}`)}
                           className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
                           aria-label={t("common.delete", "Delete")}
                           onClick={(e) => {
                             e.stopPropagation();
-                            void handleDeleteView(view.id, view.name);
+                            void viewLocks.runLocked(`del-view:${view.id}`, () =>
+                              handleDeleteView(view.id, view.name)
+                            );
                           }}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        </SubmitButton>
                       </DropdownMenuItem>
                     ))
                   )}

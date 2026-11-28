@@ -29,6 +29,8 @@ import {
   type PosPaymentMethod,
 } from "@erp/shared";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -401,7 +403,7 @@ export default function PosRegister() {
   }, [cartDiscountPct]);
 
   const handleStartCharge = useCallback(() => {
-    if (cart.length === 0 || !activeShift || isHardLocked) return;
+    if (cart.length === 0 || !activeShift || isHardLocked || isCheckingOut || tenderOpen) return;
     const canApproveDiscount =
       user?.role === "admin" || user?.role === "manager" || can("pos", "approve");
     if (
@@ -414,7 +416,7 @@ export default function PosRegister() {
       return;
     }
     setTenderOpen(true);
-  }, [activeShift, can, cart.length, cartDiscountPctNum, isHardLocked, overrideApprovedPct, user?.role]);
+  }, [activeShift, can, cart.length, cartDiscountPctNum, isCheckingOut, isHardLocked, overrideApprovedPct, tenderOpen, user?.role]);
 
   // Keyboard shortcuts (F2 search, F9 charge, Ctrl+L lock)
   useEffect(() => {
@@ -422,12 +424,12 @@ export default function PosRegister() {
       if (e.key === "F2") {
         e.preventDefault();
         searchInputRef.current?.focus();
-      } else if (e.key === "F9" && cart.length > 0 && activeShift && !isHardLocked) {
+      } else if (e.key === "F9" && cart.length > 0 && activeShift && !isHardLocked && !isCheckingOut && !tenderOpen) {
         e.preventDefault();
         handleStartCharge();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l") {
         e.preventDefault();
-        void handleLockTerminal();
+        void lockTerminalAction.run();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -487,7 +489,7 @@ export default function PosRegister() {
     };
   }, [cart, cartDiscountPctNum]);
 
-  const handleLockTerminal = async () => {
+  const lockTerminalAction = useIdempotentAction(async () => {
     try {
       await apiRequest("/api/pos/terminal/lock", { method: "POST" });
       if (user) {
@@ -504,7 +506,49 @@ export default function PosRegister() {
         variant: "destructive",
       });
     }
-  };
+  });
+
+  const setPinAction = useIdempotentAction(async () => {
+    if (!user) return;
+    try {
+      await apiRequest(`/api/users/${user.id}/pos-pin`, {
+        method: "PUT",
+        body: { pin: newPinValue },
+      });
+      toast({ title: t("pos.pinSaved", "Cashier PIN saved") });
+      setNewPinValue("");
+      setSetPinOpen(false);
+    } catch (err) {
+      toast({
+        title: err instanceof Error ? err.message : "Failed to save PIN",
+        variant: "destructive",
+      });
+      throw err;
+    }
+  });
+
+  const createTerminalAction = useIdempotentAction(async () => {
+    try {
+      const res = await apiRequest<{ terminal: { id: string } }>("/api/pos/terminals", {
+        method: "POST",
+        body: {
+          branchId: newTermBranchId,
+          code: newTermCode.trim(),
+          name: newTermName.trim(),
+        },
+      });
+      await savePosState("selected_terminal_id", res.terminal.id);
+      setCreateTermOpen(false);
+      await loadTerminals();
+      toast({ title: t("pos.registerCreated", "POS register created") });
+    } catch (err) {
+      toast({
+        title: err instanceof Error ? err.message : "Failed to create register",
+        variant: "destructive",
+      });
+      throw err;
+    }
+  });
 
   const handlePinUnlock = async (pin: string, userId?: string) => {
     const res = await apiRequest<{ user: User; terminalId: string | null; isLocked: false }>(
@@ -527,16 +571,14 @@ export default function PosRegister() {
     toast({ title: `${t("pos.activeCashier", "Active cashier")}: ${res.user.name}` });
   };
 
-  const handleCheckoutConfirm = async (
-    tenders: Array<{ method: PosPaymentMethod; amount: number; tenderedAmount: number; reference: string }>
-  ) => {
+  const checkoutAction = useIdempotentAction(
+    async (
+      tenders: Array<{ method: PosPaymentMethod; amount: number; tenderedAmount: number; reference: string }>
+    ) => {
     if (!selectedTerminal || !activeShift || !user) return;
     setIsCheckingOut(true);
 
-    const offlineClientTxId =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `pos-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const offlineClientTxId = checkoutAction.getIdempotencyKey();
     const nowIso = new Date().toISOString();
 
     const payload: PosCheckoutInput = {
@@ -663,9 +705,20 @@ export default function PosRegister() {
           title: err instanceof Error ? err.message : t("common.error"),
           variant: "destructive",
         });
+        throw err;
       }
     } finally {
       setIsCheckingOut(false);
+    }
+  });
+
+  const handleCheckoutConfirm = async (
+    tenders: Array<{ method: PosPaymentMethod; amount: number; tenderedAmount: number; reference: string }>
+  ) => {
+    try {
+      await checkoutAction.run(tenders);
+    } catch {
+      // Toast already shown inside checkoutAction
     }
   };
 
@@ -761,16 +814,19 @@ export default function PosRegister() {
             {user?.name}
           </Button>
 
-          <Button
+          <SubmitButton
+            type="button"
             size="sm"
             variant="secondary"
             aria-label="Lock register"
-            onClick={() => void handleLockTerminal()}
+            hideSlowText
+            pending={lockTerminalAction.isPending}
+            onClick={() => void lockTerminalAction.run()}
             className="gap-1.5"
           >
             <Lock className="h-4 w-4" />
             {t("pos.lock", "Lock")}
-          </Button>
+          </SubmitButton>
         </div>
       </header>
 
@@ -1145,8 +1201,8 @@ export default function PosRegister() {
       />
 
       {/* Set Current Cashier PIN Dialog */}
-      <Dialog open={setPinOpen} onOpenChange={setSetPinOpen}>
-        <DialogContent className="max-w-sm">
+      <Dialog open={setPinOpen} onOpenChange={setPinAction.guardOpenChange(setSetPinOpen)}>
+        <DialogContent className="max-w-sm" locked={setPinAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("pos.setCashierPin", "Set Cashier PIN")}</DialogTitle>
             <DialogDescription>
@@ -1166,38 +1222,25 @@ export default function PosRegister() {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setSetPinOpen(false)}>
+            <Button variant="outline" disabled={setPinAction.isPending} onClick={() => setSetPinOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
+              pending={setPinAction.isPending}
+              isSlow={setPinAction.isSlow}
               disabled={newPinValue.length < 4}
-              onClick={async () => {
-                if (!user) return;
-                try {
-                  await apiRequest(`/api/users/${user.id}/pos-pin`, {
-                    method: "PUT",
-                    body: { pin: newPinValue },
-                  });
-                  toast({ title: t("pos.pinSaved", "Cashier PIN saved") });
-                  setNewPinValue("");
-                  setSetPinOpen(false);
-                } catch (err) {
-                  toast({
-                    title: err instanceof Error ? err.message : "Failed to save PIN",
-                    variant: "destructive",
-                  });
-                }
-              }}
+              onClick={() => void setPinAction.run().catch(() => {})}
             >
               {t("common.save")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Create Register Terminal Dialog */}
-      <Dialog open={createTermOpen} onOpenChange={setCreateTermOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog open={createTermOpen} onOpenChange={createTerminalAction.guardOpenChange(setCreateTermOpen)}>
+        <DialogContent className="max-w-md" locked={createTerminalAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("pos.createRegister", "Create POS Register")}</DialogTitle>
             <DialogDescription>
@@ -1230,35 +1273,18 @@ export default function PosRegister() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateTermOpen(false)}>
+            <Button variant="outline" disabled={createTerminalAction.isPending} onClick={() => setCreateTermOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button
+            <SubmitButton
+              type="button"
+              pending={createTerminalAction.isPending}
+              isSlow={createTerminalAction.isSlow}
               disabled={!newTermBranchId || !newTermCode.trim() || !newTermName.trim()}
-              onClick={async () => {
-                try {
-                  const res = await apiRequest<{ terminal: { id: string } }>("/api/pos/terminals", {
-                    method: "POST",
-                    body: {
-                      branchId: newTermBranchId,
-                      code: newTermCode.trim(),
-                      name: newTermName.trim(),
-                    },
-                  });
-                  await savePosState("selected_terminal_id", res.terminal.id);
-                  setCreateTermOpen(false);
-                  await loadTerminals();
-                  toast({ title: t("pos.registerCreated", "POS register created") });
-                } catch (err) {
-                  toast({
-                    title: err instanceof Error ? err.message : "Failed to create register",
-                    variant: "destructive",
-                  });
-                }
-              }}
+              onClick={() => void createTerminalAction.run().catch(() => {})}
             >
               {t("common.save")}
-            </Button>
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

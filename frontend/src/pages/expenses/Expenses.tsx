@@ -25,6 +25,8 @@ import { formatMoney } from "@/lib/money";
 import { useAccountsQuery, useCostCentersQuery } from "@/hooks/queries/useAccountingQueries";
 import { useTreasuryAccountsQuery } from "@/hooks/queries/useTreasuryQueries";
 import { useExpenseClaimsQuery, useExpenseMutations } from "@/hooks/queries/useExpensesQueries";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useActionLocks } from "@/hooks/useIdempotentSubmit";
 
 interface DraftExpenseLine {
   key: string;
@@ -66,6 +68,7 @@ export default function Expenses() {
   const { data: costCenters = [] } = useCostCentersQuery(true);
   const { data: treasuryAccounts = [] } = useTreasuryAccountsQuery();
   const { createClaim, submitClaim, reviewClaim, payClaim } = useExpenseMutations();
+  const rowLocks = useActionLocks();
 
   const canCreate = can("expenses", "create");
   const canApprove = can("expenses", "approve");
@@ -305,22 +308,38 @@ export default function Expenses() {
                     </TableCell>
                     <TableCell className="text-end space-x-1">
                       {canCreate && c.status === "draft" && (
-                        <Button size="sm" variant="outline" onClick={() => submitClaim.mutate(c.id)}>
+                        <SubmitButton
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          hideSlowText
+                          pending={rowLocks.isPending(`submit:${c.id}`)}
+                          onClick={() => void rowLocks.runLocked(`submit:${c.id}`, () => submitClaim.mutateAsync(c.id))}
+                        >
                           Submit
-                        </Button>
+                        </SubmitButton>
                       )}
                       {canApprove && c.status === "pending_approval" && (
                         <>
-                          <Button size="sm" onClick={() => void handleReview(c.id, "approved")}>
+                          <SubmitButton
+                            type="button"
+                            size="sm"
+                            hideSlowText
+                            pending={rowLocks.isPending(`review:${c.id}`)}
+                            onClick={() => void rowLocks.runLocked(`review:${c.id}`, () => handleReview(c.id, "approved"))}
+                          >
                             <Check className="h-4 w-4 me-1" /> Approve
-                          </Button>
-                          <Button
+                          </SubmitButton>
+                          <SubmitButton
+                            type="button"
                             size="sm"
                             variant="outline"
-                            onClick={() => void handleReview(c.id, "rejected")}
+                            hideSlowText
+                            pending={rowLocks.isPending(`review:${c.id}`)}
+                            onClick={() => void rowLocks.runLocked(`review:${c.id}`, () => handleReview(c.id, "rejected"))}
                           >
                             <X className="h-4 w-4" />
-                          </Button>
+                          </SubmitButton>
                         </>
                       )}
                       {canApprove && c.status === "approved" && (
