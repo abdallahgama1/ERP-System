@@ -118,6 +118,7 @@ export function PosReturnDialog({
     onOpenChange(false);
   });
   const submitting = submitAction.isPending;
+  const resetSubmitKey = submitAction.resetKey;
 
   useEffect(() => {
     if (receipt && open) {
@@ -134,9 +135,9 @@ export function PosReturnDialog({
       setRefundMethod("cash");
       setReason("");
       setManagerPin("");
-      submitAction.resetKey();
+      resetSubmitKey();
     }
-  }, [open, receipt]);
+  }, [open, receipt, resetSubmitKey]);
 
   if (!receipt) return null;
 
