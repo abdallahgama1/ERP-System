@@ -204,21 +204,53 @@ EFFECTIVE_URL="${DIRECT_URL:-$PRIMARY_URL}"
 RETENTION="$(read_env BACKUP_RETENTION_DAYS)"
 MIN_KEEP="$(read_env BACKUP_MIN_KEEP)"
 CUSTOM_DIR="$(read_env BACKUP_DIR)"
+BACKUP_UPLOADS_VAL="$(read_env BACKUP_UPLOADS)"
+BACKUP_STATUS_FILE_VAL="$(read_env BACKUP_STATUS_FILE)"
 
 export DATABASE_URL="$EFFECTIVE_URL"
 [[ -z "$RETENTION" ]] || export BACKUP_RETENTION_DAYS="$RETENTION"
 [[ -z "$MIN_KEEP" ]] || export BACKUP_MIN_KEEP="$MIN_KEEP"
+[[ -z "$BACKUP_UPLOADS_VAL" ]] || export BACKUP_UPLOADS="$BACKUP_UPLOADS_VAL"
+[[ -z "$BACKUP_STATUS_FILE_VAL" ]] || export BACKUP_STATUS_FILE="$BACKUP_STATUS_FILE_VAL"
+
+for key in \
+  BACKUP_S3_BUCKET \
+  BACKUP_S3_REGION \
+  BACKUP_S3_ENDPOINT \
+  BACKUP_S3_ACCESS_KEY_ID \
+  BACKUP_S3_SECRET_ACCESS_KEY \
+  BACKUP_S3_FORCE_PATH_STYLE \
+  BACKUP_S3_PREFIX \
+  BACKUP_ENCRYPTION_KEY \
+  BACKUP_OFFSITE_RETENTION_DAYS \
+  BACKUP_OFFSITE_MIN_KEEP \
+  BACKUP_OFFSITE_REQUIRED; do
+  val="$(read_env "$key")"
+  [[ -z "$val" ]] || export "${key}=${val}"
+done
 
 exec bash "$BACKUP_SCRIPT" "${CUSTOM_DIR:-$TARGET_DIR}"
 EOF
   chmod 750 /usr/local/bin/count-it-keep-it-backup
 
-  cat > /etc/cron.d/count-it-keep-it-backup <<'EOF'
+  if command -v systemctl >/dev/null 2>&1 && [[ -d "$APP_DIR/deploy/systemd" ]]; then
+    echo "==> Installing systemd timers for daily backups and monthly restore drills..."
+    cp "$APP_DIR/deploy/systemd/count-it-keep-it-backup.service" /etc/systemd/system/
+    cp "$APP_DIR/deploy/systemd/count-it-keep-it-backup.timer" /etc/systemd/system/
+    cp "$APP_DIR/deploy/systemd/count-it-keep-it-restore-drill.service" /etc/systemd/system/
+    cp "$APP_DIR/deploy/systemd/count-it-keep-it-restore-drill.timer" /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable --now count-it-keep-it-backup.timer
+    echo "==> Enabled count-it-keep-it-backup.timer (02:00 UTC daily)."
+    echo "==> Installed count-it-keep-it-restore-drill.timer (enable with: systemctl enable --now count-it-keep-it-restore-drill.timer)."
+  else
+    cat > /etc/cron.d/count-it-keep-it-backup <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 0 2 * * * root /usr/local/bin/count-it-keep-it-backup >> /var/log/erp-backup.log 2>&1
 EOF
-  chmod 644 /etc/cron.d/count-it-keep-it-backup
+    chmod 644 /etc/cron.d/count-it-keep-it-backup
+  fi
 
   cat > /etc/logrotate.d/count-it-keep-it-backup <<'EOF'
 /var/log/erp-backup.log {

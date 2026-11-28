@@ -1,4 +1,32 @@
 services:
+  # Optional internal PostgreSQL 18 (for self-hosted single-VPS setups instead of Neon/RDS).
+  # Enable with: docker compose -f docker-compose.prod.yml --profile local-db up -d
+  # SECURITY: NO host port (5432) is published; reachable ONLY inside the private Docker network.
+  postgres:
+    profiles: ["local-db"]
+    image: postgres:18-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-erp}
+      # Postgres refuses to initialize if empty when --profile local-db is enabled,
+      # without blocking managed-Postgres deployments that leave POSTGRES_PASSWORD unset.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-erp}
+    volumes:
+      - erp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-erp} -d ${POSTGRES_DB:-erp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   backend:
     build:
       context: .
@@ -16,7 +44,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TRUST_PROXY: "true"
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to your managed PostgreSQL connection string}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to your PostgreSQL connection string}
       CORS_ORIGIN: ${CORS_ORIGIN:-https://${SITE_ADDRESS:?Set SITE_ADDRESS to your production domain}}
       APP_BASE_URL: ${APP_BASE_URL:-https://${SITE_ADDRESS:?Set SITE_ADDRESS to your production domain}}
       AUTH_COOKIE_SECRET: ${AUTH_COOKIE_SECRET:?Set AUTH_COOKIE_SECRET to a random string of at least 32 characters}
@@ -37,6 +65,17 @@ services:
       ATTACHMENT_VIRUS_SCAN_CLAMAV_PORT: ${ATTACHMENT_VIRUS_SCAN_CLAMAV_PORT:-3310}
       ATTACHMENT_VIRUS_SCAN_TIMEOUT_MS: ${ATTACHMENT_VIRUS_SCAN_TIMEOUT_MS:-10000}
       ATTACHMENT_VIRUS_SCAN_FAIL_CLOSED: ${ATTACHMENT_VIRUS_SCAN_FAIL_CLOSED:-true}
+      CSV_IMPORT_MAX_ROWS: ${CSV_IMPORT_MAX_ROWS:-10000}
+      CSV_IMPORT_MAX_BYTES: ${CSV_IMPORT_MAX_BYTES:-5242880}
+      BACKUP_STATUS_FILE: /var/backups/count-it-keep-it/last-backup-status.json
+      BACKUP_MAX_AGE_HOURS: ${BACKUP_MAX_AGE_HOURS:-26}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-auto}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      BACKUP_S3_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      BACKUP_S3_FORCE_PATH_STYLE: ${BACKUP_S3_FORCE_PATH_STYLE:-false}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-backups/count-it-keep-it}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-erp_session}
       SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
       COOKIE_SECURE: ${COOKIE_SECURE:-auto}
@@ -62,8 +101,13 @@ services:
       ETA_CLIENT_SECRET: ${ETA_CLIENT_SECRET:-}
       ETA_ID_BASE_URL: ${ETA_ID_BASE_URL:-https://id.preprod.eta.gov.eg}
       ETA_API_BASE_URL: ${ETA_API_BASE_URL:-https://api.preprod.invoicing.eta.gov.eg}
+      ETA_INVOICE_VERSION: ${ETA_INVOICE_VERSION:-1.0}
+      ETA_SIGNER_URL: ${ETA_SIGNER_URL:-}
+      ETA_SIGNER_TOKEN: ${ETA_SIGNER_TOKEN:-}
+      ETA_SIGNER_TIMEOUT_MS: ${ETA_SIGNER_TIMEOUT_MS:-10000}
     volumes:
       - erp_uploads:/app/uploads
+      - ${BACKUP_DIR:-/var/backups/count-it-keep-it}:/var/backups/count-it-keep-it:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/ready >/dev/null || exit 1"]
       interval: 30s
@@ -137,7 +181,56 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # Optional containerized daily backup scheduler (alternative to host systemd timer / cron).
+  # Enable with: docker compose -f docker-compose.prod.yml --profile backup up -d
+  # Runs scripts/backup-db.sh daily (default 02:00 UTC) with AES-256-GCM off-site S3 sync.
+  backup-scheduler:
+    profiles: ["backup"]
+    image: postgres:18-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DATABASE_URL: ${DIRECT_DATABASE_URL:-${DATABASE_URL:?Set DATABASE_URL}}
+      BACKUP_DIR: /var/backups/count-it-keep-it
+      BACKUP_STATUS_FILE: /var/backups/count-it-keep-it/last-backup-status.json
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_MIN_KEEP: ${BACKUP_MIN_KEEP:-5}
+      BACKUP_UPLOADS: ${BACKUP_UPLOADS:-true}
+      STORAGE_LOCAL_DIR: /app/uploads
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-auto}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      BACKUP_S3_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      BACKUP_S3_FORCE_PATH_STYLE: ${BACKUP_S3_FORCE_PATH_STYLE:-false}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-backups/count-it-keep-it}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
+      BACKUP_OFFSITE_RETENTION_DAYS: ${BACKUP_OFFSITE_RETENTION_DAYS:-30}
+      BACKUP_OFFSITE_MIN_KEEP: ${BACKUP_OFFSITE_MIN_KEEP:-7}
+      BACKUP_OFFSITE_REQUIRED: ${BACKUP_OFFSITE_REQUIRED:-false}
+      BACKUP_CRON_SCHEDULE: ${BACKUP_CRON_SCHEDULE:-0 2 * * *}
+    volumes:
+      - ./scripts:/opt/erp/scripts:ro
+      - ./node_modules:/opt/erp/node_modules:ro
+      - ./package.json:/opt/erp/package.json:ro
+      - erp_uploads:/app/uploads:ro
+      - ${BACKUP_DIR:-/var/backups/count-it-keep-it}:/var/backups/count-it-keep-it
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache bash nodejs >/dev/null && \
+        printf '%s /bin/bash /opt/erp/scripts/backup-db.sh /var/backups/count-it-keep-it >> /proc/1/fd/1 2>&1\n' "$${BACKUP_CRON_SCHEDULE:-0 2 * * *}" > /etc/crontabs/root && \
+        exec crond -f -l 6
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 volumes:
+  erp_pgdata:
   erp_uploads:
   caddy_data:
   caddy_config:

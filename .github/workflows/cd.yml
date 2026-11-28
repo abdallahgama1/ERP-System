@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: erp
           POSTGRES_PASSWORD: erp_ci_password
@@ -254,13 +254,15 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN || secrets.GITHUB_TOKEN }}
           BACKEND_IMAGE: ${{ needs.publish.outputs.backend_image }}
           FRONTEND_IMAGE: ${{ needs.publish.outputs.frontend_image }}
+          TARGET_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
           SKIP_BACKUP: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_backup || false }}
         run: |
           SSH_OPTS=(-i "$HOME/.ssh/deploy_key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
-          ssh "${SSH_OPTS[@]}" -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" "mkdir -p '${VPS_APP_DIR}/scripts'"
+          ssh "${SSH_OPTS[@]}" -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" "mkdir -p '${VPS_APP_DIR}/scripts' '${VPS_APP_DIR}/deploy/systemd'"
 
           scp "${SSH_OPTS[@]}" -P "$VPS_PORT" \
             docker-compose.prod.yml \
+            docker-compose.staging.yml \
             Caddyfile \
             "${VPS_USER}@${VPS_HOST}:${VPS_APP_DIR}/"
 
@@ -268,12 +270,23 @@ jobs:
             scripts/deploy.sh \
             scripts/backup-db.sh \
             scripts/restore-db.sh \
+            scripts/backup-offsite.mjs \
+            scripts/monthly-restore-drill.mjs \
+            scripts/verify-restored-db.ts \
+            scripts/smoke-test.mjs \
             "${VPS_USER}@${VPS_HOST}:${VPS_APP_DIR}/scripts/"
+
+          scp "${SSH_OPTS[@]}" -P "$VPS_PORT" \
+            deploy/systemd/* \
+            "${VPS_USER}@${VPS_HOST}:${VPS_APP_DIR}/deploy/systemd/"
 
           printf '%s' "$GHCR_TOKEN" | ssh "${SSH_OPTS[@]}" -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" \
             "docker login ghcr.io -u '${GHCR_USER}' --password-stdin >/dev/null"
 
           DEPLOY_FLAGS="--backend-image '${BACKEND_IMAGE}' --frontend-image '${FRONTEND_IMAGE}'"
+          if [ "$TARGET_ENV" = "staging" ]; then
+            DEPLOY_FLAGS="${DEPLOY_FLAGS} --overlay-compose-file docker-compose.staging.yml --env-file .env.staging --project-name count-it-keep-it-staging"
+          fi
           if [ "$SKIP_BACKUP" = "true" ]; then
             DEPLOY_FLAGS="${DEPLOY_FLAGS} --skip-backup"
           fi

@@ -1,0 +1,66 @@
+# Staging Docker Compose overlay — use together with docker-compose.prod.yml:
+#   docker compose -p count-it-keep-it-staging \
+#     -f docker-compose.prod.yml -f docker-compose.staging.yml \
+#     --env-file .env.staging up -d --wait
+#
+# Guarantees complete isolation from production:
+#   - Dedicated internal PostgreSQL 18 container (NO host port 5432 published)
+#   - Dedicated volumes (erp_staging_pgdata, erp_staging_uploads, caddy_staging_*)
+#   - Separate S3 backup prefix (backups/count-it-keep-it-staging) & Sentry tag (staging)
+#   - HTTPS via Caddy on STAGING_SITE_ADDRESS (e.g. staging.erp.example.com)
+
+services:
+  postgres-staging:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-erp_staging}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.staging}
+      POSTGRES_DB: ${POSTGRES_DB:-erp_staging}
+    volumes:
+      - erp_staging_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-erp_staging} -d ${POSTGRES_DB:-erp_staging}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    depends_on:
+      postgres-staging:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-erp_staging}:${POSTGRES_PASSWORD}@postgres-staging:5432/${POSTGRES_DB:-erp_staging}}
+      SENTRY_ENVIRONMENT: staging
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-backups/count-it-keep-it-staging}
+      ETA_ID_BASE_URL: ${ETA_ID_BASE_URL:-https://id.preprod.eta.gov.eg}
+      ETA_API_BASE_URL: ${ETA_API_BASE_URL:-https://api.preprod.invoicing.eta.gov.eg}
+    volumes:
+      - erp_staging_uploads:/app/uploads
+      - ${BACKUP_DIR:-/var/backups/count-it-keep-it-staging}:/var/backups/count-it-keep-it:ro
+
+  frontend:
+    build:
+      args:
+        VITE_SENTRY_ENVIRONMENT: staging
+
+  caddy:
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS in .env.staging (e.g. staging.erp.example.com)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_staging_data:/data
+      - caddy_staging_config:/config
+
+volumes:
+  erp_staging_pgdata:
+  erp_staging_uploads:
+  caddy_staging_data:
+  caddy_staging_config:

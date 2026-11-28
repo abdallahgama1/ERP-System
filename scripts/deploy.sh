@@ -6,31 +6,41 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ENV_FILE="${REPO_ROOT}/.env"
 COMPOSE_FILE="${REPO_ROOT}/docker-compose.prod.yml"
+OVERLAY_COMPOSE_FILE=""
+PROJECT_NAME=""
 BACKEND_IMAGE_ARG=""
 FRONTEND_IMAGE_ARG=""
 RUN_BUILD=false
 SKIP_BACKUP=false
 SKIP_PUBLIC_CHECK=false
+RUN_SMOKE_TEST=auto
+DO_ROLLBACK=false
 WAIT_TIMEOUT=60
 
 usage() {
   cat <<'EOF'
 Usage: bash scripts/deploy.sh [options]
 
-Safely deploys Count It Keep It ERP using docker-compose.prod.yml with env
-validation, pre-deploy pg_dump backup, health verification, and automatic
-rollback to the previous running container images on failure.
+Safely deploys Count It Keep It ERP using docker-compose.prod.yml (plus an optional
+staging overlay) with env validation, pre-deploy pg_dump backup, migrations,
+health + smoke verification (health, ready, login, reconciliation), and automatic
+or manual rollback to the previous image tags.
 
 Options:
-  --env-file <path>         Path to production .env file (default: <repo>/.env)
-  --compose-file <path>     Path to Compose file (default: <repo>/docker-compose.prod.yml)
-  --backend-image <ref>     Pin and deploy a specific backend container image
-  --frontend-image <ref>    Pin and deploy a specific frontend container image
-  --build                   Build images locally on VPS instead of pulling
-  --skip-backup             Skip pre-deploy PostgreSQL backup
-  --skip-public-check       Skip public https://SITE_ADDRESS/api/health/ready check
-  --timeout <seconds>       Compose health wait timeout in seconds (default: 60)
-  -h, --help                Show this help message
+  --env-file <path>              Path to .env file (default: <repo>/.env)
+  --compose-file <path>          Base Compose file (default: <repo>/docker-compose.prod.yml)
+  --overlay-compose-file <path>  Optional Compose overlay (e.g. docker-compose.staging.yml)
+  --project-name <name>          Optional Docker Compose project name (e.g. count-it-keep-it-staging)
+  --backend-image <ref>          Pin and deploy a specific backend container image
+  --frontend-image <ref>         Pin and deploy a specific frontend container image
+  --build                        Build images locally on VPS instead of pulling
+  --skip-backup                  Skip pre-deploy PostgreSQL backup
+  --skip-public-check            Skip public https://SITE_ADDRESS/api/health/ready check
+  --smoke-test                   Require running scripts/smoke-test.mjs (fails if creds missing)
+  --skip-smoke-test              Skip scripts/smoke-test.mjs even if SMOKE_ADMIN_* is set
+  --rollback                     Roll back to the previous known-good image tags from .last-good-images
+  --timeout <seconds>            Compose health wait timeout in seconds (default: 60)
+  -h, --help                     Show this help message
 EOF
 }
 
@@ -44,6 +54,16 @@ while (( $# > 0 )); do
     --compose-file)
       [[ $# -ge 2 ]] || { echo "Error: --compose-file requires a value." >&2; exit 2; }
       COMPOSE_FILE="$2"
+      shift 2
+      ;;
+    --overlay-compose-file)
+      [[ $# -ge 2 ]] || { echo "Error: --overlay-compose-file requires a value." >&2; exit 2; }
+      OVERLAY_COMPOSE_FILE="$2"
+      shift 2
+      ;;
+    --project-name)
+      [[ $# -ge 2 ]] || { echo "Error: --project-name requires a value." >&2; exit 2; }
+      PROJECT_NAME="$2"
       shift 2
       ;;
     --backend-image)
@@ -66,6 +86,18 @@ while (( $# > 0 )); do
       ;;
     --skip-public-check)
       SKIP_PUBLIC_CHECK=true
+      shift
+      ;;
+    --smoke-test)
+      RUN_SMOKE_TEST=true
+      shift
+      ;;
+    --skip-smoke-test)
+      RUN_SMOKE_TEST=false
+      shift
+      ;;
+    --rollback)
+      DO_ROLLBACK=true
       shift
       ;;
     --timeout)
@@ -98,6 +130,11 @@ fi
 
 if [[ ! -f "$COMPOSE_FILE" ]]; then
   echo "Error: compose file not found: $COMPOSE_FILE" >&2
+  exit 1
+fi
+
+if [[ -n "$OVERLAY_COMPOSE_FILE" && ! -f "$OVERLAY_COMPOSE_FILE" ]]; then
+  echo "Error: overlay compose file not found: $OVERLAY_COMPOSE_FILE" >&2
   exit 1
 fi
 
@@ -182,7 +219,17 @@ for cmd in docker; do
   fi
 done
 
-COMPOSE_ARGS=(-f "$COMPOSE_FILE" --env-file "$ENV_FILE")
+COMPOSE_ARGS=()
+if [[ -n "$PROJECT_NAME" ]]; then
+  COMPOSE_ARGS+=(-p "$PROJECT_NAME")
+fi
+COMPOSE_ARGS+=(-f "$COMPOSE_FILE")
+if [[ -n "$OVERLAY_COMPOSE_FILE" ]]; then
+  COMPOSE_ARGS+=(-f "$OVERLAY_COMPOSE_FILE")
+fi
+COMPOSE_ARGS+=(--env-file "$ENV_FILE")
+
+HISTORY_FILE="${ENV_FILE}.last-good-images"
 
 get_running_service_image() {
   local service="$1"
@@ -195,6 +242,30 @@ get_running_service_image() {
 
 PREV_BACKEND_IMAGE="$(get_running_service_image backend)"
 PREV_FRONTEND_IMAGE="$(get_running_service_image frontend)"
+
+if [[ "$DO_ROLLBACK" == "true" ]]; then
+  if [[ ! -f "$HISTORY_FILE" ]]; then
+    echo "Error: no rollback history file found at $HISTORY_FILE." >&2
+    exit 1
+  fi
+  ROLLBACK_BACKEND="$(read_env_var "$HISTORY_FILE" "PREV_BACKEND_IMAGE")"
+  ROLLBACK_FRONTEND="$(read_env_var "$HISTORY_FILE" "PREV_FRONTEND_IMAGE")"
+  if [[ -z "$ROLLBACK_BACKEND" || -z "$ROLLBACK_FRONTEND" ]]; then
+    echo "Error: $HISTORY_FILE does not contain both PREV_BACKEND_IMAGE and PREV_FRONTEND_IMAGE." >&2
+    exit 1
+  fi
+  echo "==> Manual rollback to previous known-good images:"
+  echo "    Backend:  $ROLLBACK_BACKEND"
+  echo "    Frontend: $ROLLBACK_FRONTEND"
+  export BACKEND_IMAGE="$ROLLBACK_BACKEND"
+  export FRONTEND_IMAGE="$ROLLBACK_FRONTEND"
+  upsert_env_var "$ENV_FILE" "BACKEND_IMAGE" "$ROLLBACK_BACKEND"
+  upsert_env_var "$ENV_FILE" "FRONTEND_IMAGE" "$ROLLBACK_FRONTEND"
+  docker compose "${COMPOSE_ARGS[@]}" pull backend frontend
+  RUN_MIGRATIONS=false docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --remove-orphans --wait --wait-timeout "$WAIT_TIMEOUT"
+  echo "==> Manual rollback completed (RUN_MIGRATIONS=false). Verify /api/health/ready and reconciliation."
+  exit 0
+fi
 
 if [[ -n "$BACKEND_IMAGE_ARG" ]]; then
   export BACKEND_IMAGE="$BACKEND_IMAGE_ARG"
@@ -314,6 +385,36 @@ if [[ "$SKIP_PUBLIC_CHECK" == "false" ]]; then
     rollback "public https://${SITE_ADDRESS}/api/health/ready check failed"
   fi
 fi
+
+SMOKE_EMAIL_VAL="$(read_env_var "$ENV_FILE" "SMOKE_ADMIN_EMAIL")"
+SMOKE_PASS_VAL="$(read_env_var "$ENV_FILE" "SMOKE_ADMIN_PASSWORD")"
+SMOKE_SCRIPT="${REPO_ROOT}/scripts/smoke-test.mjs"
+if [[ "$RUN_SMOKE_TEST" == "true" || ( "$RUN_SMOKE_TEST" == "auto" && -n "$SMOKE_EMAIL_VAL" && -n "$SMOKE_PASS_VAL" ) ]]; then
+  if [[ ! -f "$SMOKE_SCRIPT" ]] || ! command -v node >/dev/null 2>&1; then
+    rollback "smoke-test requested but node or scripts/smoke-test.mjs is unavailable"
+  fi
+  if [[ -z "$SMOKE_EMAIL_VAL" || -z "$SMOKE_PASS_VAL" ]]; then
+    rollback "--smoke-test requested but SMOKE_ADMIN_EMAIL / SMOKE_ADMIN_PASSWORD are empty in $ENV_FILE"
+  fi
+  echo "==> Running post-deploy smoke test (health, ready, login, reconciliation, setup-health, audit chain)..."
+  if ! SMOKE_BASE_URL="https://${SITE_ADDRESS}" \
+       SMOKE_ADMIN_EMAIL="$SMOKE_EMAIL_VAL" \
+       SMOKE_ADMIN_PASSWORD="$SMOKE_PASS_VAL" \
+       node "$SMOKE_SCRIPT"; then
+    rollback "post-deploy smoke test failed"
+  fi
+fi
+
+# Persist previous and current image refs for one-command --rollback
+{
+  echo "PREV_BACKEND_IMAGE=${PREV_BACKEND_IMAGE:-${TARGET_BACKEND_IMAGE:-}}"
+  echo "PREV_FRONTEND_IMAGE=${PREV_FRONTEND_IMAGE:-${TARGET_FRONTEND_IMAGE:-}}"
+  echo "CURRENT_BACKEND_IMAGE=${TARGET_BACKEND_IMAGE:-}"
+  echo "CURRENT_FRONTEND_IMAGE=${TARGET_FRONTEND_IMAGE:-}"
+  echo "DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "${HISTORY_FILE}.tmp"
+chmod 600 "${HISTORY_FILE}.tmp"
+mv -f "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
 
 docker image prune -f >/dev/null 2>&1 || true
 

@@ -1,26 +1,66 @@
-# Production Caddy v2 reverse proxy with automatic HTTPS.
+# Production Caddy v2 reverse proxy with automatic Let's Encrypt HTTPS and HTTP->HTTPS redirect.
 # Set SITE_ADDRESS in environment (e.g., erp.example.com). Defaults to localhost for local smoke checks.
+#
+# Security & sizing policy:
+#   - Automatic HTTP (:80) -> HTTPS (:443) 308 redirect (enabled by default in Caddy for domain names)
+#   - TLS 1.2+ with modern cipher suites and automatic OCSP stapling
+#   - Strict request body size limits per route:
+#       * /api/imports*      -> 12MB (CSV cutover / master-data imports)
+#       * /api/attachments*  -> 15MB (multipart document uploads)
+#       * /api/* (default)   -> 1MB
+#       * /* (frontend SPA)  -> 1MB
+#   - Database port (5432) and backend port (3001) are NEVER published publicly.
+
+(api_proxy) {
+	reverse_proxy backend:3001 {
+		flush_interval -1
+		transport http {
+			read_timeout 3600s
+		}
+		header_up X-Real-IP {remote_host}
+	}
+}
+
 {$SITE_ADDRESS:localhost} {
-	# Strip Caddy Server banner; add defensive baseline headers only if upstream omitted them
+	# Strip Caddy Server banner; apply defensive baseline security headers when upstream omits them
 	header {
 		-Server
 		?Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		?X-Content-Type-Options "nosniff"
+		?X-Frame-Options "DENY"
+		?Referrer-Policy "strict-origin-when-cross-origin"
+		?Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=(), usb=()"
 	}
 
-	# API + SSE (/api/events) + Prometheus (/api/metrics) + Health (/api/health/live, /api/health/ready)
-	handle /api/* {
-		reverse_proxy backend:3001 {
-			flush_interval -1
-			transport http {
-				read_timeout 3600s
-			}
-			header_up X-Real-IP {remote_host}
+	# Large payloads permitted ONLY for admin CSV imports (10 MiB JSON envelope + framing)
+	handle /api/imports* {
+		request_body {
+			max_size 12MB
 		}
+		import api_proxy
+	}
+
+	# Large payloads permitted ONLY for document attachment uploads (10 MiB file + multipart framing)
+	handle /api/attachments* {
+		request_body {
+			max_size 15MB
+		}
+		import api_proxy
+	}
+
+	# All other API endpoints + SSE (/api/events) + Prometheus (/api/metrics) + Health (/api/health/*)
+	handle /api/* {
+		request_body {
+			max_size 1MB
+		}
+		import api_proxy
 	}
 
 	# Frontend SPA + static assets
 	handle {
+		request_body {
+			max_size 1MB
+		}
 		encode zstd gzip
 		reverse_proxy frontend:80
 	}
