@@ -8,9 +8,11 @@ import { ATTACHMENT_MAX_BYTES } from "@erp/shared";
 import type { DestinationStream } from "pino";
 import { env } from "./config.ts";
 import { AppError } from "./db/helpers.ts";
+import { mapPgUniqueViolationToAppError } from "./db/unique-errors.ts";
 import { buildPinoOptions, requestContext, sanitizeRequestId } from "./logging/logger.ts";
 import { attachAuthHook, smokeMonitorReadOnlyHook } from "./middleware/auth.ts";
 import { csrfProtectionHook } from "./middleware/csrf.ts";
+import { registerIdempotencyHooks } from "./middleware/idempotency.ts";
 import {
   metricsRoutes,
   observeHttpRequest,
@@ -246,40 +248,44 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.addHook("onRequest", csrfProtectionHook);
   app.addHook("preHandler", attachAuthHook);
   app.addHook("preHandler", smokeMonitorReadOnlyHook);
+  registerIdempotencyHooks(app);
 
   app.setErrorHandler((err, req, reply) => {
     const normalizedRoute = req.routeOptions?.url ?? (req.is404 ? "__unmatched__" : "__unknown__");
 
-    if (err instanceof AppError) {
+    const mappedUnique = err instanceof AppError ? null : mapPgUniqueViolationToAppError(err);
+    const effectiveErr = mappedUnique ?? err;
+
+    if (effectiveErr instanceof AppError) {
       const logPayload = {
-        code: err.code,
-        statusCode: err.statusCode,
+        code: effectiveErr.code,
+        statusCode: effectiveErr.statusCode,
         userId: req.authUser?.id ?? null,
-        err,
+        err: effectiveErr,
       };
-      if (err.statusCode >= 500) {
+      if (effectiveErr.statusCode >= 500) {
         req.log.error(logPayload, "app.error");
         recordDbError("unhandled_5xx");
-        captureBackendException(err, {
+        captureBackendException(effectiveErr, {
           reqId: req.id,
           method: req.method,
           route: normalizedRoute,
-          statusCode: err.statusCode,
+          statusCode: effectiveErr.statusCode,
           userId: req.authUser?.id ?? null,
         });
       } else {
         req.log.warn(logPayload, "app.rejected");
       }
-      if (err.code === "ACCOUNT_LOCKED") {
-        const retryAfter = (err.details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
+      if (effectiveErr.code === "ACCOUNT_LOCKED") {
+        const retryAfter = (effectiveErr.details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
         if (typeof retryAfter === "number" && retryAfter > 0) {
           reply.header("retry-after", String(retryAfter));
         }
       }
-      return reply.status(err.statusCode).send({
-        message: err.message,
-        code: err.code,
-        details: err.details,
+      return reply.status(effectiveErr.statusCode).send({
+        message: effectiveErr.message,
+        code: effectiveErr.code,
+        details: effectiveErr.details,
         reqId: req.id,
       });
     }

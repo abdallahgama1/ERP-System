@@ -102,15 +102,37 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       if (companyId === DEFAULT_COMPANY_ID) {
         await ensureSeededDefaults(tx);
       }
-      const code = parsed.data.code || (await nextDocNumber(tx, "BR", "BR-", null, companyId));
+      const code = (parsed.data.code || (await nextDocNumber(tx, "BR", "BR-", null, companyId))).trim();
 
       const existing = await tx
         .select({ id: branches.id })
         .from(branches)
-        .where(and(eq(branches.companyId, companyId), eq(branches.code, code)))
+        .where(and(eq(branches.companyId, companyId), sql`lower(btrim(${branches.code})) = lower(btrim(${code}))`))
         .limit(1);
       if (existing.length > 0) {
-        throw new AppError(409, `Branch code '${code}' already exists`, "DUPLICATE_CODE");
+        throw new AppError(409, `Branch code '${code}' already exists`, "DUPLICATE_BRANCH_CODE", {
+          field: "code",
+          messageEn: `A branch with code '${code}' already exists in your company.`,
+          messageAr: `يوجد فرع بنفس الكود '${code}' بالفعل في شركتك.`,
+        });
+      }
+
+      const existingName = await tx
+        .select({ id: branches.id })
+        .from(branches)
+        .where(
+          and(
+            eq(branches.companyId, companyId),
+            sql`lower(btrim(${branches.name})) = lower(btrim(${parsed.data.name}))`
+          )
+        )
+        .limit(1);
+      if (existingName.length > 0) {
+        throw new AppError(409, `Branch name '${parsed.data.name}' already exists`, "DUPLICATE_BRANCH_NAME", {
+          field: "name",
+          messageEn: `A branch with name '${parsed.data.name}' already exists in your company.`,
+          messageAr: `يوجد فرع بنفس الاسم '${parsed.data.name}' بالفعل في شركتك.`,
+        });
       }
 
       if (parsed.data.isDefault) {
@@ -200,14 +222,44 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
         throw new AppError(404, "Branch not found", "NOT_FOUND");
       }
 
-      if (parsed.data.code && parsed.data.code !== current.code) {
+      if (parsed.data.code && parsed.data.code.trim().toLowerCase() !== current.code.trim().toLowerCase()) {
         const dup = await tx
           .select({ id: branches.id })
           .from(branches)
-          .where(and(eq(branches.companyId, companyId), eq(branches.code, parsed.data.code)))
+          .where(
+            and(
+              eq(branches.companyId, companyId),
+              sql`lower(btrim(${branches.code})) = lower(btrim(${parsed.data.code}))`
+            )
+          )
           .limit(1);
         if (dup.length > 0) {
-          throw new AppError(409, `Branch code '${parsed.data.code}' is already in use`, "DUPLICATE_CODE");
+          throw new AppError(409, `Branch code '${parsed.data.code}' is already in use`, "DUPLICATE_BRANCH_CODE", {
+            field: "code",
+            messageEn: `A branch with code '${parsed.data.code}' already exists in your company.`,
+            messageAr: `يوجد فرع بنفس الكود '${parsed.data.code}' بالفعل في شركتك.`,
+          });
+        }
+      }
+
+      if (parsed.data.name && parsed.data.name.trim().toLowerCase() !== current.name.trim().toLowerCase()) {
+        const dupName = await tx
+          .select({ id: branches.id })
+          .from(branches)
+          .where(
+            and(
+              eq(branches.companyId, companyId),
+              sql`${branches.id} <> ${branchId}`,
+              sql`lower(btrim(${branches.name})) = lower(btrim(${parsed.data.name}))`
+            )
+          )
+          .limit(1);
+        if (dupName.length > 0) {
+          throw new AppError(409, `Branch name '${parsed.data.name}' is already in use`, "DUPLICATE_BRANCH_NAME", {
+            field: "name",
+            messageEn: `A branch with name '${parsed.data.name}' already exists in your company.`,
+            messageAr: `يوجد فرع بنفس الاسم '${parsed.data.name}' بالفعل في شركتك.`,
+          });
         }
       }
 

@@ -95,18 +95,54 @@ export async function createVendor(
   ipAddress?: string
 ) {
   const companyId = actorCompanyId(actor);
+  const { confirmDuplicate, ...vendorFields } = data;
   return db.transaction(async (tx) => {
-    const code = data.code || (await nextDocNumber(tx, "VEND", "VEN-", null, companyId));
+    const code = (vendorFields.code || (await nextDocNumber(tx, "VEND", "VEN-", null, companyId))).trim();
     const dup = await tx
       .select({ id: vendors.id })
       .from(vendors)
-      .where(and(eq(vendors.companyId, companyId), eq(vendors.code, code)))
+      .where(and(eq(vendors.companyId, companyId), sql`lower(btrim(${vendors.code})) = lower(btrim(${code}))`))
       .limit(1);
     if (dup.length > 0) {
-      throw new AppError(409, `Vendor code '${code}' already exists`, "DUPLICATE_CODE");
+      throw new AppError(409, `Vendor code '${code}' already exists`, "DUPLICATE_VENDOR_CODE", {
+        field: "code",
+        messageEn: `Vendor code '${code}' already exists in your company.`,
+        messageAr: `يوجد مورد بنفس الكود '${code}' بالفعل في شركتك.`,
+      });
     }
 
-    const [row] = await tx.insert(vendors).values({ ...data, companyId, code }).returning();
+    const normalizedTax = (vendorFields.taxNumber ?? "").trim();
+    if (normalizedTax && !confirmDuplicate) {
+      const [dupTax] = await tx
+        .select({ id: vendors.id, code: vendors.code, name: vendors.name })
+        .from(vendors)
+        .where(
+          and(
+            eq(vendors.companyId, companyId),
+            sql`btrim(${vendors.taxNumber}) <> '' AND lower(btrim(${vendors.taxNumber})) = lower(btrim(${normalizedTax}))`
+          )
+        )
+        .limit(1);
+      if (dupTax) {
+        throw new AppError(
+          409,
+          `Tax registration number '${normalizedTax}' is already used by vendor '${dupTax.name}' (${dupTax.code}). Resubmit with confirmDuplicate=true to proceed.`,
+          "DUPLICATE_TAX_NUMBER_WARNING",
+          {
+            field: "taxNumber",
+            taxNumber: normalizedTax,
+            existingId: dupTax.id,
+            existingCode: dupTax.code,
+            existingName: dupTax.name,
+            canOverride: true,
+            messageEn: `Tax registration number '${normalizedTax}' is already used by vendor '${dupTax.name}' (${dupTax.code}).`,
+            messageAr: `رقم التسجيل الضريبي '${normalizedTax}' مستخدم بالفعل لدى المورد '${dupTax.name}' (${dupTax.code}).`,
+          }
+        );
+      }
+    }
+
+    const [row] = await tx.insert(vendors).values({ ...vendorFields, companyId, code }).returning();
     await writeAuditLog(tx, {
       companyId,
       userId: actor.id,
@@ -130,6 +166,7 @@ export async function updateVendor(
   ipAddress?: string
 ) {
   const companyId = actorCompanyId(actor);
+  const { confirmDuplicate, ...vendorFields } = data;
   return db.transaction(async (tx) => {
     const [current] = await tx
       .select()
@@ -137,19 +174,61 @@ export async function updateVendor(
       .where(and(eq(vendors.id, id), eq(vendors.companyId, companyId)))
       .limit(1);
     if (!current) throw new AppError(404, "Vendor not found", "NOT_FOUND");
-    if (data.code && data.code !== current.code) {
+    if (vendorFields.code && vendorFields.code.trim().toLowerCase() !== current.code.trim().toLowerCase()) {
       const dup = await tx
         .select({ id: vendors.id })
         .from(vendors)
-        .where(and(eq(vendors.companyId, companyId), eq(vendors.code, data.code)))
+        .where(
+          and(
+            eq(vendors.companyId, companyId),
+            sql`lower(btrim(${vendors.code})) = lower(btrim(${vendorFields.code}))`
+          )
+        )
         .limit(1);
       if (dup.length > 0) {
-        throw new AppError(409, `Vendor code '${data.code}' already exists`, "DUPLICATE_CODE");
+        throw new AppError(409, `Vendor code '${vendorFields.code}' already exists`, "DUPLICATE_VENDOR_CODE", {
+          field: "code",
+          messageEn: `Vendor code '${vendorFields.code}' already exists in your company.`,
+          messageAr: `يوجد مورد بنفس الكود '${vendorFields.code}' بالفعل في شركتك.`,
+        });
       }
     }
+
+    const nextTax = (vendorFields.taxNumber ?? "").trim();
+    if (vendorFields.taxNumber !== undefined && nextTax && !confirmDuplicate) {
+      const [dupTax] = await tx
+        .select({ id: vendors.id, code: vendors.code, name: vendors.name })
+        .from(vendors)
+        .where(
+          and(
+            eq(vendors.companyId, companyId),
+            sql`${vendors.id} <> ${id}`,
+            sql`btrim(${vendors.taxNumber}) <> '' AND lower(btrim(${vendors.taxNumber})) = lower(btrim(${nextTax}))`
+          )
+        )
+        .limit(1);
+      if (dupTax) {
+        throw new AppError(
+          409,
+          `Tax registration number '${nextTax}' is already used by vendor '${dupTax.name}' (${dupTax.code}). Resubmit with confirmDuplicate=true to proceed.`,
+          "DUPLICATE_TAX_NUMBER_WARNING",
+          {
+            field: "taxNumber",
+            taxNumber: nextTax,
+            existingId: dupTax.id,
+            existingCode: dupTax.code,
+            existingName: dupTax.name,
+            canOverride: true,
+            messageEn: `Tax registration number '${nextTax}' is already used by vendor '${dupTax.name}' (${dupTax.code}).`,
+            messageAr: `رقم التسجيل الضريبي '${nextTax}' مستخدم بالفعل لدى المورد '${dupTax.name}' (${dupTax.code}).`,
+          }
+        );
+      }
+    }
+
     const [row] = await tx
       .update(vendors)
-      .set({ ...data, updatedAt: new Date() })
+      .set({ ...vendorFields, updatedAt: new Date() })
       .where(and(eq(vendors.id, id), eq(vendors.companyId, companyId)))
       .returning();
     await writeAuditLog(tx, {

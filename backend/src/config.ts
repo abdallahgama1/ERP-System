@@ -117,6 +117,10 @@ export const env = {
   SENTRY_TRACES_SAMPLE_RATE: parseRateEnv(process.env.SENTRY_TRACES_SAMPLE_RATE, 0),
   CSV_IMPORT_MAX_ROWS: parseIntEnv(process.env.CSV_IMPORT_MAX_ROWS, 10_000),
   CSV_IMPORT_MAX_BYTES: parseIntEnv(process.env.CSV_IMPORT_MAX_BYTES, 5 * 1024 * 1024),
+  IDEMPOTENCY_REQUIRED: parseBoolEnv(process.env.IDEMPOTENCY_REQUIRED, false),
+  IDEMPOTENCY_TTL_HOURS: parseIntEnv(process.env.IDEMPOTENCY_TTL_HOURS, 24),
+  IDEMPOTENCY_IN_PROGRESS_TIMEOUT_MS: parseIntEnv(process.env.IDEMPOTENCY_IN_PROGRESS_TIMEOUT_MS, 60_000),
+  IDEMPOTENCY_WAIT_TIMEOUT_MS: parseIntEnv(process.env.IDEMPOTENCY_WAIT_TIMEOUT_MS, 25_000),
   BACKUP_STATUS_FILE: (process.env.BACKUP_STATUS_FILE ?? "/var/backups/count-it-keep-it/last-backup-status.json").trim(),
   BACKUP_MAX_AGE_HOURS: parseIntEnv(process.env.BACKUP_MAX_AGE_HOURS, 26),
   BACKUP_S3_BUCKET: (process.env.BACKUP_S3_BUCKET ?? "").trim(),
@@ -161,6 +165,23 @@ export function getCsvImportLimits(): { maxRows: number; maxBytes: number } {
   return {
     maxRows: parseIntEnv(process.env.CSV_IMPORT_MAX_ROWS, env.CSV_IMPORT_MAX_ROWS),
     maxBytes: parseIntEnv(process.env.CSV_IMPORT_MAX_BYTES, env.CSV_IMPORT_MAX_BYTES),
+  };
+}
+
+export function getIdempotencyConfig(): {
+  required: boolean;
+  ttlHours: number;
+  inProgressTimeoutMs: number;
+  waitTimeoutMs: number;
+} {
+  return {
+    required: parseBoolEnv(process.env.IDEMPOTENCY_REQUIRED, env.IDEMPOTENCY_REQUIRED),
+    ttlHours: parseIntEnv(process.env.IDEMPOTENCY_TTL_HOURS, env.IDEMPOTENCY_TTL_HOURS),
+    inProgressTimeoutMs: parseIntEnv(
+      process.env.IDEMPOTENCY_IN_PROGRESS_TIMEOUT_MS,
+      env.IDEMPOTENCY_IN_PROGRESS_TIMEOUT_MS
+    ),
+    waitTimeoutMs: parseIntEnv(process.env.IDEMPOTENCY_WAIT_TIMEOUT_MS, env.IDEMPOTENCY_WAIT_TIMEOUT_MS),
   };
 }
 

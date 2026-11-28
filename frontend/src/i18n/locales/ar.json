@@ -1709,5 +1709,32 @@
     "sentSuccess": "تم إرسال البريد إلى {{count}} مستلم",
     "invalidRecipients": "أدخل بريدًا إلكترونيًا صالحًا واحدًا على الأقل.",
     "invalidSubject": "الموضوع مطلوب ولا يجب أن يحتوي على فواصل أسطر."
+  },
+  "errors": {
+    "DUPLICATE_BRANCH_CODE": "يوجد فرع آخر بنفس الكود في شركتك بالفعل.",
+    "DUPLICATE_BRANCH_NAME": "يوجد فرع آخر بنفس الاسم في شركتك بالفعل.",
+    "DUPLICATE_PRODUCT_SKU": "يوجد منتج آخر بنفس رمز SKU في شركتك بالفعل.",
+    "DUPLICATE_PRODUCT_BARCODE": "يوجد منتج آخر بنفس الباركود في شركتك بالفعل.",
+    "DUPLICATE_CUSTOMER_CODE": "يوجد عميل آخر بنفس الكود في شركتك بالفعل.",
+    "DUPLICATE_VENDOR_CODE": "يوجد مورد آخر بنفس الكود في شركتك بالفعل.",
+    "DUPLICATE_ACCOUNT_CODE": "يوجد حساب آخر بنفس الكود في شجرة الحسابات.",
+    "DUPLICATE_COST_CENTER_CODE": "يوجد مركز تكلفة آخر بنفس الكود في شركتك بالفعل.",
+    "DUPLICATE_COST_CENTER_NAME": "يوجد مركز تكلفة آخر بنفس الاسم في شركتك بالفعل.",
+    "DUPLICATE_TAX_CODE": "يوجد كود ضريبي آخر بنفس الرمز في شركتك بالفعل.",
+    "DUPLICATE_TREASURY_CODE": "يوجد حساب خزينة أو بنك آخر بنفس الكود في شركتك بالفعل.",
+    "DUPLICATE_TREASURY_NAME": "يوجد حساب خزينة أو بنك آخر بنفس الاسم في شركتك بالفعل.",
+    "DUPLICATE_TREASURY_IBAN": "يوجد حساب خزينة أو بنك آخر بنفس رقم IBAN في شركتك بالفعل.",
+    "DUPLICATE_TREASURY_GL_ACCOUNT": "حساب الأستاذ العام هذا مرتبط بالفعل بحساب خزينة آخر.",
+    "DUPLICATE_ASSET_CODE": "يوجد أصل ثابت آخر بنفس الكود في شركتك بالفعل.",
+    "DUPLICATE_ASSET_SERIAL": "يوجد أصل ثابت آخر بنفس الرقم التسلسلي في شركتك بالفعل.",
+    "DUPLICATE_TERMINAL_CODE": "توجد نقطة بيع أخرى بنفس الكود في شركتك بالفعل.",
+    "DUPLICATE_TERMINAL_NAME": "توجد نقطة بيع أخرى بنفس الاسم في شركتك بالفعل.",
+    "DUPLICATE_TAXONOMY_NAME": "يوجد عنصر آخر بنفس الاسم في هذا التصنيف بالفعل.",
+    "DUPLICATE_ROLE_NAME": "يوجد دور آخر بنفس الاسم في شركتك بالفعل.",
+    "DUPLICATE_TAX_NUMBER_WARNING": "رقم التسجيل الضريبي هذا مستخدم بالفعل في سجل آخر. أكّد إذا كنت لا تزال تريد الحفظ.",
+    "DUPLICATE_RECORD": "يوجد سجل آخر بنفس المعرّف الفريد بالفعل.",
+    "IDEMPOTENCY_KEY_REQUIRED": "ترويسة Idempotency-Key مطلوبة لتنفيذ هذه العملية.",
+    "IDEMPOTENCY_KEY_REUSE_MISMATCH": "تم استخدام مفتاح Idempotency-Key هذا مسبقًا مع بيانات طلب مختلفة.",
+    "IDEMPOTENCY_IN_PROGRESS": "هذا الطلب لا يزال قيد التنفيذ. يرجى الانتظار قليلًا قبل إعادة المحاولة."
   }
 }

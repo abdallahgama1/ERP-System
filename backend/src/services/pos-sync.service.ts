@@ -55,9 +55,11 @@ export async function syncOfflinePosBatch(
           .from(idempotencyKeys)
           .where(
             and(
+              eq(idempotencyKeys.companyId, companyId),
               eq(idempotencyKeys.method, "POST"),
               eq(idempotencyKeys.path, "/api/pos/sync"),
-              eq(idempotencyKeys.key, idempotencyKey)
+              eq(idempotencyKeys.key, idempotencyKey),
+              eq(idempotencyKeys.state, "completed")
             )
           )
           .limit(1);
@@ -100,14 +102,19 @@ export async function syncOfflinePosBatch(
         await tx
           .insert(idempotencyKeys)
           .values({
+            companyId,
             userId: actor.id,
             key: idempotencyKey,
             method: "POST",
             path: "/api/pos/sync",
+            requestHash: `pos:${txInput.terminalId}:${clientTxId}`,
+            state: "completed",
             posTerminalId: txInput.terminalId,
             statusCode: 201,
             responseBody: receipt,
+            lockedUntil: null,
             expiresAt,
+            updatedAt: new Date(),
           })
           .onConflictDoNothing();
 

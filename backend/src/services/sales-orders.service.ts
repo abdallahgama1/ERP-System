@@ -91,32 +91,68 @@ export async function createCustomer(
   ipAddress?: string
 ) {
   const companyId = actorCompanyId(actor);
+  const { confirmDuplicate, ...customerFields } = data;
   const row = await db.transaction(async (tx) => {
-    const code = data.code || (await nextDocNumber(tx, "CUST", "CUS-", null, companyId));
+    const code = (customerFields.code || (await nextDocNumber(tx, "CUST", "CUS-", null, companyId))).trim();
     const dup = await tx
       .select({ id: customers.id })
       .from(customers)
-      .where(and(eq(customers.companyId, companyId), eq(customers.code, code)))
+      .where(and(eq(customers.companyId, companyId), sql`lower(btrim(${customers.code})) = lower(btrim(${code}))`))
       .limit(1);
     if (dup.length > 0) {
-      throw new AppError(409, `Customer code '${code}' already exists`, "DUPLICATE_CODE");
+      throw new AppError(409, `Customer code '${code}' already exists`, "DUPLICATE_CUSTOMER_CODE", {
+        field: "code",
+        messageEn: `Customer code '${code}' already exists in your company.`,
+        messageAr: `يوجد عميل بنفس الكود '${code}' بالفعل في شركتك.`,
+      });
+    }
+
+    const normalizedTax = (customerFields.taxNumber ?? "").trim();
+    if (normalizedTax && !confirmDuplicate) {
+      const [dupTax] = await tx
+        .select({ id: customers.id, code: customers.code, name: customers.name, taxNumber: customers.taxNumber })
+        .from(customers)
+        .where(
+          and(
+            eq(customers.companyId, companyId),
+            sql`btrim(${customers.taxNumber}) <> '' AND lower(btrim(${customers.taxNumber})) = lower(btrim(${normalizedTax}))`
+          )
+        )
+        .limit(1);
+      if (dupTax) {
+        throw new AppError(
+          409,
+          `Tax registration number '${normalizedTax}' is already used by customer '${dupTax.name}' (${dupTax.code}). Resubmit with confirmDuplicate=true to proceed.`,
+          "DUPLICATE_TAX_NUMBER_WARNING",
+          {
+            field: "taxNumber",
+            taxNumber: normalizedTax,
+            existingId: dupTax.id,
+            existingCode: dupTax.code,
+            existingName: dupTax.name,
+            canOverride: true,
+            messageEn: `Tax registration number '${normalizedTax}' is already used by customer '${dupTax.name}' (${dupTax.code}).`,
+            messageAr: `رقم التسجيل الضريبي '${normalizedTax}' مستخدم بالفعل لدى العميل '${dupTax.name}' (${dupTax.code}).`,
+          }
+        );
+      }
     }
 
     const resolvedReceiverType: "B" | "P" | "F" =
-      data.etaReceiverType ??
-      (data.company?.trim() || data.taxNumber?.trim() ? "B" : "P");
+      customerFields.etaReceiverType ??
+      (customerFields.company?.trim() || normalizedTax ? "B" : "P");
 
     const [inserted] = await tx
       .insert(customers)
       .values({
-        ...data,
+        ...customerFields,
         etaReceiverType: resolvedReceiverType,
         companyId,
         code,
         creditLimit:
-          data.creditLimit === null || data.creditLimit === undefined
+          customerFields.creditLimit === null || customerFields.creditLimit === undefined
             ? null
-            : toNumeric(data.creditLimit, 4),
+            : toNumeric(customerFields.creditLimit, 4),
       })
       .returning();
 
@@ -145,6 +181,7 @@ export async function updateCustomer(
   ipAddress?: string
 ) {
   const companyId = actorCompanyId(actor);
+  const { confirmDuplicate, ...customerFields } = data;
   const row = await db.transaction(async (tx) => {
     const [current] = await tx
       .select()
@@ -152,26 +189,68 @@ export async function updateCustomer(
       .where(and(eq(customers.id, id), eq(customers.companyId, companyId)))
       .limit(1);
     if (!current) throw new AppError(404, "Customer not found", "NOT_FOUND");
-    if (data.code && data.code !== current.code) {
+    if (customerFields.code && customerFields.code.trim().toLowerCase() !== current.code.trim().toLowerCase()) {
       const dup = await tx
         .select({ id: customers.id })
         .from(customers)
-        .where(and(eq(customers.companyId, companyId), eq(customers.code, data.code)))
+        .where(
+          and(
+            eq(customers.companyId, companyId),
+            sql`lower(btrim(${customers.code})) = lower(btrim(${customerFields.code}))`
+          )
+        )
         .limit(1);
       if (dup.length > 0) {
-        throw new AppError(409, `Customer code '${data.code}' already exists`, "DUPLICATE_CODE");
+        throw new AppError(409, `Customer code '${customerFields.code}' already exists`, "DUPLICATE_CUSTOMER_CODE", {
+          field: "code",
+          messageEn: `Customer code '${customerFields.code}' already exists in your company.`,
+          messageAr: `يوجد عميل بنفس الكود '${customerFields.code}' بالفعل في شركتك.`,
+        });
       }
     }
+
+    const nextTax = (customerFields.taxNumber ?? "").trim();
+    if (customerFields.taxNumber !== undefined && nextTax && !confirmDuplicate) {
+      const [dupTax] = await tx
+        .select({ id: customers.id, code: customers.code, name: customers.name })
+        .from(customers)
+        .where(
+          and(
+            eq(customers.companyId, companyId),
+            sql`${customers.id} <> ${id}`,
+            sql`btrim(${customers.taxNumber}) <> '' AND lower(btrim(${customers.taxNumber})) = lower(btrim(${nextTax}))`
+          )
+        )
+        .limit(1);
+      if (dupTax) {
+        throw new AppError(
+          409,
+          `Tax registration number '${nextTax}' is already used by customer '${dupTax.name}' (${dupTax.code}). Resubmit with confirmDuplicate=true to proceed.`,
+          "DUPLICATE_TAX_NUMBER_WARNING",
+          {
+            field: "taxNumber",
+            taxNumber: nextTax,
+            existingId: dupTax.id,
+            existingCode: dupTax.code,
+            existingName: dupTax.name,
+            canOverride: true,
+            messageEn: `Tax registration number '${nextTax}' is already used by customer '${dupTax.name}' (${dupTax.code}).`,
+            messageAr: `رقم التسجيل الضريبي '${nextTax}' مستخدم بالفعل لدى العميل '${dupTax.name}' (${dupTax.code}).`,
+          }
+        );
+      }
+    }
+
     const [updated] = await tx
       .update(customers)
       .set({
-        ...data,
+        ...customerFields,
         creditLimit:
-          data.creditLimit === undefined
+          customerFields.creditLimit === undefined
             ? current.creditLimit
-            : data.creditLimit === null
+            : customerFields.creditLimit === null
               ? null
-              : toNumeric(data.creditLimit, 4),
+              : toNumeric(customerFields.creditLimit, 4),
         updatedAt: new Date(),
       })
       .where(and(eq(customers.id, id), eq(customers.companyId, companyId)))

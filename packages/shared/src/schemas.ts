@@ -200,6 +200,7 @@ export const vendorSchema = z.object({
   currency: z.string().trim().max(10).optional().default("USD"),
   paymentTermsDays: z.number().int().min(0).max(365).optional().default(30),
   notes: z.string().trim().max(500).optional().default(""),
+  confirmDuplicate: z.boolean().optional(),
 });
 
 export const poLineSchema = z.object({
@@ -322,6 +323,7 @@ export const customerSchema = z.object({
   paymentTermsDays: z.number().int().min(0).max(365).optional().default(30),
   creditLimit: z.number().min(0).nullable().optional().default(null),
   notes: z.string().trim().max(500).optional().default(""),
+  confirmDuplicate: z.boolean().optional(),
 });
 
 export const salesOrderSchema = z.object({

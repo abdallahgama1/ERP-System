@@ -267,10 +267,19 @@ export async function createProduct(
     const dup = await tx
       .select({ id: products.id })
       .from(products)
-      .where(and(eq(products.companyId, companyId), eq(products.sku, data.sku)))
+      .where(
+        and(
+          eq(products.companyId, companyId),
+          sql`lower(btrim(${products.sku})) = lower(btrim(${data.sku}))`
+        )
+      )
       .limit(1);
     if (dup.length > 0) {
-      throw new AppError(409, `SKU '${data.sku}' already exists`, "DUPLICATE_SKU");
+      throw new AppError(409, "A product with this SKU already exists in your company.", "DUPLICATE_PRODUCT_SKU", {
+        field: "sku",
+        messageEn: "A product with this SKU already exists in your company.",
+        messageAr: "يوجد منتج آخر بنفس رمز SKU في شركتك بالفعل.",
+      });
     }
 
     const resolvedTracking = resolveProductTrackingMode({
@@ -449,14 +458,23 @@ export async function updateProduct(
       .limit(1);
     if (!current) throw new AppError(404, "Product not found", "NOT_FOUND");
 
-    if (data.sku && data.sku !== current.sku) {
+    if (data.sku && data.sku.trim().toLowerCase() !== current.sku.trim().toLowerCase()) {
       const dup = await tx
         .select({ id: products.id })
         .from(products)
-        .where(and(eq(products.companyId, companyId), eq(products.sku, data.sku)))
+        .where(
+          and(
+            eq(products.companyId, companyId),
+            sql`lower(btrim(${products.sku})) = lower(btrim(${data.sku}))`
+          )
+        )
         .limit(1);
       if (dup.length > 0) {
-        throw new AppError(409, `SKU '${data.sku}' is already in use`, "DUPLICATE_SKU");
+        throw new AppError(409, "A product with this SKU already exists in your company.", "DUPLICATE_PRODUCT_SKU", {
+          field: "sku",
+          messageEn: "A product with this SKU already exists in your company.",
+          messageAr: "يوجد منتج آخر بنفس رمز SKU في شركتك بالفعل.",
+        });
       }
     }
 

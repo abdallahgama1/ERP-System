@@ -1715,5 +1715,32 @@
     "sentSuccess": "Email sent to {{count}} recipient(s)",
     "invalidRecipients": "Enter at least one valid email address.",
     "invalidSubject": "Subject is required and cannot contain line breaks."
+  },
+  "errors": {
+    "DUPLICATE_BRANCH_CODE": "A branch with this code already exists in your company.",
+    "DUPLICATE_BRANCH_NAME": "A branch with this name already exists in your company.",
+    "DUPLICATE_PRODUCT_SKU": "A product with this SKU already exists in your company.",
+    "DUPLICATE_PRODUCT_BARCODE": "A product with this barcode already exists in your company.",
+    "DUPLICATE_CUSTOMER_CODE": "A customer with this code already exists in your company.",
+    "DUPLICATE_VENDOR_CODE": "A vendor with this code already exists in your company.",
+    "DUPLICATE_ACCOUNT_CODE": "An account with this code already exists in your chart of accounts.",
+    "DUPLICATE_COST_CENTER_CODE": "A cost center with this code already exists in your company.",
+    "DUPLICATE_COST_CENTER_NAME": "A cost center with this name already exists in your company.",
+    "DUPLICATE_TAX_CODE": "A tax code with this code already exists in your company.",
+    "DUPLICATE_TREASURY_CODE": "A treasury account with this code already exists in your company.",
+    "DUPLICATE_TREASURY_NAME": "A treasury account with this name already exists in your company.",
+    "DUPLICATE_TREASURY_IBAN": "A treasury account with this IBAN already exists in your company.",
+    "DUPLICATE_TREASURY_GL_ACCOUNT": "This GL account is already linked to another treasury account.",
+    "DUPLICATE_ASSET_CODE": "A fixed asset with this asset code already exists in your company.",
+    "DUPLICATE_ASSET_SERIAL": "A fixed asset with this serial number already exists in your company.",
+    "DUPLICATE_TERMINAL_CODE": "A POS terminal with this code already exists in your company.",
+    "DUPLICATE_TERMINAL_NAME": "A POS terminal with this name already exists in your company.",
+    "DUPLICATE_TAXONOMY_NAME": "An item with this name already exists in this category.",
+    "DUPLICATE_ROLE_NAME": "A role with this name already exists in your company.",
+    "DUPLICATE_TAX_NUMBER_WARNING": "This tax registration number is already used by another record. Confirm if you still want to save.",
+    "DUPLICATE_RECORD": "A record with the same unique identifier already exists.",
+    "IDEMPOTENCY_KEY_REQUIRED": "Idempotency-Key header is required for this operation.",
+    "IDEMPOTENCY_KEY_REUSE_MISMATCH": "This Idempotency-Key was already used with a different request payload.",
+    "IDEMPOTENCY_IN_PROGRESS": "This request is still in progress. Please wait a moment before retrying."
   }
 }
