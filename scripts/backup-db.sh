@@ -10,13 +10,25 @@ optionally archives the erp_uploads volume or local uploads directory (.tar.gz +
 and applies retention pruning.
 
 Environment variables:
-  DATABASE_URL           PostgreSQL connection URL (falls back to backend/.env if unset)
-  BACKUP_DIR             Output directory (default: ./backups)
-  BACKUP_RETENTION_DAYS  Delete backups older than N days (default: 14, 0 disables pruning)
-  BACKUP_MIN_KEEP        Minimum number of most recent backups to keep (default: 3)
-  BACKUP_UPLOADS         Backup erp_uploads volume/dir: auto | true | false (default: auto)
-  UPLOADS_VOLUME         Docker volume name for attachments (auto-detects *erp_uploads if unset)
-  STORAGE_LOCAL_DIR      Host uploads directory fallback when not using a Docker volume
+  DATABASE_URL                   PostgreSQL connection URL (falls back to backend/.env if unset)
+  BACKUP_DIR                     Output directory (default: ./backups)
+  BACKUP_RETENTION_DAYS          Delete local backups older than N days (default: 14, 0 disables pruning)
+  BACKUP_MIN_KEEP                Minimum number of most recent local backups to keep (default: 3)
+  BACKUP_UPLOADS                 Backup erp_uploads volume/dir: auto | true | false (default: auto)
+  UPLOADS_VOLUME                 Docker volume name for attachments (auto-detects *erp_uploads if unset)
+  STORAGE_LOCAL_DIR              Host uploads directory fallback when not using a Docker volume
+  BACKUP_STATUS_FILE             JSON freshness status file path (default: <BACKUP_DIR>/last-backup-status.json)
+  BACKUP_S3_BUCKET               Off-site S3 / Cloudflare R2 / MinIO bucket (enables encrypted off-site sync)
+  BACKUP_S3_ENDPOINT             Custom S3 endpoint (e.g. https://<acct>.r2.cloudflarestorage.com or http://minio:9000)
+  BACKUP_S3_REGION               S3 region (default: auto)
+  BACKUP_S3_ACCESS_KEY_ID        S3 access key ID
+  BACKUP_S3_SECRET_ACCESS_KEY    S3 secret access key
+  BACKUP_S3_FORCE_PATH_STYLE     true for MinIO, false for R2/AWS S3 (default: false)
+  BACKUP_S3_PREFIX               Object key prefix (default: backups/count-it-keep-it)
+  BACKUP_ENCRYPTION_KEY          Customer-held 32-byte key (64 hex or base64) for AES-256-GCM off-site encryption
+  BACKUP_OFFSITE_RETENTION_DAYS  Off-site retention in days (default: 30)
+  BACKUP_OFFSITE_MIN_KEEP        Minimum off-site backup sets to retain (default: 7)
+  BACKUP_OFFSITE_REQUIRED        Fail if BACKUP_S3_BUCKET is unset (default: false)
 EOF
 }
 
@@ -68,6 +80,12 @@ MIN_KEEP="${BACKUP_MIN_KEEP:-3}"
 BACKUP_UPLOADS="${BACKUP_UPLOADS:-auto}"
 UPLOADS_VOLUME="${UPLOADS_VOLUME:-}"
 STORAGE_LOCAL_DIR="${STORAGE_LOCAL_DIR:-}"
+BACKUP_STATUS_FILE="${BACKUP_STATUS_FILE:-${BACKUP_DIR}/last-backup-status.json}"
+BACKUP_S3_BUCKET="${BACKUP_S3_BUCKET:-}"
+BACKUP_OFFSITE_REQUIRED="${BACKUP_OFFSITE_REQUIRED:-false}"
+UPLOADS_WRITTEN="false"
+UPLOADS_SHA=""
+UPLOADS_SIZE="0"
 
 if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || ! [[ "$MIN_KEEP" =~ ^[0-9]+$ ]]; then
   echo "Error: BACKUP_RETENTION_DAYS and BACKUP_MIN_KEEP must be non-negative integers." >&2
@@ -152,6 +170,7 @@ if [[ "$BACKUP_UPLOADS" != "false" ]]; then
     )
     UPLOADS_SHA="$(awk '{print $1}' "${UPLOADS_FILE}.sha256")"
     UPLOADS_SIZE="$(wc -c < "$UPLOADS_FILE" | tr -d '[:space:]')"
+    UPLOADS_WRITTEN="true"
     echo "Uploads volume backup completed:"
     echo "  Volume:   $RESOLVED_VOLUME"
     echo "  File:     $UPLOADS_FILE"
@@ -168,6 +187,7 @@ if [[ "$BACKUP_UPLOADS" != "false" ]]; then
     )
     UPLOADS_SHA="$(awk '{print $1}' "${UPLOADS_FILE}.sha256")"
     UPLOADS_SIZE="$(wc -c < "$UPLOADS_FILE" | tr -d '[:space:]')"
+    UPLOADS_WRITTEN="true"
     echo "Local uploads backup completed:"
     echo "  Dir:      $STORAGE_LOCAL_DIR"
     echo "  File:     $UPLOADS_FILE"
@@ -213,4 +233,67 @@ if (( RETENTION_DAYS > 0 )); then
       echo "Pruned $PRUNED_UPLOADS uploads archive(s) older than ${RETENTION_DAYS} days (kept at least ${MIN_KEEP} most recent)."
     fi
   fi
+fi
+
+COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STATUS_TMP="${BACKUP_STATUS_FILE}.tmp.$$"
+mkdir -p "$(dirname "$BACKUP_STATUS_FILE")"
+if [[ "$UPLOADS_WRITTEN" == "true" ]]; then
+  UPLOADS_JSON="\"${UPLOADS_FILENAME}\""
+  UPLOADS_SHA_JSON="\"${UPLOADS_SHA}\""
+  UPLOADS_SIZE_JSON="${UPLOADS_SIZE}"
+else
+  UPLOADS_JSON="null"
+  UPLOADS_SHA_JSON="null"
+  UPLOADS_SIZE_JSON="null"
+fi
+
+cat > "$STATUS_TMP" <<EOF
+{
+  "status": "ok",
+  "timestamp": "${TIMESTAMP}",
+  "completedAt": "${COMPLETED_AT}",
+  "dbFile": "${FILENAME}",
+  "dbSizeBytes": ${SIZE_BYTES},
+  "dbSha256": "${CHECKSUM}",
+  "uploadsFile": ${UPLOADS_JSON},
+  "uploadsSizeBytes": ${UPLOADS_SIZE_JSON},
+  "uploadsSha256": ${UPLOADS_SHA_JSON},
+  "offsite": {
+    "enabled": $( [[ -n "$BACKUP_S3_BUCKET" ]] && echo "true" || echo "false" ),
+    "uploaded": false,
+    "encrypted": false,
+    "bucket": $( [[ -n "$BACKUP_S3_BUCKET" ]] && echo "\"${BACKUP_S3_BUCKET}\"" || echo "null" ),
+    "prefix": "${BACKUP_S3_PREFIX:-backups/count-it-keep-it}",
+    "uploadedAt": null,
+    "dbKey": null,
+    "uploadsKey": null
+  }
+}
+EOF
+chmod 644 "$STATUS_TMP"
+mv -f "$STATUS_TMP" "$BACKUP_STATUS_FILE"
+echo "Backup freshness status written to $BACKUP_STATUS_FILE"
+
+if [[ -n "$BACKUP_S3_BUCKET" ]]; then
+  if ! command -v node >/dev/null 2>&1; then
+    echo "Error: BACKUP_S3_BUCKET is set but 'node' is not installed for encrypted off-site upload." >&2
+    exit 1
+  fi
+  echo "Encrypting (AES-256-GCM) and syncing backup off-site to s3://${BACKUP_S3_BUCKET}/${BACKUP_S3_PREFIX:-backups/count-it-keep-it}..."
+  OFFSITE_ARGS=(
+    "${SCRIPT_DIR}/backup-offsite.mjs"
+    upload
+    --db "$BACKUP_FILE"
+    --timestamp "$TIMESTAMP"
+    --status-file "$BACKUP_STATUS_FILE"
+  )
+  if [[ "$UPLOADS_WRITTEN" == "true" ]]; then
+    OFFSITE_ARGS+=(--uploads "$UPLOADS_FILE")
+  fi
+  node "${OFFSITE_ARGS[@]}"
+  echo "Off-site encrypted S3 backup completed successfully."
+elif [[ "$BACKUP_OFFSITE_REQUIRED" == "true" ]]; then
+  echo "Error: BACKUP_OFFSITE_REQUIRED=true but BACKUP_S3_BUCKET is not configured." >&2
+  exit 1
 fi

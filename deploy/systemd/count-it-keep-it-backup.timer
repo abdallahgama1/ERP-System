@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Count It Keep It ERP Daily Backup at 02:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+Unit=count-it-keep-it-backup.service
+
+[Install]
+WantedBy=timers.target

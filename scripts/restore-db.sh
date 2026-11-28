@@ -81,6 +81,56 @@ if [[ ! -f "$BACKUP_FILE" || ! -s "$BACKUP_FILE" ]]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DECRYPT_TMP_DIR=""
+cleanup_decrypt_tmp() {
+  if [[ -n "$DECRYPT_TMP_DIR" && -d "$DECRYPT_TMP_DIR" ]]; then
+    rm -rf "$DECRYPT_TMP_DIR"
+  fi
+}
+trap cleanup_decrypt_tmp EXIT
+
+# Transparently decrypt AES-256-GCM encrypted off-site backups (*.enc) using BACKUP_ENCRYPTION_KEY
+if [[ "$BACKUP_FILE" == *.enc ]]; then
+  if ! command -v node >/dev/null 2>&1; then
+    echo "Error: 'node' is required to decrypt .enc backup files." >&2
+    exit 1
+  fi
+  DECRYPT_TMP_DIR="$(mktemp -d)"
+  PLAIN_NAME="$(basename "$BACKUP_FILE" .enc)"
+  DECRYPTED_BACKUP="${DECRYPT_TMP_DIR}/${PLAIN_NAME}"
+  echo "Decrypting AES-256-GCM backup '$BACKUP_FILE'..."
+  node "${SCRIPT_DIR}/backup-offsite.mjs" decrypt --in "$BACKUP_FILE" --out "$DECRYPTED_BACKUP"
+  if [[ -f "${BACKUP_FILE%.enc}.sha256" ]]; then
+    cp "${BACKUP_FILE%.enc}.sha256" "${DECRYPTED_BACKUP}.sha256"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DECRYPT_TMP_DIR" && sha256sum "$PLAIN_NAME" > "${PLAIN_NAME}.sha256")
+  else
+    (cd "$DECRYPT_TMP_DIR" && shasum -a 256 "$PLAIN_NAME" > "${PLAIN_NAME}.sha256")
+  fi
+  BACKUP_FILE="$DECRYPTED_BACKUP"
+fi
+
+if [[ -n "$UPLOADS_ARCHIVE" && "$UPLOADS_ARCHIVE" == *.enc ]]; then
+  if ! command -v node >/dev/null 2>&1; then
+    echo "Error: 'node' is required to decrypt .enc uploads archives." >&2
+    exit 1
+  fi
+  [[ -n "$DECRYPT_TMP_DIR" ]] || DECRYPT_TMP_DIR="$(mktemp -d)"
+  UP_PLAIN_NAME="$(basename "$UPLOADS_ARCHIVE" .enc)"
+  DECRYPTED_UPLOADS="${DECRYPT_TMP_DIR}/${UP_PLAIN_NAME}"
+  echo "Decrypting AES-256-GCM uploads archive '$UPLOADS_ARCHIVE'..."
+  node "${SCRIPT_DIR}/backup-offsite.mjs" decrypt --in "$UPLOADS_ARCHIVE" --out "$DECRYPTED_UPLOADS"
+  if [[ -f "${UPLOADS_ARCHIVE%.enc}.sha256" ]]; then
+    cp "${UPLOADS_ARCHIVE%.enc}.sha256" "${DECRYPTED_UPLOADS}.sha256"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DECRYPT_TMP_DIR" && sha256sum "$UP_PLAIN_NAME" > "${UP_PLAIN_NAME}.sha256")
+  else
+    (cd "$DECRYPT_TMP_DIR" && shasum -a 256 "$UP_PLAIN_NAME" > "${UP_PLAIN_NAME}.sha256")
+  fi
+  UPLOADS_ARCHIVE="$DECRYPTED_UPLOADS"
+fi
+
 TARGET_URL="${TARGET_DATABASE_URL:-${DATABASE_URL:-}}"
 if [[ -z "$TARGET_URL" ]]; then
   echo "Error: TARGET_DATABASE_URL (or DATABASE_URL) must be explicitly set in environment." >&2

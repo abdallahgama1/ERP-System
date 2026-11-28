@@ -1,0 +1,16 @@
+[Unit]
+Description=Count It Keep It ERP Daily Encrypted Database & Uploads Backup
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/count-it-keep-it
+EnvironmentFile=/opt/count-it-keep-it/.env
+ExecStart=/usr/local/bin/count-it-keep-it-backup
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

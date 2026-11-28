@@ -29,6 +29,7 @@ import {
   listCustomRoles,
   updateCustomRole,
 } from "../services/custom-roles.service.ts";
+import { getBackupFreshness } from "../services/backup-freshness.service.ts";
 import { runHousekeeping } from "../services/housekeeping.service.ts";
 import { runOverdueSweep } from "../services/overdue-sweep.service.ts";
 
@@ -901,5 +902,16 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       actor: req.authUser!,
       ipAddress: req.ip,
     });
+  });
+
+  app.get("/api/admin/backups/freshness", { preHandler: requireRole("admin") }, async (req, reply) => {
+    const query = req.query as { strict?: string };
+    const strict = query.strict === "true" || query.strict === "1";
+    const result = await getBackupFreshness();
+    reply.header("Cache-Control", "no-store");
+    if (strict && !result.ok) {
+      return reply.status(503).send(result);
+    }
+    return reply.status(200).send(result);
   });
 }

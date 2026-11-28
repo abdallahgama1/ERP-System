@@ -114,7 +114,30 @@ export const env = {
   SENTRY_TRACES_SAMPLE_RATE: parseRateEnv(process.env.SENTRY_TRACES_SAMPLE_RATE, 0),
   CSV_IMPORT_MAX_ROWS: parseIntEnv(process.env.CSV_IMPORT_MAX_ROWS, 10_000),
   CSV_IMPORT_MAX_BYTES: parseIntEnv(process.env.CSV_IMPORT_MAX_BYTES, 5 * 1024 * 1024),
+  BACKUP_STATUS_FILE: (process.env.BACKUP_STATUS_FILE ?? "/var/backups/count-it-keep-it/last-backup-status.json").trim(),
+  BACKUP_MAX_AGE_HOURS: parseIntEnv(process.env.BACKUP_MAX_AGE_HOURS, 26),
+  BACKUP_S3_BUCKET: (process.env.BACKUP_S3_BUCKET ?? "").trim(),
+  BACKUP_S3_REGION: (process.env.BACKUP_S3_REGION ?? "auto").trim() || "auto",
+  BACKUP_S3_ENDPOINT: (process.env.BACKUP_S3_ENDPOINT ?? "").trim().replace(/\/+$/, ""),
+  BACKUP_S3_ACCESS_KEY_ID: (process.env.BACKUP_S3_ACCESS_KEY_ID ?? "").trim(),
+  BACKUP_S3_SECRET_ACCESS_KEY: (process.env.BACKUP_S3_SECRET_ACCESS_KEY ?? "").trim(),
+  BACKUP_S3_FORCE_PATH_STYLE: parseBoolEnv(process.env.BACKUP_S3_FORCE_PATH_STYLE, false),
+  BACKUP_S3_PREFIX: (process.env.BACKUP_S3_PREFIX ?? "backups/count-it-keep-it").trim().replace(/^\/+|\/+$/g, ""),
 };
+
+export function getBackupFreshnessConfig() {
+  return {
+    statusFilePath: (process.env.BACKUP_STATUS_FILE ?? env.BACKUP_STATUS_FILE).trim(),
+    maxAgeHours: parseIntEnv(process.env.BACKUP_MAX_AGE_HOURS, env.BACKUP_MAX_AGE_HOURS),
+    s3Bucket: (process.env.BACKUP_S3_BUCKET ?? env.BACKUP_S3_BUCKET).trim(),
+    s3Region: (process.env.BACKUP_S3_REGION ?? env.BACKUP_S3_REGION).trim() || "auto",
+    s3Endpoint: (process.env.BACKUP_S3_ENDPOINT ?? env.BACKUP_S3_ENDPOINT).trim().replace(/\/+$/, ""),
+    s3AccessKeyId: (process.env.BACKUP_S3_ACCESS_KEY_ID ?? env.BACKUP_S3_ACCESS_KEY_ID).trim(),
+    s3SecretAccessKey: (process.env.BACKUP_S3_SECRET_ACCESS_KEY ?? env.BACKUP_S3_SECRET_ACCESS_KEY).trim(),
+    s3ForcePathStyle: parseBoolEnv(process.env.BACKUP_S3_FORCE_PATH_STYLE, env.BACKUP_S3_FORCE_PATH_STYLE),
+    s3Prefix: (process.env.BACKUP_S3_PREFIX ?? env.BACKUP_S3_PREFIX).trim().replace(/^\/+|\/+$/g, ""),
+  };
+}
 
 export function getCsvImportLimits(): { maxRows: number; maxBytes: number } {
   return {

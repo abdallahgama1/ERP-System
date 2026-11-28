@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Count It Keep It ERP Monthly Off-Site Restore Drill (1st of month, 04:00 UTC)
+
+[Timer]
+OnCalendar=*-*-01 04:00:00 UTC
+Persistent=true
+Unit=count-it-keep-it-restore-drill.service
+
+[Install]
+WantedBy=timers.target

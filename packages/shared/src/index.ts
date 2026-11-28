@@ -11,3 +11,4 @@ export * from "./einvoicing.ts";
 export * from "./finance.ts";
 export * from "./csv.ts";
 export * from "./imports.ts";
+export * from "./ops.ts";

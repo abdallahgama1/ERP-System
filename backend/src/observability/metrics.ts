@@ -1,7 +1,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { collectDefaultMetrics, Counter, Histogram, Registry } from "prom-client";
+import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { env } from "../config.ts";
+import { getBackupFreshness } from "../services/backup-freshness.service.ts";
 
 export const metricsRegistry = new Registry();
 
@@ -47,6 +48,24 @@ const erpHousekeepingPurgedRowsTotal = new Counter({
   name: "erp_housekeeping_purged_rows_total",
   help: "Total number of rows purged by database housekeeping",
   labelNames: ["table"] as const,
+  registers: [metricsRegistry],
+});
+
+const erpBackupLastSuccessTimestampSeconds = new Gauge({
+  name: "erp_backup_last_success_timestamp_seconds",
+  help: "Unix timestamp (seconds) of the last successful backup (0 when missing)",
+  registers: [metricsRegistry],
+});
+
+const erpBackupAgeSeconds = new Gauge({
+  name: "erp_backup_age_seconds",
+  help: "Age in seconds since the last successful backup (-1 when missing)",
+  registers: [metricsRegistry],
+});
+
+const erpBackupFreshnessOk = new Gauge({
+  name: "erp_backup_freshness_ok",
+  help: "1 when last successful backup is within BACKUP_MAX_AGE_HOURS (default 26h), 0 otherwise",
   registers: [metricsRegistry],
 });
 
@@ -127,6 +146,17 @@ export async function metricsRoutes(app: FastifyInstance): Promise<void> {
     if (!isValidBearerToken(req.headers.authorization, metricsToken)) {
       reply.header("WWW-Authenticate", 'Bearer realm="metrics"');
       return reply.status(401).send({ message: "Unauthorized", code: "UNAUTHORIZED" });
+    }
+
+    try {
+      const freshness = await getBackupFreshness();
+      erpBackupFreshnessOk.set(freshness.ok ? 1 : 0);
+      erpBackupAgeSeconds.set(freshness.ageSeconds ?? -1);
+      erpBackupLastSuccessTimestampSeconds.set(
+        freshness.lastBackupAt ? Math.floor(new Date(freshness.lastBackupAt).getTime() / 1000) : 0
+      );
+    } catch {
+      erpBackupFreshnessOk.set(0);
     }
 
     reply.header("Content-Type", metricsRegistry.contentType);

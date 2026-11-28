@@ -1,0 +1,14 @@
+[Unit]
+Description=Count It Keep It ERP Monthly Off-Site Encrypted Backup Restore Drill
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/count-it-keep-it
+EnvironmentFile=/opt/count-it-keep-it/.env
+ExecStart=/usr/bin/env node /opt/count-it-keep-it/scripts/monthly-restore-drill.mjs
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=3600
+Nice=10
