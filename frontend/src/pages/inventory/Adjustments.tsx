@@ -29,6 +29,8 @@ import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import type { AdjustmentReason } from "@/types";
 
 const REASONS: AdjustmentReason[] = ["recount", "damage", "theft", "expiry", "correction", "other"];
@@ -78,7 +80,7 @@ export default function Adjustments() {
     setNote("");
   };
 
-  const submit = async () => {
+  const saveAdjustmentAction = useIdempotentAction(async () => {
     if (!branchId || !productId || newQty === "") {
       toast.error(t("common.fillRequired", "Please fill all required fields"));
       return;
@@ -93,7 +95,7 @@ export default function Adjustments() {
     });
     if (res.ok === false) {
       toast.error(res.error);
-      return;
+      return res;
     }
     record("adjustments", `Adjustment ${res.adjustment.reference} (${res.adjustment.delta > 0 ? "+" : ""}${res.adjustment.delta}) for ${res.adjustment.product_name}`, {
       entity: "Adjustment",
@@ -103,7 +105,8 @@ export default function Adjustments() {
     toast.success(t("adjustments.created", "Adjustment recorded"));
     reset();
     setOpen(false);
-  };
+    return { ok: true };
+  });
 
   return (
     <div className="p-6 space-y-6">
@@ -180,8 +183,8 @@ export default function Adjustments() {
         </Table>
       </Card>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+      <Dialog open={open} onOpenChange={saveAdjustmentAction.guardOpenChange((o) => { setOpen(o); if (!o) reset(); })}>
+        <DialogContent locked={saveAdjustmentAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("adjustments.new", "New Adjustment")}</DialogTitle>
             <DialogDescription>
@@ -252,8 +255,15 @@ export default function Adjustments() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
-            <Button onClick={submit}>{t("common.save")}</Button>
+            <Button variant="outline" disabled={saveAdjustmentAction.isPending} onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={saveAdjustmentAction.isPending}
+              isSlow={saveAdjustmentAction.isSlow}
+              onClick={() => void saveAdjustmentAction.run()}
+            >
+              {t("common.save")}
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -19,6 +19,8 @@ import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import type { WriteOffReason } from "@/types";
 
 const REASONS: WriteOffReason[] = ["damage", "expiry", "loss", "theft", "other"];
@@ -75,7 +77,7 @@ export default function WriteOffs() {
     setLotAllocations(undefined); setSerialNumbers(undefined);
   };
 
-  const submit = async () => {
+  const writeOffAction = useIdempotentAction(async () => {
     if (!branchId || !productId || !qty) {
       toast.error(t("common.fillRequired", "Please fill all required fields"));
       return;
@@ -92,7 +94,7 @@ export default function WriteOffs() {
     });
     if (res.ok === false) {
       toast.error(res.error);
-      return;
+      return res;
     }
     record("write_offs", `Write-off ${res.writeOff.reference} (${res.writeOff.quantity}) for ${res.writeOff.product_name}`, {
       entity: "WriteOff",
@@ -102,7 +104,8 @@ export default function WriteOffs() {
     toast.success(t("writeOffs.created", "Write-off recorded"));
     reset();
     setOpen(false);
-  };
+    return { ok: true };
+  });
 
   return (
     <div className="p-6 space-y-6">
@@ -181,8 +184,8 @@ export default function WriteOffs() {
         </Table>
       </Card>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+      <Dialog open={open} onOpenChange={writeOffAction.guardOpenChange((o) => { setOpen(o); if (!o) reset(); })}>
+        <DialogContent locked={writeOffAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("writeOffs.new", "New Write-off")}</DialogTitle>
             <DialogDescription>{t("writeOffs.dialogDesc", "Remove damaged, lost, or expired stock from inventory.")}</DialogDescription>
@@ -245,8 +248,16 @@ export default function WriteOffs() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
-            <Button variant="destructive" onClick={submit}>{t("writeOffs.confirm", "Write Off")}</Button>
+            <Button variant="outline" disabled={writeOffAction.isPending} onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
+            <SubmitButton
+              type="button"
+              variant="destructive"
+              pending={writeOffAction.isPending}
+              isSlow={writeOffAction.isSlow}
+              onClick={() => void writeOffAction.run()}
+            >
+              {t("writeOffs.confirm", "Write Off")}
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

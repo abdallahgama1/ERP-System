@@ -38,6 +38,8 @@ import { usePermissions } from "@/contexts/PermissionsContext";
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "react-router-dom";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 
 const EDITABLE_STATUS_OPTIONS: Array<"Active" | "In Progress" | "Cancelled"> = [
   "Active",
@@ -92,7 +94,7 @@ const Sessions = () => {
     setIsAddDialogOpen(true);
   };
 
-  const handleCreateSession = async () => {
+  const createSessionAction = useIdempotentAction(async () => {
     if (!selectedBranchId) {
       toast({
         title: t("sessions.branchRequired", "Select a branch to start a session"),
@@ -106,13 +108,14 @@ const Sessions = () => {
     });
     if (res.ok === false) {
       toast({ title: res.error, variant: "destructive" });
-      return;
+      return res;
     }
     setIsAddDialogOpen(false);
     setSelectedBranchId("");
     setDescription("");
     toast({ title: t("sessions.sessionCreated") });
-  };
+    return { ok: true };
+  });
 
   const handleEdit = (session: Session) => {
     if (session.status === "Completed" || session.status === "Cancelled") return;
@@ -123,7 +126,7 @@ const Sessions = () => {
     setIsEditDialogOpen(true);
   };
 
-  const handleUpdateSession = async () => {
+  const updateSessionAction = useIdempotentAction(async () => {
     if (!editingSession) return;
     const res = await updateSession(editingSession.id, {
       description: description.trim() || undefined,
@@ -132,7 +135,7 @@ const Sessions = () => {
     });
     if (res.ok === false) {
       toast({ title: res.error, variant: "destructive" });
-      return;
+      return res;
     }
     setIsEditDialogOpen(false);
     setEditingSession(null);
@@ -140,7 +143,8 @@ const Sessions = () => {
     setSelectedBranchId("");
     setSelectedStatus("Active");
     toast({ title: t("sessions.sessionUpdated") });
-  };
+    return { ok: true };
+  });
 
   const handleConfirmDelete = async () => {
     if (!deleteSessionId) return;
@@ -191,14 +195,14 @@ const Sessions = () => {
           <p className="text-muted-foreground">{t("sessions.description")}</p>
         </div>
 
-        <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+        <Dialog open={isAddDialogOpen} onOpenChange={createSessionAction.guardOpenChange(setIsAddDialogOpen)}>
           <DialogTrigger asChild>
             <Button onClick={openCreateDialog} disabled={branches.length === 0}>
               <Plus className="me-2 h-4 w-4" />
               {t("sessions.startNewSession")}
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-md">
+          <DialogContent className="max-w-md" locked={createSessionAction.isPending}>
             <DialogHeader>
               <DialogTitle>{t("sessions.startNewSession")}</DialogTitle>
               <DialogDescription>{t("sessions.newSessionDescription")}</DialogDescription>
@@ -261,12 +265,18 @@ const Sessions = () => {
               </div>
 
               <div className="flex justify-end gap-2">
-                <Button variant="outline" onClick={() => setIsAddDialogOpen(false)}>
+                <Button variant="outline" disabled={createSessionAction.isPending} onClick={() => setIsAddDialogOpen(false)}>
                   {t("common.cancel")}
                 </Button>
-                <Button onClick={() => void handleCreateSession()} disabled={!selectedBranchId}>
+                <SubmitButton
+                  type="button"
+                  pending={createSessionAction.isPending}
+                  isSlow={createSessionAction.isSlow}
+                  onClick={() => void createSessionAction.run()}
+                  disabled={!selectedBranchId}
+                >
                   {t("common.create")} {t("sessionDetail.session")}
-                </Button>
+                </SubmitButton>
               </div>
             </div>
           </DialogContent>
@@ -384,8 +394,8 @@ const Sessions = () => {
       </Card>
 
       {/* Edit Session Dialog (only for open Active / In Progress sessions) */}
-      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog open={isEditDialogOpen} onOpenChange={updateSessionAction.guardOpenChange(setIsEditDialogOpen)}>
+        <DialogContent className="max-w-md" locked={updateSessionAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("sessions.editSession")}</DialogTitle>
             <DialogDescription>
@@ -454,12 +464,17 @@ const Sessions = () => {
             </div>
 
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+              <Button variant="outline" disabled={updateSessionAction.isPending} onClick={() => setIsEditDialogOpen(false)}>
                 {t("common.cancel")}
               </Button>
-              <Button onClick={() => void handleUpdateSession()}>
+              <SubmitButton
+                type="button"
+                pending={updateSessionAction.isPending}
+                isSlow={updateSessionAction.isSlow}
+                onClick={() => void updateSessionAction.run()}
+              >
                 {t("common.update")} {t("sessionDetail.session")}
-              </Button>
+              </SubmitButton>
             </div>
           </div>
         </DialogContent>

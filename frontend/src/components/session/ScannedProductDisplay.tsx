@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Package } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
@@ -11,7 +13,7 @@ import { Product } from "@/types";
 
 interface ScannedProductDisplayProps {
   product: Product;
-  onConfirm: (quantity: number) => void;
+  onConfirm: (quantity: number) => void | Promise<unknown>;
   onCancel: () => void;
 }
 
@@ -32,7 +34,7 @@ export const ScannedProductDisplay = ({
     }
   }, []);
 
-  const handleConfirm = () => {
+  const confirmAction = useIdempotentAction(async () => {
     const parsedQuantity = parseInt(quantity || "0", 10);
 
     if (isNaN(parsedQuantity) || parsedQuantity === 0) {
@@ -53,7 +55,11 @@ export const ScannedProductDisplay = ({
       return;
     }
 
-    onConfirm(parsedQuantity);
+    await onConfirm(parsedQuantity);
+  });
+
+  const handleConfirm = () => {
+    void confirmAction.run();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -125,10 +131,17 @@ export const ScannedProductDisplay = ({
       </div>
 
       <div className="flex gap-3">
-        <Button onClick={handleConfirm} size="lg" className="flex-1">
+        <SubmitButton
+          type="button"
+          onClick={handleConfirm}
+          pending={confirmAction.isPending}
+          isSlow={confirmAction.isSlow}
+          size="lg"
+          className="flex-1"
+        >
           {parsedQty >= 0 ? t("scanner.addToSession") : t("scanner.recordShortage")}
-        </Button>
-        <Button onClick={onCancel} variant="outline" size="lg">
+        </SubmitButton>
+        <Button onClick={onCancel} disabled={confirmAction.isPending} variant="outline" size="lg">
           {t("scanner.cancel")}
         </Button>
       </div>

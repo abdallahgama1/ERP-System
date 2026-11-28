@@ -16,6 +16,8 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { toast } from "sonner";
 import { format } from "date-fns";
 import { useInventoryScope } from "@/hooks/queries/useInventoryScope";
@@ -56,6 +58,60 @@ export default function TransferDetail() {
     return out;
   }, [transfer]);
 
+  const dispatchAction = useIdempotentAction(async () => {
+    if (!transfer) return;
+    const res = await dispatchTransfer(transfer.id, user?.name);
+    if (!res.ok) {
+      toast.error(res.error);
+      return res;
+    }
+    record("transfers", `Transfer ${transfer.reference} dispatched`, {
+      entity: "Transfer",
+      entityId: transfer.reference,
+      user: user?.name,
+    });
+    toast.success(t("transfers.dispatched", "Transfer dispatched"));
+    return { ok: true };
+  });
+
+  const receiveAction = useIdempotentAction(async () => {
+    if (!transfer) return;
+    const shortage =
+      transfer.status === "In Transit" &&
+      transfer.items.some((i) => (receivedMap[i.id] ?? initialReceived[i.id] ?? i.quantity) < i.quantity);
+    if (shortage && !shortageResolution) {
+      toast.error(
+        t(
+          "transfers.shortageResolutionRequired",
+          "Select how to handle short-received quantities before receiving.",
+        ),
+      );
+      return;
+    }
+    const receivedByProduct: Record<string, number> = {};
+    for (const i of transfer.items) {
+      receivedByProduct[i.productId] = receivedMap[i.id] ?? initialReceived[i.id] ?? i.quantity;
+    }
+    const res = await receiveTransfer(
+      transfer.id,
+      receivedByProduct,
+      shortage && shortageResolution ? shortageResolution : undefined,
+      user?.name,
+    );
+    if (!res.ok) {
+      toast.error(res.error);
+      return res;
+    }
+    record("transfers", `Transfer ${transfer.reference} received`, {
+      entity: "Transfer",
+      entityId: transfer.reference,
+      user: user?.name,
+      meta: shortage ? { shortageResolution } : undefined,
+    });
+    toast.success(t("transfers.received", "Transfer received"));
+    return { ok: true };
+  });
+
   if (!transfer) {
     return (
       <div className="p-6">
@@ -73,53 +129,6 @@ export default function TransferDetail() {
   const hasShortage =
     transfer.status === "In Transit" &&
     transfer.items.some((i) => (receivedMap[i.id] ?? initialReceived[i.id] ?? i.quantity) < i.quantity);
-
-  const onDispatch = async () => {
-    const res = await dispatchTransfer(transfer.id, user?.name);
-    if (!res.ok) {
-      toast.error(res.error);
-      return;
-    }
-    record("transfers", `Transfer ${transfer.reference} dispatched`, {
-      entity: "Transfer",
-      entityId: transfer.reference,
-      user: user?.name,
-    });
-    toast.success(t("transfers.dispatched", "Transfer dispatched"));
-  };
-
-  const onReceive = async () => {
-    if (hasShortage && !shortageResolution) {
-      toast.error(
-        t(
-          "transfers.shortageResolutionRequired",
-          "Select how to handle short-received quantities before receiving.",
-        ),
-      );
-      return;
-    }
-    const receivedByProduct: Record<string, number> = {};
-    for (const i of transfer.items) {
-      receivedByProduct[i.productId] = receivedMap[i.id] ?? initialReceived[i.id] ?? i.quantity;
-    }
-    const res = await receiveTransfer(
-      transfer.id,
-      receivedByProduct,
-      hasShortage && shortageResolution ? shortageResolution : undefined,
-      user?.name,
-    );
-    if (!res.ok) {
-      toast.error(res.error);
-      return;
-    }
-    record("transfers", `Transfer ${transfer.reference} received`, {
-      entity: "Transfer",
-      entityId: transfer.reference,
-      user: user?.name,
-      meta: hasShortage ? { shortageResolution } : undefined,
-    });
-    toast.success(t("transfers.received", "Transfer received"));
-  };
 
   const onCancel = async () => {
     const res = await cancelTransfer(transfer.id, user?.name);
@@ -151,19 +160,33 @@ export default function TransferDetail() {
         </div>
         <div className="flex gap-2">
           {transfer.status === "Draft" && can("inventory", "edit") && (
-            <Button onClick={onDispatch}>
+            <SubmitButton
+              type="button"
+              pending={dispatchAction.isPending}
+              isSlow={dispatchAction.isSlow}
+              onClick={() => void dispatchAction.run()}
+            >
               <Send className="h-4 w-4 me-2" />
               {t("transfers.dispatch", "Dispatch")}
-            </Button>
+            </SubmitButton>
           )}
           {transfer.status === "In Transit" && can("inventory", "edit") && (
-            <Button onClick={onReceive}>
+            <SubmitButton
+              type="button"
+              pending={receiveAction.isPending}
+              isSlow={receiveAction.isSlow}
+              onClick={() => void receiveAction.run()}
+            >
               <PackageCheck className="h-4 w-4 me-2" />
               {t("transfers.receive", "Receive")}
-            </Button>
+            </SubmitButton>
           )}
           {(transfer.status === "Draft" || transfer.status === "In Transit") && can("inventory", "delete") && (
-            <Button variant="destructive" onClick={() => setCancelOpen(true)}>
+            <Button
+              variant="destructive"
+              disabled={dispatchAction.isPending || receiveAction.isPending}
+              onClick={() => setCancelOpen(true)}
+            >
               <Ban className="h-4 w-4 me-2" />
               {t("transfers.cancel", "Cancel")}
             </Button>

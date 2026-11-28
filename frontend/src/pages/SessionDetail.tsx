@@ -53,6 +53,8 @@ import { usePermissions } from "@/contexts/PermissionsContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { formatMoney } from "@/lib/money";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import { ScannerInput } from "@/components/session/ScannerInput";
 import { ScannedProductDisplay } from "@/components/session/ScannedProductDisplay";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -84,6 +86,51 @@ const SessionDetail = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [deleteProductId, setDeleteProductId] = useState<string | null>(null);
   const [confirmCompleteOpen, setConfirmCompleteOpen] = useState(false);
+
+  const updateQtyAction = useIdempotentAction(async () => {
+    if (!session || !editingItem || session.status === "Completed" || session.status === "Cancelled") return;
+    const product = products.find((p) => p.productId === editingItem.productId) ?? {
+      productId: editingItem.productId,
+      product_name: editingItem.product_name,
+      product_sku: editingItem.product_sku,
+      quantity: editingItem.quantity,
+      sellingPrice: editingItem.sellingPrice,
+      costPrice: editingItem.costPrice,
+      brand: "",
+      category: "",
+    };
+    const res = await upsertSessionItemCount(session.id, product, Math.max(0, editQuantity), "set");
+    if (res.ok === false) {
+      toast({ title: res.error, variant: "destructive" });
+      return res;
+    }
+    toast({ title: t("sessionDetail.quantityUpdated") });
+    setIsEditDialogOpen(false);
+    setEditingItem(null);
+    return { ok: true };
+  });
+
+  const completeSessionAction = useIdempotentAction(async () => {
+    if (!session) return;
+    const resolvedBranchName =
+      session.branchName ||
+      branches.find((b) => b.branchId === session.branchId)?.branch_name ||
+      `Branch #${session.branchId}`;
+    const res = await completeSession(session.id);
+    if (res.ok === false) {
+      toast({ title: res.error, variant: "destructive" });
+      return res;
+    }
+    setConfirmCompleteOpen(false);
+    toast({
+      title: t("sessions.completedSuccess", "Session completed & stock reconciled"),
+      description:
+        res.adjustedCount > 0
+          ? `${res.adjustedCount} variance adjustment(s) posted to ${resolvedBranchName}.`
+          : "All counted items matched expected branch stock.",
+    });
+    return { ok: true };
+  });
 
   if (!session) {
     return (
@@ -145,28 +192,6 @@ const SessionDetail = () => {
     setIsEditDialogOpen(true);
   };
 
-  const handleUpdateQuantity = async () => {
-    if (!editingItem || isLocked) return;
-    const product = products.find((p) => p.productId === editingItem.productId) ?? {
-      productId: editingItem.productId,
-      product_name: editingItem.product_name,
-      product_sku: editingItem.product_sku,
-      quantity: editingItem.quantity,
-      sellingPrice: editingItem.sellingPrice,
-      costPrice: editingItem.costPrice,
-      brand: "",
-      category: "",
-    };
-    const res = await upsertSessionItemCount(session.id, product, Math.max(0, editQuantity), "set");
-    if (res.ok === false) {
-      toast({ title: res.error, variant: "destructive" });
-      return;
-    }
-    toast({ title: t("sessionDetail.quantityUpdated") });
-    setIsEditDialogOpen(false);
-    setEditingItem(null);
-  };
-
   const handleConfirmDelete = async () => {
     if (!deleteProductId || isLocked) return;
     const res = await removeSessionItem(session.id, deleteProductId);
@@ -176,22 +201,6 @@ const SessionDetail = () => {
       return;
     }
     toast({ title: t("sessionDetail.productRemovedFromSession") });
-  };
-
-  const handleCompleteSession = async () => {
-    const res = await completeSession(session.id);
-    setConfirmCompleteOpen(false);
-    if (res.ok === false) {
-      toast({ title: res.error, variant: "destructive" });
-      return;
-    }
-    toast({
-      title: t("sessions.completedSuccess", "Session completed & stock reconciled"),
-      description:
-        res.adjustedCount > 0
-          ? `${res.adjustedCount} variance adjustment(s) posted to ${branchName}.`
-          : "All counted items matched expected branch stock.",
-    });
   };
 
   const getStatusIcon = (status: string) => {
@@ -305,7 +314,7 @@ const SessionDetail = () => {
                 </p>
                 <ScannedProductDisplay
                   product={scannedProduct}
-                  onConfirm={(qty) => void handleConfirmCount(qty)}
+                  onConfirm={(qty) => handleConfirmCount(qty)}
                   onCancel={handleCancelScan}
                 />
               </>
@@ -527,8 +536,8 @@ const SessionDetail = () => {
         </CardContent>
       </Card>
 
-      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-        <DialogContent className="max-w-sm">
+      <Dialog open={isEditDialogOpen} onOpenChange={updateQtyAction.guardOpenChange(setIsEditDialogOpen)}>
+        <DialogContent className="max-w-sm" locked={updateQtyAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("sessionDetail.editQuantity")}</DialogTitle>
             <DialogDescription>
@@ -548,12 +557,17 @@ const SessionDetail = () => {
               />
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+              <Button variant="outline" disabled={updateQtyAction.isPending} onClick={() => setIsEditDialogOpen(false)}>
                 {t("common.cancel")}
               </Button>
-              <Button onClick={() => void handleUpdateQuantity()}>
+              <SubmitButton
+                type="button"
+                pending={updateQtyAction.isPending}
+                isSlow={updateQtyAction.isSlow}
+                onClick={() => void updateQtyAction.run()}
+              >
                 {t("sessionDetail.updateQuantity")}
-              </Button>
+              </SubmitButton>
             </div>
           </div>
         </DialogContent>
@@ -562,12 +576,16 @@ const SessionDetail = () => {
       <ConfirmDeleteDialog
         open={deleteProductId !== null}
         onOpenChange={(open) => !open && setDeleteProductId(null)}
-        onConfirm={() => void handleConfirmDelete()}
+        onConfirm={() => handleConfirmDelete()}
         itemName={sessionItems.find((i) => i.productId === deleteProductId)?.product_name}
       />
 
-      <AlertDialog open={confirmCompleteOpen} onOpenChange={setConfirmCompleteOpen}>
-        <AlertDialogContent>
+      <AlertDialog open={confirmCompleteOpen} onOpenChange={completeSessionAction.guardOpenChange(setConfirmCompleteOpen)}>
+        <AlertDialogContent
+          onEscapeKeyDown={(e) => {
+            if (completeSessionAction.isPending) e.preventDefault();
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>
               {t("sessions.completeConfirmTitle", "Complete Session & Reconcile Stock?")}
@@ -585,10 +603,15 @@ const SessionDetail = () => {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void handleCompleteSession()}>
+            <AlertDialogCancel disabled={completeSessionAction.isPending}>{t("common.cancel")}</AlertDialogCancel>
+            <SubmitButton
+              type="button"
+              pending={completeSessionAction.isPending}
+              isSlow={completeSessionAction.isSlow}
+              onClick={() => void completeSessionAction.run()}
+            >
               {t("sessions.completeAndReconcile", "Complete & Reconcile Stock")}
-            </AlertDialogAction>
+            </SubmitButton>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

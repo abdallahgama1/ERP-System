@@ -18,6 +18,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { usePermissions } from "@/contexts/PermissionsContext";
 import { useAuditRecorder } from "@/hooks/queries/useAuditLogsCursorQuery";
 import { TrackingLinePicker, type LotAllocationDraft } from "@/components/tracking/TrackingLinePicker";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { useIdempotentAction } from "@/hooks/useIdempotentSubmit";
 import type { TransferStatus } from "@/types";
 
 const STATUSES: (TransferStatus | "All")[] = ["All", "Draft", "In Transit", "Received", "Cancelled"];
@@ -71,7 +73,7 @@ export default function Transfers() {
     setSourceId(""); setDestId(""); setLines([{ productId: "", quantity: 1 }]); setNotes("");
   };
 
-  const submit = async () => {
+  const createTransferAction = useIdempotentAction(async () => {
     if (!sourceId || !destId) {
       toast.error(t("transfers.pickBranches", "Select source and destination"));
       return;
@@ -90,7 +92,7 @@ export default function Transfers() {
     });
     if (res.ok === false) {
       toast.error(res.error);
-      return;
+      return res;
     }
     record("transfers", `Transfer ${res.transfer.reference} created (${res.transfer.sourceBranchName} → ${res.transfer.destBranchName})`, {
       entity: "Transfer",
@@ -100,7 +102,8 @@ export default function Transfers() {
     toast.success(t("transfers.created", "Transfer created"));
     reset();
     setOpen(false);
-  };
+    return { ok: true };
+  });
 
   return (
     <div className="p-6 space-y-6">
@@ -178,8 +181,8 @@ export default function Transfers() {
         </Table>
       </Card>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-2xl">
+      <Dialog open={open} onOpenChange={createTransferAction.guardOpenChange((o) => { setOpen(o); if (!o) reset(); })}>
+        <DialogContent className="max-w-2xl" locked={createTransferAction.isPending}>
           <DialogHeader>
             <DialogTitle>{t("transfers.new", "New Transfer")}</DialogTitle>
             <DialogDescription>{t("transfers.dialogDesc", "Move stock from one branch to another. Goods sit in transit until received.")}</DialogDescription>
@@ -264,8 +267,15 @@ export default function Transfers() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
-            <Button onClick={submit}>{t("transfers.createDraft", "Create Draft")}</Button>
+            <Button variant="outline" disabled={createTransferAction.isPending} onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
+            <SubmitButton
+              type="button"
+              pending={createTransferAction.isPending}
+              isSlow={createTransferAction.isSlow}
+              onClick={() => void createTransferAction.run()}
+            >
+              {t("transfers.createDraft", "Create Draft")}
+            </SubmitButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
