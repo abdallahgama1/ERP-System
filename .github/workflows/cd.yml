@@ -258,7 +258,7 @@ jobs:
           SKIP_BACKUP: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_backup || false }}
         run: |
           SSH_OPTS=(-i "$HOME/.ssh/deploy_key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
-          ssh "${SSH_OPTS[@]}" -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" "mkdir -p '${VPS_APP_DIR}/scripts' '${VPS_APP_DIR}/deploy/systemd'"
+          ssh "${SSH_OPTS[@]}" -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" "mkdir -p '${VPS_APP_DIR}/scripts/lib' '${VPS_APP_DIR}/deploy/systemd'"
 
           scp "${SSH_OPTS[@]}" -P "$VPS_PORT" \
             docker-compose.prod.yml \
@@ -273,8 +273,13 @@ jobs:
             scripts/backup-offsite.mjs \
             scripts/monthly-restore-drill.mjs \
             scripts/verify-restored-db.ts \
+            scripts/create-smoke-user.mjs \
             scripts/smoke-test.mjs \
             "${VPS_USER}@${VPS_HOST}:${VPS_APP_DIR}/scripts/"
+
+          scp "${SSH_OPTS[@]}" -P "$VPS_PORT" \
+            scripts/lib/healthcheck-ping.mjs \
+            "${VPS_USER}@${VPS_HOST}:${VPS_APP_DIR}/scripts/lib/"
 
           scp "${SSH_OPTS[@]}" -P "$VPS_PORT" \
             deploy/systemd/* \

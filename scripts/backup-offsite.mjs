@@ -26,6 +26,7 @@
  *   BACKUP_S3_PREFIX               Object key prefix (default: backups/count-it-keep-it)
  *   BACKUP_OFFSITE_RETENTION_DAYS  Delete off-site backup sets older than N days (default: 30, 0 disables)
  *   BACKUP_OFFSITE_MIN_KEEP        Minimum off-site backup sets to retain (default: 7)
+ *   HEALTHCHECK_PING_URL           Optional healthchecks.io dead-man's-switch URL (or BACKUP_OFFSITE_HEALTHCHECK_PING_URL)
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -41,6 +42,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
+import { pingHealthcheck } from "./lib/healthcheck-ping.mjs";
 
 export const ENVELOPE_MAGIC = Buffer.from("CKIBK1", "ascii");
 const IV_BYTES = 12;
@@ -290,6 +292,14 @@ export async function pruneOffsiteBackups(client, cfg, now = new Date()) {
   return { prunedSets, deletedKeys: keysToDelete.length };
 }
 
+function resolveOffsiteHealthcheckUrl(override) {
+  if (override !== undefined) return String(override ?? "").trim();
+  const dedicated = (process.env.BACKUP_OFFSITE_HEALTHCHECK_PING_URL ?? "").trim();
+  if (dedicated) return dedicated;
+  if (process.env.HEALTHCHECK_PING_MANAGED_BY_CALLER === "1") return "";
+  return (process.env.HEALTHCHECK_PING_URL ?? "").trim();
+}
+
 export async function uploadBackupSet({
   dbFilePath,
   uploadsFilePath = null,
@@ -297,158 +307,179 @@ export async function uploadBackupSet({
   statusFilePath = null,
   encryptionKey = process.env.BACKUP_ENCRYPTION_KEY,
   s3Config = undefined,
+  healthcheckPingUrl = undefined,
 }) {
-  const keyBuf = parseBackupEncryptionKey(encryptionKey);
-  const cfg = resolveBackupS3Config(s3Config);
-  const client = createBackupS3Client(cfg);
-  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "erp-offsite-up-"));
-
+  const pingUrl = resolveOffsiteHealthcheckUrl(healthcheckPingUrl);
   try {
-    const dbBase = path.basename(dbFilePath);
-    const dbStat = await fsp.stat(dbFilePath);
-    const dbPlainSha = await sha256File(dbFilePath);
-    const dbEncPath = path.join(tmpDir, `${dbBase}.enc`);
-    await encryptFile(dbFilePath, dbEncPath, keyBuf);
-    const dbEncStat = await fsp.stat(dbEncPath);
-    const dbEncSha = await sha256File(dbEncPath);
-    const dbS3Key = joinKey(cfg.prefix, "db", `${dbBase}.enc`);
+    const keyBuf = parseBackupEncryptionKey(encryptionKey);
+    const cfg = resolveBackupS3Config(s3Config);
+    const client = createBackupS3Client(cfg);
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "erp-offsite-up-"));
 
-    await client.send(
-      new PutObjectCommand({
-        Bucket: cfg.bucket,
-        Key: dbS3Key,
-        Body: fs.createReadStream(dbEncPath),
-        ContentLength: dbEncStat.size,
-        ContentType: "application/octet-stream",
-        Metadata: {
-          "x-erp-cipher": "aes-256-gcm-ckibk1",
-          "x-erp-plaintext-sha256": dbPlainSha,
-          "x-erp-ciphertext-sha256": dbEncSha,
-        },
-      })
-    );
-
-    let uploadsMeta = null;
-    if (uploadsFilePath && fs.existsSync(uploadsFilePath)) {
-      const upBase = path.basename(uploadsFilePath);
-      const upStat = await fsp.stat(uploadsFilePath);
-      const upPlainSha = await sha256File(uploadsFilePath);
-      const upEncPath = path.join(tmpDir, `${upBase}.enc`);
-      await encryptFile(uploadsFilePath, upEncPath, keyBuf);
-      const upEncStat = await fsp.stat(upEncPath);
-      const upEncSha = await sha256File(upEncPath);
-      const upS3Key = joinKey(cfg.prefix, "uploads", `${upBase}.enc`);
+    try {
+      const dbBase = path.basename(dbFilePath);
+      const dbStat = await fsp.stat(dbFilePath);
+      const dbPlainSha = await sha256File(dbFilePath);
+      const dbEncPath = path.join(tmpDir, `${dbBase}.enc`);
+      await encryptFile(dbFilePath, dbEncPath, keyBuf);
+      const dbEncStat = await fsp.stat(dbEncPath);
+      const dbEncSha = await sha256File(dbEncPath);
+      const dbS3Key = joinKey(cfg.prefix, "db", `${dbBase}.enc`);
 
       await client.send(
         new PutObjectCommand({
           Bucket: cfg.bucket,
-          Key: upS3Key,
-          Body: fs.createReadStream(upEncPath),
-          ContentLength: upEncStat.size,
+          Key: dbS3Key,
+          Body: fs.createReadStream(dbEncPath),
+          ContentLength: dbEncStat.size,
           ContentType: "application/octet-stream",
           Metadata: {
             "x-erp-cipher": "aes-256-gcm-ckibk1",
-            "x-erp-plaintext-sha256": upPlainSha,
-            "x-erp-ciphertext-sha256": upEncSha,
+            "x-erp-plaintext-sha256": dbPlainSha,
+            "x-erp-ciphertext-sha256": dbEncSha,
           },
         })
       );
 
-      uploadsMeta = {
-        fileName: upBase,
-        sizeBytes: upStat.size,
-        sha256: upPlainSha,
-        encryptedSizeBytes: upEncStat.size,
-        encryptedSha256: upEncSha,
-        s3Key: upS3Key,
-      };
-    }
+      let uploadsMeta = null;
+      if (uploadsFilePath && fs.existsSync(uploadsFilePath)) {
+        const upBase = path.basename(uploadsFilePath);
+        const upStat = await fsp.stat(uploadsFilePath);
+        const upPlainSha = await sha256File(uploadsFilePath);
+        const upEncPath = path.join(tmpDir, `${upBase}.enc`);
+        await encryptFile(uploadsFilePath, upEncPath, keyBuf);
+        const upEncStat = await fsp.stat(upEncPath);
+        const upEncSha = await sha256File(upEncPath);
+        const upS3Key = joinKey(cfg.prefix, "uploads", `${upBase}.enc`);
 
-    const nowIso = new Date().toISOString();
-    const manifest = {
-      schemaVersion: 1,
-      timestamp,
-      completedAt: nowIso,
-      uploadedAt: nowIso,
-      encrypted: true,
-      cipher: "aes-256-gcm-ckibk1",
-      bucket: cfg.bucket,
-      prefix: cfg.prefix,
-      db: {
-        fileName: dbBase,
-        sizeBytes: dbStat.size,
-        sha256: dbPlainSha,
-        encryptedSizeBytes: dbEncStat.size,
-        encryptedSha256: dbEncSha,
-        s3Key: dbS3Key,
-      },
-      uploads: uploadsMeta,
-    };
+        await client.send(
+          new PutObjectCommand({
+            Bucket: cfg.bucket,
+            Key: upS3Key,
+            Body: fs.createReadStream(upEncPath),
+            ContentLength: upEncStat.size,
+            ContentType: "application/octet-stream",
+            Metadata: {
+              "x-erp-cipher": "aes-256-gcm-ckibk1",
+              "x-erp-plaintext-sha256": upPlainSha,
+              "x-erp-ciphertext-sha256": upEncSha,
+            },
+          })
+        );
 
-    const manifestJson = JSON.stringify(manifest, null, 2);
-    const manifestKey = joinKey(cfg.prefix, "manifests", `backup_${timestamp}.json`);
-    const latestKey = joinKey(cfg.prefix, "latest.json");
-
-    await client.send(
-      new PutObjectCommand({
-        Bucket: cfg.bucket,
-        Key: manifestKey,
-        Body: manifestJson,
-        ContentType: "application/json",
-      })
-    );
-    await client.send(
-      new PutObjectCommand({
-        Bucket: cfg.bucket,
-        Key: latestKey,
-        Body: manifestJson,
-        ContentType: "application/json",
-      })
-    );
-
-    const pruneResult = await pruneOffsiteBackups(client, cfg);
-
-    if (statusFilePath) {
-      let existing = {};
-      try {
-        existing = JSON.parse(await fsp.readFile(statusFilePath, "utf8"));
-      } catch {
-        existing = {};
+        uploadsMeta = {
+          fileName: upBase,
+          sizeBytes: upStat.size,
+          sha256: upPlainSha,
+          encryptedSizeBytes: upEncStat.size,
+          encryptedSha256: upEncSha,
+          s3Key: upS3Key,
+        };
       }
-      const nextStatus = {
-        ...existing,
-        status: "ok",
-        timestamp,
-        completedAt: existing.completedAt ?? nowIso,
-        dbFile: existing.dbFile ?? dbBase,
-        dbSizeBytes: existing.dbSizeBytes ?? dbStat.size,
-        dbSha256: existing.dbSha256 ?? dbPlainSha,
-        uploadsFile: existing.uploadsFile ?? uploadsMeta?.fileName ?? null,
-        uploadsSizeBytes: existing.uploadsSizeBytes ?? uploadsMeta?.sizeBytes ?? null,
-        uploadsSha256: existing.uploadsSha256 ?? uploadsMeta?.sha256 ?? null,
-        offsite: {
-          enabled: true,
-          uploaded: true,
-          encrypted: true,
-          bucket: cfg.bucket,
-          prefix: cfg.prefix,
-          uploadedAt: nowIso,
-          dbKey: dbS3Key,
-          uploadsKey: uploadsMeta?.s3Key ?? null,
-          manifestKey,
-          prunedSets: pruneResult.prunedSets,
-        },
-      };
-      const tmpStatus = `${statusFilePath}.tmp.${process.pid}`;
-      await fsp.mkdir(path.dirname(statusFilePath), { recursive: true });
-      await fsp.writeFile(tmpStatus, JSON.stringify(nextStatus, null, 2) + "\n", { mode: 0o644 });
-      await fsp.rename(tmpStatus, statusFilePath);
-    }
 
-    return { manifest, manifestKey, latestKey, pruneResult };
-  } finally {
-    client.destroy();
-    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      const nowIso = new Date().toISOString();
+      const manifest = {
+        schemaVersion: 1,
+        timestamp,
+        completedAt: nowIso,
+        uploadedAt: nowIso,
+        encrypted: true,
+        cipher: "aes-256-gcm-ckibk1",
+        bucket: cfg.bucket,
+        prefix: cfg.prefix,
+        db: {
+          fileName: dbBase,
+          sizeBytes: dbStat.size,
+          sha256: dbPlainSha,
+          encryptedSizeBytes: dbEncStat.size,
+          encryptedSha256: dbEncSha,
+          s3Key: dbS3Key,
+        },
+        uploads: uploadsMeta,
+      };
+
+      const manifestJson = JSON.stringify(manifest, null, 2);
+      const manifestKey = joinKey(cfg.prefix, "manifests", `backup_${timestamp}.json`);
+      const latestKey = joinKey(cfg.prefix, "latest.json");
+
+      await client.send(
+        new PutObjectCommand({
+          Bucket: cfg.bucket,
+          Key: manifestKey,
+          Body: manifestJson,
+          ContentType: "application/json",
+        })
+      );
+      await client.send(
+        new PutObjectCommand({
+          Bucket: cfg.bucket,
+          Key: latestKey,
+          Body: manifestJson,
+          ContentType: "application/json",
+        })
+      );
+
+      const pruneResult = await pruneOffsiteBackups(client, cfg);
+
+      if (statusFilePath) {
+        let existing = {};
+        try {
+          existing = JSON.parse(await fsp.readFile(statusFilePath, "utf8"));
+        } catch {
+          existing = {};
+        }
+        const nextStatus = {
+          ...existing,
+          status: "ok",
+          timestamp,
+          completedAt: existing.completedAt ?? nowIso,
+          dbFile: existing.dbFile ?? dbBase,
+          dbSizeBytes: existing.dbSizeBytes ?? dbStat.size,
+          dbSha256: existing.dbSha256 ?? dbPlainSha,
+          uploadsFile: existing.uploadsFile ?? uploadsMeta?.fileName ?? null,
+          uploadsSizeBytes: existing.uploadsSizeBytes ?? uploadsMeta?.sizeBytes ?? null,
+          uploadsSha256: existing.uploadsSha256 ?? uploadsMeta?.sha256 ?? null,
+          offsite: {
+            enabled: true,
+            uploaded: true,
+            encrypted: true,
+            bucket: cfg.bucket,
+            prefix: cfg.prefix,
+            uploadedAt: nowIso,
+            dbKey: dbS3Key,
+            uploadsKey: uploadsMeta?.s3Key ?? null,
+            manifestKey,
+            prunedSets: pruneResult.prunedSets,
+          },
+        };
+        const tmpStatus = `${statusFilePath}.tmp.${process.pid}`;
+        await fsp.mkdir(path.dirname(statusFilePath), { recursive: true });
+        await fsp.writeFile(tmpStatus, JSON.stringify(nextStatus, null, 2) + "\n", { mode: 0o644 });
+        await fsp.rename(tmpStatus, statusFilePath);
+      }
+
+      if (pingUrl) {
+        await pingHealthcheck({
+          url: pingUrl,
+          ok: true,
+          body: `offsite backup ok: bucket=${cfg.bucket} timestamp=${timestamp} dbBytes=${dbStat.size} uploads=${Boolean(uploadsMeta)}`,
+        });
+      }
+
+      return { manifest, manifestKey, latestKey, pruneResult };
+    } finally {
+      client.destroy();
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  } catch (err) {
+    if (pingUrl) {
+      await pingHealthcheck({
+        url: pingUrl,
+        ok: false,
+        body: `offsite backup failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+    throw err;
   }
 }
 

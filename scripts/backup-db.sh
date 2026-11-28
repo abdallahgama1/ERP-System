@@ -29,6 +29,8 @@ Environment variables:
   BACKUP_OFFSITE_RETENTION_DAYS  Off-site retention in days (default: 30)
   BACKUP_OFFSITE_MIN_KEEP        Minimum off-site backup sets to retain (default: 7)
   BACKUP_OFFSITE_REQUIRED        Fail if BACKUP_S3_BUCKET is unset (default: false)
+  HEALTHCHECK_PING_URL           Optional healthchecks.io-compatible dead-man's-switch URL
+                                 (pings <URL> on success and <URL>/fail with error text on failure)
 EOF
 }
 
@@ -83,9 +85,52 @@ STORAGE_LOCAL_DIR="${STORAGE_LOCAL_DIR:-}"
 BACKUP_STATUS_FILE="${BACKUP_STATUS_FILE:-${BACKUP_DIR}/last-backup-status.json}"
 BACKUP_S3_BUCKET="${BACKUP_S3_BUCKET:-}"
 BACKUP_OFFSITE_REQUIRED="${BACKUP_OFFSITE_REQUIRED:-false}"
+HEALTHCHECK_PING_URL="${HEALTHCHECK_PING_URL:-}"
 UPLOADS_WRITTEN="false"
 UPLOADS_SHA=""
 UPLOADS_SIZE="0"
+CURRENT_STAGE="init"
+HEALTHCHECK_PINGED="false"
+LAST_FAILURE_REASON=""
+
+send_healthcheck_ping() {
+  local mode="$1"
+  local message="$2"
+  if [[ -z "$HEALTHCHECK_PING_URL" ]]; then
+    return 0
+  fi
+  local clean_url="${HEALTHCHECK_PING_URL%/}"
+  local target_url="$clean_url"
+  if [[ "$mode" == "fail" ]]; then
+    target_url="${clean_url}/fail"
+  fi
+  local redacted_msg
+  redacted_msg="$(printf '%s' "$message" | sed -E 's#(postgres(ql)?://[^:/@]+):[^@]+@#\1:[REDACTED]@#g' | head -c 8000)"
+
+  if command -v curl >/dev/null 2>&1; then
+    if ! curl -fsS -m 10 --retry 2 --retry-delay 1 \
+      -X POST \
+      -H "Content-Type: text/plain; charset=utf-8" \
+      --data-binary "$redacted_msg" \
+      "$target_url" >/dev/null 2>&1; then
+      echo "Warning: healthcheck ping (${mode}) to ${target_url} failed." >&2
+    fi
+  elif command -v node >/dev/null 2>&1 && [[ -f "${SCRIPT_DIR}/lib/healthcheck-ping.mjs" ]]; then
+    node "${SCRIPT_DIR}/lib/healthcheck-ping.mjs" \
+      --url "$clean_url" \
+      --status "$mode" \
+      --message "$redacted_msg" || true
+  else
+    echo "Warning: HEALTHCHECK_PING_URL is set but neither curl nor node is available to send ping." >&2
+  fi
+  HEALTHCHECK_PINGED="true"
+}
+
+fail_with() {
+  LAST_FAILURE_REASON="$1"
+  echo "Error: $1" >&2
+  exit 1
+}
 
 if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || ! [[ "$MIN_KEEP" =~ ^[0-9]+$ ]]; then
   echo "Error: BACKUP_RETENTION_DAYS and BACKUP_MIN_KEEP must be non-negative integers." >&2
@@ -113,18 +158,24 @@ umask 077
 mkdir -p "$BACKUP_DIR"
 
 cleanup() {
+  local exit_code=$?
   rm -f "$TMP_FILE" "$UPLOADS_TMP_FILE"
+  if (( exit_code != 0 )) && [[ "$HEALTHCHECK_PINGED" != "true" ]] && [[ -n "$HEALTHCHECK_PING_URL" ]]; then
+    local reason="${LAST_FAILURE_REASON:-backup-db.sh failed during stage '${CURRENT_STAGE}' (exit ${exit_code})}"
+    send_healthcheck_ping "fail" "$reason"
+  fi
 }
 trap cleanup EXIT
 
+CURRENT_STAGE="pg_dump"
 echo "Starting PostgreSQL backup -> $REDACTED_TARGET"
 pg_dump -Fc --no-owner --no-privileges --dbname="$DATABASE_URL" --file="$TMP_FILE"
 
 if [[ ! -s "$TMP_FILE" ]]; then
-  echo "Error: backup dump file is empty: $TMP_FILE" >&2
-  exit 1
+  fail_with "backup dump file is empty: $TMP_FILE"
 fi
 
+CURRENT_STAGE="pg_restore_toc"
 echo "Validating archive table of contents with pg_restore -l..."
 pg_restore -l "$TMP_FILE" >/dev/null
 
@@ -275,10 +326,10 @@ chmod 644 "$STATUS_TMP"
 mv -f "$STATUS_TMP" "$BACKUP_STATUS_FILE"
 echo "Backup freshness status written to $BACKUP_STATUS_FILE"
 
+CURRENT_STAGE="offsite_upload"
 if [[ -n "$BACKUP_S3_BUCKET" ]]; then
   if ! command -v node >/dev/null 2>&1; then
-    echo "Error: BACKUP_S3_BUCKET is set but 'node' is not installed for encrypted off-site upload." >&2
-    exit 1
+    fail_with "BACKUP_S3_BUCKET is set but 'node' is not installed for encrypted off-site upload."
   fi
   echo "Encrypting (AES-256-GCM) and syncing backup off-site to s3://${BACKUP_S3_BUCKET}/${BACKUP_S3_PREFIX:-backups/count-it-keep-it}..."
   OFFSITE_ARGS=(
@@ -291,9 +342,17 @@ if [[ -n "$BACKUP_S3_BUCKET" ]]; then
   if [[ "$UPLOADS_WRITTEN" == "true" ]]; then
     OFFSITE_ARGS+=(--uploads "$UPLOADS_FILE")
   fi
-  node "${OFFSITE_ARGS[@]}"
+  OFFSITE_ERR_FILE="$(mktemp)"
+  if ! HEALTHCHECK_PING_MANAGED_BY_CALLER=1 node "${OFFSITE_ARGS[@]}" 2> >(tee "$OFFSITE_ERR_FILE" >&2); then
+    OFFSITE_ERR="$(cat "$OFFSITE_ERR_FILE" 2>/dev/null || true)"
+    rm -f "$OFFSITE_ERR_FILE"
+    fail_with "off-site upload failed: ${OFFSITE_ERR:-backup-offsite.mjs exited non-zero}"
+  fi
+  rm -f "$OFFSITE_ERR_FILE"
   echo "Off-site encrypted S3 backup completed successfully."
 elif [[ "$BACKUP_OFFSITE_REQUIRED" == "true" ]]; then
-  echo "Error: BACKUP_OFFSITE_REQUIRED=true but BACKUP_S3_BUCKET is not configured." >&2
-  exit 1
+  fail_with "BACKUP_OFFSITE_REQUIRED=true but BACKUP_S3_BUCKET is not configured."
 fi
+
+CURRENT_STAGE="healthcheck_ping"
+send_healthcheck_ping "ok" "backup ok: timestamp=${TIMESTAMP} dbBytes=${SIZE_BYTES} uploads=${UPLOADS_WRITTEN} offsite=$( [[ -n "$BACKUP_S3_BUCKET" ]] && echo "s3://${BACKUP_S3_BUCKET}" || echo "local-only" )"

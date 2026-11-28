@@ -94,6 +94,9 @@ services:
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-Count It Keep It ERP <no-reply@localhost>}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
+      UPTIME_STATUS_TOKEN: ${UPTIME_STATUS_TOKEN:-}
+      UPTIME_STATUS_RATE_LIMIT_MAX: ${UPTIME_STATUS_RATE_LIMIT_MAX:-60}
+      UPTIME_STATUS_RATE_LIMIT_WINDOW_MS: ${UPTIME_STATUS_RATE_LIMIT_WINDOW_MS:-60000}
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0}
@@ -209,6 +212,8 @@ services:
       BACKUP_OFFSITE_RETENTION_DAYS: ${BACKUP_OFFSITE_RETENTION_DAYS:-30}
       BACKUP_OFFSITE_MIN_KEEP: ${BACKUP_OFFSITE_MIN_KEEP:-7}
       BACKUP_OFFSITE_REQUIRED: ${BACKUP_OFFSITE_REQUIRED:-false}
+      HEALTHCHECK_PING_URL: ${HEALTHCHECK_PING_URL:-}
+      BACKUP_OFFSITE_HEALTHCHECK_PING_URL: ${BACKUP_OFFSITE_HEALTHCHECK_PING_URL:-}
       BACKUP_CRON_SCHEDULE: ${BACKUP_CRON_SCHEDULE:-0 2 * * *}
     volumes:
       - ./scripts:/opt/erp/scripts:ro
@@ -220,7 +225,7 @@ services:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache bash nodejs >/dev/null && \
+        apk add --no-cache bash curl nodejs >/dev/null && \
         printf '%s /bin/bash /opt/erp/scripts/backup-db.sh /var/backups/count-it-keep-it >> /proc/1/fd/1 2>&1\n' "$${BACKUP_CRON_SCHEDULE:-0 2 * * *}" > /etc/crontabs/root && \
         exec crond -f -l 6
     logging:

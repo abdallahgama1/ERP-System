@@ -20,7 +20,9 @@
  *   BACKUP_S3_BUCKET, BACKUP_S3_ENDPOINT, BACKUP_S3_REGION,
  *   BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY, BACKUP_S3_FORCE_PATH_STYLE,
  *   BACKUP_S3_PREFIX, BACKUP_ENCRYPTION_KEY
- *   DRILL_ADMIN_DATABASE_URL   Optional existing Postgres 18 admin DB URL (defaults to ephemeral Docker PG 18)
+ *   DRILL_ADMIN_DATABASE_URL             Optional existing Postgres 18 admin DB URL (defaults to ephemeral Docker PG 18)
+ *   RESTORE_DRILL_HEALTHCHECK_PING_URL   Optional dedicated healthchecks.io URL for monthly restore drills
+ *   HEALTHCHECK_PING_URL                 Fallback healthchecks.io URL if RESTORE_DRILL_HEALTHCHECK_PING_URL is unset
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -32,6 +34,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { decryptFile, downloadLatestBackupSet, parseBackupEncryptionKey } from "./backup-offsite.mjs";
+import { pingHealthcheck } from "./lib/healthcheck-ping.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -221,6 +224,12 @@ async function resolveLocalBackupSet(localDir, outDir) {
 
 export async function runMonthlyRestoreDrill(options = {}) {
   const startedAt = Date.now();
+  const healthcheckPingUrl = (
+    options.healthcheckPingUrl ??
+    process.env.RESTORE_DRILL_HEALTHCHECK_PING_URL ??
+    process.env.HEALTHCHECK_PING_URL ??
+    ""
+  ).trim();
   const runTag = `${Date.now().toString(36)}_${randomBytes(2).toString("hex")}`;
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), `erp-restore-drill-${runTag}-`));
   const downloadDir = path.join(tmpDir, "backup");
@@ -401,7 +410,7 @@ export async function runMonthlyRestoreDrill(options = {}) {
         : null;
       const rtoSeconds = Math.round(((Date.now() - startedAt) / 1000) * 100) / 100;
 
-      return {
+      const report = {
         ok: true,
         drillDate: new Date().toISOString(),
         source: acquired.source,
@@ -419,12 +428,31 @@ export async function runMonthlyRestoreDrill(options = {}) {
         },
         verification,
       };
+
+      if (healthcheckPingUrl) {
+        await pingHealthcheck({
+          url: healthcheckPingUrl,
+          ok: true,
+          body: `restore drill ok: source=${report.source} backup=${report.backupTimestamp ?? "unknown"} rpoHours=${report.rpoHours ?? "n/a"} rtoSeconds=${report.rtoSeconds} recon=${verification.reconciliation?.passedControls}/${verification.reconciliation?.totalControls} setupHealth=${verification.setupHealth?.validMappings}/${verification.setupHealth?.totalMappings} auditValid=${verification.auditChain?.valid}`,
+        });
+      }
+
+      return report;
     } finally {
       if (mode !== "docker-ephemeral") {
         await adminSql.unsafe(`DROP DATABASE IF EXISTS "${scratchDbName}" WITH (FORCE)`).catch(() => {});
       }
       await adminSql.end({ timeout: 5 }).catch(() => {});
     }
+  } catch (err) {
+    if (healthcheckPingUrl) {
+      await pingHealthcheck({
+        url: healthcheckPingUrl,
+        ok: false,
+        body: `restore drill failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+    throw err;
   } finally {
     if (containerName && dockerBin) {
       spawnSync(dockerBin, ["rm", "-f", containerName], { stdio: "ignore" });

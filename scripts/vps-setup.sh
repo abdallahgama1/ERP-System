@@ -224,7 +224,9 @@ for key in \
   BACKUP_ENCRYPTION_KEY \
   BACKUP_OFFSITE_RETENTION_DAYS \
   BACKUP_OFFSITE_MIN_KEEP \
-  BACKUP_OFFSITE_REQUIRED; do
+  BACKUP_OFFSITE_REQUIRED \
+  HEALTHCHECK_PING_URL \
+  BACKUP_OFFSITE_HEALTHCHECK_PING_URL; do
   val="$(read_env "$key")"
   [[ -z "$val" ]] || export "${key}=${val}"
 done
