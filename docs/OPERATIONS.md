@@ -9,6 +9,7 @@ This document is the single consolidated operations reference for running **Coun
 - [GO_LIVE.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/GO_LIVE.md) — Go-live cutover plan, CSV import order, re-import semantics, and rollback runbook.
 - [UAT_SCRIPT.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/UAT_SCRIPT.md) — Step-by-step full-day user acceptance testing script in EGP for pre-go-live rehearsal.
 - [INCIDENT_RUNBOOK.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/INCIDENT_RUNBOOK.md) — Production outage, DB corruption, key leak, bad migration, and disaster-recovery restore playbooks.
+- [ETA_GO_LIVE.md](file:///c:/Users/mohamed/Desktop/count-it-keep-it/docs/ETA_GO_LIVE.md) — ETA Egypt CAdES-BES signer bridge HTTP contract, local mock signer, `eta:preprod-smoke`, retry backoff, and preprod-to-live checklist.
 
 ---
 
