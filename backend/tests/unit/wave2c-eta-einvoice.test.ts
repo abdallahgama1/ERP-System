@@ -1,3 +1,5 @@
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "../../src/config.ts";
 import { LOG_REDACT_PATHS } from "../../src/logging/logger.ts";
@@ -11,9 +13,13 @@ import {
   submitEtaDocuments,
 } from "../../src/services/eta-client.service.ts";
 import {
+  EtaSignerError,
   computeEtaDocumentCanonicalDigest,
+  isRealCadesBesSignature,
   signEtaInvoiceIfNeeded,
 } from "../../src/services/eta-signer.service.ts";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe("Wave 2C: ETA Egypt B2B e-Invoice v1.0, CAdES-BES Signer Bridge & Document Submissions", () => {
   const origClientId = env.ETA_CLIENT_ID;
@@ -259,5 +265,168 @@ describe("Wave 2C: ETA Egypt B2B e-Invoice v1.0, CAdES-BES Signer Bridge & Docum
 
     expect(LOG_REDACT_PATHS).toContain("etaSignerToken");
     expect(LOG_REDACT_PATHS).toContain("*.etaSignerToken");
+  });
+
+  it("refuses mock signer headers, isMock JSON flags, and non-ASN.1-DER signature strings", async () => {
+    const validCms = "MIIGCAYJKoZIhvcNAQcCoIIF+TCCBfUCAQExDzANBglghkgBZQMEAgEFADALBgkqhkiG9w0BBwE=";
+    expect(isRealCadesBesSignature(validCms)).toBe(true);
+    expect(isRealCadesBesSignature("MOCK_SIGNATURE_NOT_FOR_ETA_SUBMISSION:abc")).toBe(false);
+    expect(isRealCadesBesSignature("not-base64!!!")).toBe(false);
+    expect(isRealCadesBesSignature(Buffer.from("plain text not asn1 der sequence 1234567890").toString("base64"))).toBe(false);
+
+    const sampleDoc = { documentType: "I", documentTypeVersion: "1.0", internalID: "INV-MOCK-REFUSE" };
+
+    // Refuses X-ETA-Mock-Signer header even if value looks like Base64
+    const mockHeaderFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ signatureType: "I", value: validCms }), {
+        status: 200,
+        headers: { "Content-Type": "application/json", "X-ETA-Mock-Signer": "true" },
+      })
+    );
+    await expect(
+      signEtaInvoiceIfNeeded(sampleDoc, {
+        signerUrl: "http://127.0.0.1:5099/sign",
+        fetchImpl: mockHeaderFetch as unknown as typeof fetch,
+      })
+    ).rejects.toThrow(EtaSignerError);
+
+    // Refuses isMock: true JSON flag
+    const mockBodyFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ signatureType: "I", value: validCms, isMock: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+    await expect(
+      signEtaInvoiceIfNeeded(sampleDoc, {
+        signerUrl: "http://127.0.0.1:5099/sign",
+        fetchImpl: mockBodyFetch as unknown as typeof fetch,
+      })
+    ).rejects.toThrow(/Refused mock signature/i);
+  });
+
+  it("eta:preprod-smoke builds all 6 sample cases, refuses prod URLs & mock signatures, submits cleanly, and formats rejections", async () => {
+    const smokeUrl = pathToFileURL(path.resolve(__dirname, "../../../scripts/eta-preprod-smoke.mjs")).href;
+    const smoke = (await import(smokeUrl)) as {
+      buildPreprodSmokeDocuments: (opts?: Record<string, unknown>) => Array<{
+        caseName: string;
+        document: Record<string, unknown>;
+      }>;
+      formatEtaValidationErrors: (rejected: unknown[]) => string[];
+      runEtaPreprodSmoke: (opts: Record<string, unknown>) => Promise<{
+        ok: boolean;
+        skipped: boolean;
+        mode: string;
+        acceptedCount?: number;
+        rejectedCount?: number;
+        rejectedErrors?: string[];
+      }>;
+    };
+
+    const docs = smoke.buildPreprodSmokeDocuments({ documentTypeVersion: "1.0", issuerRin: "310220330" });
+    expect(docs.map((d) => d.caseName)).toEqual([
+      "standard_invoice",
+      "discounted_invoice",
+      "multi_vat_invoice",
+      "zero_rated_invoice",
+      "exempt_invoice",
+      "credit_note",
+    ]);
+    // Verify discount, multi-VAT, zero-rated V001, exempt V003, and credit note 'C'
+    expect(docs[1]!.document.totalDiscountAmount).toBe(200);
+    expect((docs[2]!.document.invoiceLines as Array<Record<string, unknown>>)).toHaveLength(2);
+    const zeroTax = ((docs[3]!.document.invoiceLines as Array<{ taxableItems: Array<{ subType: string; rate: number }> }>)[0]!.taxableItems[0]!);
+    expect(zeroTax.subType).toBe("V001");
+    expect(zeroTax.rate).toBe(0);
+    const exemptTax = ((docs[4]!.document.invoiceLines as Array<{ taxableItems: Array<{ subType: string; rate: number }> }>)[0]!.taxableItems[0]!);
+    expect(exemptTax.subType).toBe("V003");
+    expect(exemptTax.rate).toBe(0);
+    expect(docs[5]!.document.documentType).toBe("C");
+
+    // Skips cleanly when credentials are missing
+    const skippedRes = await smoke.runEtaPreprodSmoke({ envVars: {} });
+    expect(skippedRes.ok).toBe(true);
+    expect(skippedRes.skipped).toBe(true);
+
+    // Refuses production ETA URLs unless --allow-prod
+    await expect(
+      smoke.runEtaPreprodSmoke({
+        envVars: {
+          ETA_CLIENT_ID: "id",
+          ETA_CLIENT_SECRET: "sec",
+          ETA_ID_BASE_URL: "https://id.eta.gov.eg",
+          ETA_API_BASE_URL: "https://api.invoicing.eta.gov.eg",
+        },
+      })
+    ).rejects.toThrow(/Production URLs/i);
+
+    // Submits all 6 documents cleanly against a mocked ETA preprod server and surfaces rejections clearly
+    const validCms = "MIIGCAYJKoZIhvcNAQcCoIIF+TCCBfUCAQExDzANBglghkgBZQMEAgEFADALBgkqhkiG9w0BBwE=";
+    const makeMockEtaFetch = (rejectExempt: boolean) =>
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sign")) {
+          return new Response(JSON.stringify({ signatureType: "I", value: validCms }), { status: 200 });
+        }
+        if (url.endsWith("/connect/token")) {
+          return new Response(JSON.stringify({ access_token: "preprod-jwt", expires_in: 3600 }), { status: 200 });
+        }
+        if (url.endsWith("/api/v1/documentsubmissions")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { documents: Array<{ internalID: string }> };
+          const acceptedDocuments: Array<Record<string, unknown>> = [];
+          const rejectedDocuments: Array<Record<string, unknown>> = [];
+          for (const d of body.documents) {
+            if (rejectExempt && d.internalID.includes("EXEMPT")) {
+              rejectedDocuments.push({
+                internalId: d.internalID,
+                error: {
+                  code: "ValidationError",
+                  message: "Invalid item code",
+                  details: [
+                    {
+                      code: "CF344",
+                      propertyPath: "invoiceLines[0].itemCode",
+                      message: "EGS item code is not approved for taxpayer",
+                    },
+                  ],
+                },
+              });
+            } else {
+              acceptedDocuments.push({ uuid: `UUID-${d.internalID}`, internalId: d.internalID });
+            }
+          }
+          return new Response(JSON.stringify({ submissionId: "SUB-PREPROD", acceptedDocuments, rejectedDocuments }), {
+            status: 202,
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      });
+
+    const passRes = await smoke.runEtaPreprodSmoke({
+      envVars: {
+        ETA_CLIENT_ID: "preprod-id",
+        ETA_CLIENT_SECRET: "preprod-secret",
+        ETA_INVOICE_VERSION: "1.0",
+        ETA_SIGNER_URL: "http://127.0.0.1:5099/sign",
+      },
+      fetchImpl: makeMockEtaFetch(false) as unknown as typeof fetch,
+    });
+    expect(passRes.ok).toBe(true);
+    expect(passRes.acceptedCount).toBe(6);
+    expect(passRes.rejectedCount).toBe(0);
+
+    const failRes = await smoke.runEtaPreprodSmoke({
+      envVars: {
+        ETA_CLIENT_ID: "preprod-id",
+        ETA_CLIENT_SECRET: "preprod-secret",
+        ETA_INVOICE_VERSION: "1.0",
+        ETA_SIGNER_URL: "http://127.0.0.1:5099/sign",
+      },
+      fetchImpl: makeMockEtaFetch(true) as unknown as typeof fetch,
+    });
+    expect(failRes.ok).toBe(false);
+    expect(failRes.rejectedCount).toBe(1);
+    expect(failRes.rejectedErrors?.[0]).toContain("invoiceLines[0].itemCode");
+    expect(failRes.rejectedErrors?.[0]).toContain("EGS item code is not approved for taxpayer");
   });
 });

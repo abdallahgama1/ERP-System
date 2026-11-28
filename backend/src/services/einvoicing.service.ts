@@ -39,6 +39,7 @@ import { getDb, type AppDatabase } from "../db/index.ts";
 import { createModuleLogger } from "../logging/logger.ts";
 import { assertBranchAccess } from "../middleware/auth.ts";
 import {
+  EtaClientError,
   getEtaDocumentSubmissionStatus,
   getEtaSubmissionStatus,
   isEtaConfigured,
@@ -46,6 +47,7 @@ import {
   submitEtaReceipts,
 } from "./eta-client.service.ts";
 import {
+  EtaSignerError,
   computeEtaDocumentCanonicalDigest,
   isEtaSignerConfigured,
   resolveEtaInvoiceVersion,
@@ -391,6 +393,7 @@ export interface EtaB2bInvoiceBuildInput {
     unitPrice: number;
     discount?: number;
     taxRate: number;
+    taxSubType?: string;
     taxAmount: number;
     lineTotal: number;
   }>;
@@ -460,16 +463,16 @@ export function buildEtaB2bInvoicePayload(input: EtaB2bInvoiceBuildInput): {
       itemsDiscount: 0,
       unitValue,
       discount: {
-        rate: 0,
+        rate: salesTotal > 0 && discountEgp > 0 ? Number(((discountEgp / salesTotal) * 100).toFixed(2)) : 0,
         amount: discountEgp,
       },
       taxableItems:
-        line.taxRate > 0
+        line.taxRate > 0 || line.taxSubType
           ? [
               {
                 taxType: "T1",
                 amount: taxEgp,
-                subType: "V009",
+                subType: line.taxSubType || "V009",
                 rate: Number(line.taxRate.toFixed(2)),
               },
             ]
@@ -1867,8 +1870,18 @@ export async function processPendingEtaSubmissions(
     const now = new Date();
     const pendingConds: SQL[] = [
       eq(einvoiceSubmissions.provider, "eta_egypt"),
-      eq(einvoiceSubmissions.status, "pending"),
-      or(sql`${einvoiceSubmissions.nextRetryAt} IS NULL`, lte(einvoiceSubmissions.nextRetryAt, now))!,
+      or(
+        and(
+          eq(einvoiceSubmissions.status, "pending"),
+          or(sql`${einvoiceSubmissions.nextRetryAt} IS NULL`, lte(einvoiceSubmissions.nextRetryAt, now))!
+        ),
+        and(
+          eq(einvoiceSubmissions.status, "failed"),
+          isNotNull(einvoiceSubmissions.nextRetryAt),
+          lte(einvoiceSubmissions.nextRetryAt, now),
+          sql`${einvoiceSubmissions.attempts} < ${MAX_ETA_SUBMISSION_ATTEMPTS}`
+        )
+      )!,
     ];
     if (opts.companyId) {
       pendingConds.push(eq(einvoiceSubmissions.companyId, opts.companyId));
@@ -2088,34 +2101,36 @@ export async function processPendingEtaSubmissions(
       } catch (err) {
         const nextAttempts = sub.attempts + 1;
         const errMsg = err instanceof Error ? err.message : "ETA submission error";
-        if (nextAttempts >= MAX_ETA_SUBMISSION_ATTEMPTS) {
-          await tx
-            .update(einvoiceSubmissions)
-            .set({
-              status: "failed",
-              attempts: nextAttempts,
-              lastError: errMsg,
-              nextRetryAt: null,
-              updatedAt: new Date(),
-            })
-            .where(eq(einvoiceSubmissions.id, sub.id));
-          await updateLinkedDocStatus(sub, "failed");
-          failed++;
-          processed++;
-        } else {
-          const delayMs = computeNextEtaRetryDelayMs(nextAttempts);
-          await tx
-            .update(einvoiceSubmissions)
-            .set({
-              status: "pending",
-              attempts: nextAttempts,
-              lastError: errMsg,
-              nextRetryAt: new Date(Date.now() + delayMs),
-              updatedAt: new Date(),
-            })
-            .where(eq(einvoiceSubmissions.id, sub.id));
-          processed++;
-        }
+        const isRetryable =
+          err instanceof EtaSignerError
+            ? err.retryable
+            : err instanceof EtaClientError
+              ? err.retryable
+              : true;
+        const rawErrBody =
+          err instanceof EtaSignerError && err.responseBody && typeof err.responseBody === "object"
+            ? (err.responseBody as Record<string, unknown>)
+            : err instanceof EtaClientError && err.responseBody && typeof err.responseBody === "object"
+              ? (err.responseBody as Record<string, unknown>)
+              : null;
+        const exhausted = !isRetryable || nextAttempts >= MAX_ETA_SUBMISSION_ATTEMPTS;
+        const delayMs = exhausted ? null : computeNextEtaRetryDelayMs(nextAttempts);
+        const scheduledRetryAt = delayMs !== null ? new Date(Date.now() + delayMs) : null;
+
+        await tx
+          .update(einvoiceSubmissions)
+          .set({
+            status: "failed",
+            attempts: nextAttempts,
+            lastError: errMsg,
+            ...(rawErrBody ? { responsePayloadJson: rawErrBody } : {}),
+            nextRetryAt: scheduledRetryAt,
+            updatedAt: new Date(),
+          })
+          .where(eq(einvoiceSubmissions.id, sub.id));
+        await updateLinkedDocStatus(sub, "failed");
+        failed++;
+        processed++;
       }
     }
 

@@ -5,16 +5,49 @@ import { createModuleLogger } from "../logging/logger.ts";
 
 const log = createModuleLogger("eta-signer");
 
+export type EtaSignerErrorCode =
+  | "MOCK_SIGNATURE_REFUSED"
+  | "INVALID_SIGNATURE"
+  | "SIGNER_UNREACHABLE"
+  | "SIGNER_HTTP_ERROR";
+
 export class EtaSignerError extends Error {
   public readonly statusCode: number;
   public readonly retryable: boolean;
+  public readonly code: EtaSignerErrorCode;
+  public readonly responseBody?: unknown;
 
-  constructor(message: string, statusCode = 502, retryable = true) {
+  constructor(
+    message: string,
+    statusCode = 502,
+    retryable = true,
+    code: EtaSignerErrorCode = "SIGNER_HTTP_ERROR",
+    responseBody?: unknown
+  ) {
     super(message);
     this.name = "EtaSignerError";
     this.statusCode = statusCode;
     this.retryable = retryable;
+    this.code = code;
+    this.responseBody = responseBody;
   }
+}
+
+const STRICT_BASE64_REGEX = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/**
+ * Validates that a signature string looks like a real Base64-encoded ASN.1 DER CMS/PKCS#7
+ * CAdES-BES ContentInfo (SEQUENCE tag 0x30, >= 32 bytes) and is NOT a mock placeholder.
+ */
+export function isRealCadesBesSignature(rawValue: string): boolean {
+  const value = rawValue.trim();
+  if (!value || value.length < 44) return false;
+  if (/^mock/i.test(value) || /mock[_-]?sig/i.test(value)) return false;
+  if (!STRICT_BASE64_REGEX.test(value)) return false;
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.length < 32) return false;
+  // CMS/PKCS#7 CAdES-BES ContentInfo is always an ASN.1 DER SEQUENCE (tag 0x30)
+  return decoded[0] === 0x30;
 }
 
 /**
@@ -121,13 +154,19 @@ export async function signEtaInvoiceIfNeeded(
   }
 
   const existingSigs = Array.isArray(docClone.signatures) ? docClone.signatures : [];
-  const hasExistingSig = existingSigs.some(
-    (s) =>
-      Boolean(s && typeof s === "object") &&
-      typeof (s as Record<string, unknown>).value === "string" &&
-      ((s as Record<string, unknown>).value as string).trim().length > 0
-  );
-  if (hasExistingSig) {
+  const existingSigValues = existingSigs
+    .filter((s): s is Record<string, unknown> => Boolean(s && typeof s === "object"))
+    .map((s) => (typeof s.value === "string" ? s.value.trim() : ""))
+    .filter((v) => v.length > 0);
+  if (existingSigValues.length > 0) {
+    if (!existingSigValues.every((v) => isRealCadesBesSignature(v))) {
+      throw new EtaSignerError(
+        "Refused document containing a mock or invalid signature; a real CAdES-BES signature is required.",
+        422,
+        false,
+        "MOCK_SIGNATURE_REFUSED"
+      );
+    }
     return {
       signed: true,
       signatureStatus: "signed",
@@ -182,7 +221,7 @@ export async function signEtaInvoiceIfNeeded(
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Failed to reach ETA CAdES-BES signer";
     log.warn({ err }, "eta.signer.unreachable");
-    throw new EtaSignerError(`ETA CAdES-BES signer request failed: ${msg}`, 503, true);
+    throw new EtaSignerError(`ETA CAdES-BES signer request failed: ${msg}`, 503, true, "SIGNER_UNREACHABLE");
   } finally {
     clearTimeout(timer);
   }
@@ -208,7 +247,28 @@ export async function signEtaInvoiceIfNeeded(
     throw new EtaSignerError(
       `ETA CAdES-BES signer failed (${response.status}): ${errMsg}`,
       response.status,
-      response.status >= 500 || response.status === 429
+      response.status >= 500 || response.status === 429,
+      "SIGNER_HTTP_ERROR",
+      parsed
+    );
+  }
+
+  const mockHeader = (response.headers.get("x-eta-mock-signer") ?? "").trim().toLowerCase();
+  const isMockFlagged =
+    mockHeader === "true" ||
+    mockHeader === "1" ||
+    parsed.isMock === true ||
+    parsed.mock === true ||
+    parsed.signerKind === "mock";
+
+  if (isMockFlagged) {
+    log.warn("eta.signer.mock_refused");
+    throw new EtaSignerError(
+      "Refused mock signature from development signer (NOT A REAL SIGNER). Configure a real PKCS#11 / hardware-token CAdES-BES signer before submitting to ETA.",
+      422,
+      false,
+      "MOCK_SIGNATURE_REFUSED",
+      parsed
     );
   }
 
@@ -221,7 +281,24 @@ export async function signEtaInvoiceIfNeeded(
           ? parsed.signature.trim()
           : "";
   if (!sigValue) {
-    throw new EtaSignerError("ETA CAdES-BES signer response did not contain a signature value", 502, true);
+    throw new EtaSignerError(
+      "ETA CAdES-BES signer response did not contain a signature value",
+      502,
+      true,
+      "INVALID_SIGNATURE",
+      parsed
+    );
+  }
+
+  if (!isRealCadesBesSignature(sigValue)) {
+    log.warn("eta.signer.invalid_signature_refused");
+    throw new EtaSignerError(
+      "Refused invalid or mock signature from ETA signer bridge (expected Base64-encoded ASN.1 DER CMS CAdES-BES signature).",
+      422,
+      false,
+      "INVALID_SIGNATURE",
+      parsed
+    );
   }
 
   const signatureType = parsed.signatureType === "S" ? "S" : "I";
